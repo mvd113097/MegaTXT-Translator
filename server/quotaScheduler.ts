@@ -433,14 +433,13 @@ export class QuotaAwareKeyScheduler {
       );
     } else if (isTemporary) {
       p.total503Count++;
-      delayMs = Math.min(4000 * p.consecutiveErrors, 25000);
+      // Transient model overload shouldn't lock out the project key for long; model-level cooldown handles model switching
+      delayMs = 2000;
       p.status = "cooling_down";
       p.cooldownUntil = Date.now() + delayMs;
 
       console.warn(
-        `[Quota Scheduler] ${p.name} (${p.keyMask}) temporary server error (503/500). Cooldown: ${Math.round(
-          delayMs / 1000
-        )}s.`
+        `[Quota Scheduler] ${p.name} (${p.keyMask}) temporary server error (503/500). Short project cooldown: 2s.`
       );
     } else {
       // General error (e.g. invalid arguments or bad request)

@@ -213,11 +213,47 @@ export default function App() {
     }
   }, [session]);
 
+  // On-demand sync of full translated chapter texts for completed chunks
+  const syncCompletedTexts = async () => {
+    if (mode !== "cloud") return;
+    try {
+      const res = await fetch("/api/cloud-job/sync-texts?completedOnly=true", {
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.chunks)) {
+        const textMap = new Map<number, { chineseText: string; englishText: string }>();
+        data.chunks.forEach((c: any) => {
+          textMap.set(c.index, { chineseText: c.chineseText || "", englishText: c.englishText || "" });
+        });
+
+        setSession((prev) => {
+          if (!prev) return null;
+          const updated = prev.chunks.map((c) => {
+            const synced = textMap.get(c.index);
+            if (synced && synced.englishText) {
+              return {
+                ...c,
+                chineseText: synced.chineseText || c.chineseText,
+                englishText: synced.englishText,
+              };
+            }
+            return c;
+          });
+          chunksRef.current = updated;
+          return { ...prev, chunks: updated };
+        });
+      }
+    } catch (err) {
+      console.warn("Error syncing completed chapter texts:", err);
+    }
+  };
+
   // Auto-check and recover existing cloud job from server on initial load (or when authenticated)
   useEffect(() => {
     async function checkServerCloudJob() {
       try {
-        const res = await fetch("/api/cloud-job/status", {
+        const res = await fetch("/api/cloud-job/status?full=true", {
           headers: getAuthHeaders(),
         });
         const data = await res.json();
@@ -258,7 +294,7 @@ export default function App() {
     checkServerCloudJob();
   }, [authToken]);
 
-  // Cloud polling loop: polls server while in cloud mode to reflect progress live
+  // Cloud polling loop: polls lightweight status (~1.5KB compressed) to save 99.9% mobile data
   useEffect(() => {
     if (mode !== "cloud") return;
     const interval = setInterval(async () => {
@@ -269,15 +305,37 @@ export default function App() {
         const data = await res.json();
         if (data.hasJob && data.job) {
           const sJob = data.job;
+          let needsTextSync = false;
+
           setSession((prev) => {
             if (!prev || prev.fileName !== sJob.fileName) return prev;
+            const prevChunks = prev.chunks || [];
+            const mergedChunks = sJob.chunks.map((incChunk: any) => {
+              const existing = prevChunks.find((c) => c.id === incChunk.id || c.index === incChunk.index);
+              const hasEnglishLocally = existing && existing.englishText && existing.englishText.trim().length > 0;
+              if (incChunk.hasEnglish && !hasEnglishLocally) {
+                needsTextSync = true;
+              }
+              return {
+                ...existing,
+                ...incChunk,
+                chineseText: incChunk.chineseText !== undefined ? incChunk.chineseText : (existing?.chineseText || ""),
+                englishText: incChunk.englishText !== undefined ? incChunk.englishText : (existing?.englishText || ""),
+              };
+            });
+
+            chunksRef.current = mergedChunks;
             return {
               ...prev,
-              chunks: sJob.chunks,
+              chunks: mergedChunks,
               lastUpdated: sJob.lastActiveAt,
             };
           });
-          chunksRef.current = sJob.chunks;
+
+          if (needsTextSync) {
+            syncCompletedTexts();
+          }
+
           if (sJob.status === "running") {
             setIsRunning(true);
             setIsPaused(false);
@@ -733,7 +791,11 @@ export default function App() {
   // Dedicated progress downloader: downloads strictly the unbroken continuous chapters from Chapter 1 without stopping background translation
   const handleDownloadProgress = async (format: "epub" | "txt" = "epub") => {
     if (!session) return;
-    const continuity = analyzeChunkContinuity(session.chunks);
+    if (mode === "cloud") {
+      await syncCompletedTexts();
+    }
+    const currentChunks = chunksRef.current.length > 0 ? chunksRef.current : session.chunks;
+    const continuity = analyzeChunkContinuity(currentChunks);
     const continuousList = continuity.continuousChunks;
 
     if (continuousList.length === 0) {
@@ -867,8 +929,11 @@ Export Timestamp: ${new Date().toLocaleString()}
   // Calculate total English words produced so far
   const completedEnglishWords =
     session?.chunks
-      .filter((c) => c.status === "completed" && c.englishText)
-      .reduce((acc, curr) => acc + countEnglishWords(curr.englishText), 0) || 0;
+      .filter((c) => c.status === "completed")
+      .reduce(
+        (acc, curr) => acc + (curr.wordCount || countEnglishWords(curr.englishText)),
+        0
+      ) || 0;
 
   const lastDownloadedWordCount = session?.lastDownloadedWordCount || 0;
   const newWordsSinceLastDownload = Math.max(

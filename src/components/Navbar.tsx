@@ -61,21 +61,23 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action badges & Controls */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Owner Account Badge */}
+          {/* Owner Account Badge & Logout */}
           {userEmail && (
             <div
-              className="hidden sm:flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 text-xs text-emerald-800 dark:text-emerald-300"
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 text-xs text-emerald-800 dark:text-emerald-300"
               title={`Authorized owner session active for ${userEmail}`}
             >
               <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-              <span className="font-semibold max-w-[140px] truncate">{userEmail}</span>
+              <span className="font-semibold max-w-[80px] sm:max-w-[140px] truncate">{userEmail}</span>
               {onLogout && (
                 <button
+                  id="signout-btn"
                   onClick={onLogout}
-                  className="ml-1 text-emerald-700 dark:text-emerald-400 hover:text-emerald-900 dark:hover:text-emerald-200 p-0.5 rounded transition cursor-pointer"
-                  title="Log out and lock site"
+                  className="ml-1 flex items-center gap-1 text-emerald-700 dark:text-emerald-400 hover:text-emerald-900 dark:hover:text-emerald-200 p-0.5 rounded transition cursor-pointer"
+                  title="Sign out and lock site"
                 >
-                  <LogOut className="h-3 w-3" />
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span className="hidden lg:inline text-[10px] font-bold">Sign Out</span>
                 </button>
               )}
             </div>

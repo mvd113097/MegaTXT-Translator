@@ -25,6 +25,7 @@ export interface TextChunk {
   englishText: string;
   charCount: number;
   status: ChunkStatus;
+  attempts?: number;
   errorMessage?: string;
   durationMs?: number;
   edited?: boolean;

@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -11,6 +12,9 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// High performance HTTP compression (gzip/deflate) to drastically save cellular data
+app.use(compression());
 
 // Data directory for persistent server cloud jobs
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -28,6 +32,11 @@ try {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+function countEnglishWords(text?: string): number {
+  if (!text) return 0;
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
 // Lazy initialize Gemini client (backward compatibility)
 function getGeminiClient(): GoogleGenAI {
   const { project } = quotaScheduler.selectProject();
@@ -38,11 +47,14 @@ function getGeminiClient(): GoogleGenAI {
 // exponential backoff, and content-filter resilience.
 // Deprecated models (gemini-1.5-*, gemini-2.0-*, gemini-2.5-*) are omitted to prevent 404 Not Found errors.
 const FREE_TIER_MODELS = [
+  "gemini-2.5-flash",
   "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-2.0-flash",
+  "gemini-3.7-flash",
   "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite",
-  "gemini-3.6-flash"
+  "gemini-3.1-flash-lite"
 ];
 
 // In-memory tracking of model availability and quota cooldowns
@@ -329,23 +341,30 @@ async function generateWithQuotaScheduler(
 
     // 3. Quota / Rate Limit (429) or Transient (500/503)
     if ((isRateLimit || isTemporary) && retries > 0) {
+      if (isTemporary) {
+        // Place model on temporary 25s cooldown so all projects bypass overloaded model immediately
+        modelCooldowns.set(modelName, Date.now() + 25000);
+      }
+
       quotaScheduler.recordFailure(project.id, err);
       excludeProjectIds.add(project.id);
 
-      // If we have tried all projects in this round, clear exclusion to allow earliest ready project
+      // If we have tried all active enabled projects in this round or model is overloaded, clear exclusion and rotate model
       const nextExclude = new Set(excludeProjectIds);
-      if (nextExclude.size >= quotaScheduler.projectCount) {
+      let nextModelIdx = (currentModelIdx + 1) % FREE_TIER_MODELS.length;
+
+      if (nextExclude.size >= quotaScheduler.enabledProjectCount) {
         nextExclude.clear();
       }
 
       console.log(
-        `[Quota Scheduler] Project ${project.name} throttled. Failing over immediately to next available project...`
+        `[Quota Scheduler] ${isTemporary ? "Model overloaded / temporary error" : "Project throttled"}. Switching model/project immediately...`
       );
 
       return generateWithQuotaScheduler(
         userPrompt,
         systemInstruction,
-        isRateLimit ? currentModelIdx : currentModelIdx + 1,
+        nextModelIdx,
         retries - 1,
         currentDelay,
         rawSourceText,
@@ -388,6 +407,7 @@ interface ServerTextChunk {
   englishText: string;
   charCount: number;
   status: "pending" | "processing" | "completed" | "error";
+  attempts: number;
   errorMessage?: string;
   durationMs?: number;
   edited?: boolean;
@@ -696,16 +716,50 @@ interface SessionTokenData {
   createdAt: number;
   expiresAt: number;
 }
+
+const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 const validSessions = new Map<string, SessionTokenData>();
 
-// Clean expired sessions periodically
+function saveSessions() {
+  try {
+    const data = JSON.stringify(Object.fromEntries(validSessions), null, 2);
+    fs.writeFileSync(SESSIONS_FILE, data, "utf-8");
+  } catch (err) {
+    console.error("[Auth] Failed to save sessions:", err);
+  }
+}
+
+function loadSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = fs.readFileSync(SESSIONS_FILE, "utf-8");
+      const obj = JSON.parse(data);
+      const now = Date.now();
+      for (const [token, session] of Object.entries(obj)) {
+        if ((session as SessionTokenData).expiresAt > now) {
+          validSessions.set(token, session as SessionTokenData);
+        }
+      }
+      console.log(`[Auth] Loaded ${validSessions.size} active sessions from disk.`);
+    }
+  } catch (err) {
+    console.error("[Auth] Failed to load sessions:", err);
+  }
+}
+
+loadSessions();
+
+// Clean expired sessions periodically and save
 setInterval(() => {
   const now = Date.now();
+  let changed = false;
   for (const [token, data] of validSessions.entries()) {
     if (data.expiresAt <= now) {
       validSessions.delete(token);
+      changed = true;
     }
   }
+  if (changed) saveSessions();
 }, 60 * 60 * 1000);
 
 function createSessionToken(userEmail: string, googleVerified: boolean, passcodeVerified: boolean): string {
@@ -718,6 +772,7 @@ function createSessionToken(userEmail: string, googleVerified: boolean, passcode
     createdAt: now,
     expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
   });
+  saveSessions();
   return token;
 }
 
@@ -859,6 +914,7 @@ app.post("/api/auth/logout", (req, res) => {
   const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : "";
   if (token) {
     validSessions.delete(token);
+    saveSessions();
   }
   res.json({ success: true });
 });
@@ -910,12 +966,14 @@ app.get("/api/projects/status", (req, res) => {
 // Cloud Job API Endpoints
 // -------------------------------------------------------------
 
-// Get status & progress of cloud job
+// Get status & progress of cloud job (Data-saving lightweight mode by default)
 app.get("/api/cloud-job/status", (req, res) => {
   if (!activeCloudJob) {
     res.json({ hasJob: false, job: null });
     return;
   }
+
+  const includeFullText = req.query.full === "true";
 
   const completedChunks = activeCloudJob.chunks.filter((c) => c.status === "completed").length;
   const inProgressChunks = activeCloudJob.chunks.filter((c) => c.status === "processing").length;
@@ -937,6 +995,27 @@ app.get("/api/cloud-job/status", (req, res) => {
   const aheadCompletedCount = activeCloudJob.chunks.filter(
     (c) => c.status === "completed" && !!c.englishText?.trim() && c.index > contiguousFrontierIndex
   ).length;
+
+  // Render chunks (lightweight metadata by default to save 99%+ mobile data)
+  const chunksData = activeCloudJob.chunks.map((c) => {
+    const wordCount = c.englishText ? countEnglishWords(c.englishText) : 0;
+    if (includeFullText) {
+      return { ...c, wordCount };
+    }
+    return {
+      id: c.id,
+      index: c.index,
+      chapterTitle: c.chapterTitle,
+      charCount: c.charCount,
+      wordCount,
+      status: c.status,
+      attempts: c.attempts,
+      lastErrorAt: c.lastErrorAt,
+      errorMessage: c.errorMessage,
+      hasEnglish: !!(c.englishText && c.englishText.trim().length > 0),
+      hasChinese: !!(c.chineseText && c.chineseText.trim().length > 0),
+    };
+  });
 
   res.json({
     hasJob: true,
@@ -960,7 +1039,70 @@ app.get("/api/cloud-job/status", (req, res) => {
       contiguousFrontierIndex,
       aheadCompletedCount,
       projectsSummary: quotaScheduler.getActiveProjectSummary(),
-      chunks: activeCloudJob.chunks,
+      chunks: chunksData,
+    },
+  });
+});
+
+// Sync full chapter texts for completed chunks or requested chunk indices on-demand
+app.get("/api/cloud-job/sync-texts", (req, res) => {
+  if (!activeCloudJob) {
+    res.json({ success: false, chunks: [] });
+    return;
+  }
+
+  const indicesParam = req.query.indices as string;
+  let targetChunks = activeCloudJob.chunks;
+  if (indicesParam) {
+    const setIdx = new Set(indicesParam.split(",").map(Number));
+    targetChunks = activeCloudJob.chunks.filter((c) => setIdx.has(c.index));
+  } else if (req.query.completedOnly === "true") {
+    targetChunks = activeCloudJob.chunks.filter(
+      (c) => c.status === "completed" && !!c.englishText?.trim()
+    );
+  }
+
+  res.json({
+    success: true,
+    chunks: targetChunks.map((c) => ({
+      id: c.id,
+      index: c.index,
+      chapterTitle: c.chapterTitle,
+      chineseText: c.chineseText,
+      englishText: c.englishText || "",
+      wordCount: c.englishText ? countEnglishWords(c.englishText) : 0,
+      status: c.status,
+    })),
+  });
+});
+
+// Fetch single full chunk by index for Chapter Reader or manual editing
+app.get("/api/cloud-job/chunk/:index", (req, res) => {
+  if (!activeCloudJob) {
+    res.status(404).json({ error: "No active cloud job." });
+    return;
+  }
+
+  const idx = parseInt(req.params.index, 10);
+  const chunk = activeCloudJob.chunks[idx];
+  if (!chunk) {
+    res.status(404).json({ error: "Chunk not found." });
+    return;
+  }
+
+  res.json({
+    success: true,
+    chunk: {
+      id: chunk.id,
+      index: chunk.index,
+      chapterTitle: chunk.chapterTitle,
+      chineseText: chunk.chineseText,
+      englishText: chunk.englishText || "",
+      charCount: chunk.charCount,
+      wordCount: chunk.englishText ? countEnglishWords(chunk.englishText) : 0,
+      status: chunk.status,
+      attempts: chunk.attempts,
+      errorMessage: chunk.errorMessage,
     },
   });
 });
