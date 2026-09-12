@@ -61,12 +61,16 @@ export function extractRetryDelayMs(err: any): number | null {
     }
   }
 
-  // 2. Regex fallback for "retry in 13.51s" or "retry in 24s"
-  const match = errStr.match(/retry in ([0-9.]+)\s*s/);
+  // 2. Regex fallback for "retry in 13.51s", "retry after 24s", "try again in 10s", etc.
+  const match =
+    errStr.match(/retry in ([0-9.]+)\s*s/) ||
+    errStr.match(/retry after ([0-9.]+)\s*s/) ||
+    errStr.match(/try again in ([0-9.]+)\s*s/) ||
+    errStr.match(/wait ([0-9.]+)\s*s/);
   if (match && match[1]) {
     const parsed = parseFloat(match[1]);
     if (!isNaN(parsed) && parsed > 0) {
-      return Math.ceil(parsed * 1000) + 1500;
+      return Math.ceil(parsed * 1000) + 1200;
     }
   }
 
@@ -363,19 +367,30 @@ export class QuotaAwareKeyScheduler {
     const isAuthOrInvalidKey =
       error?.status === 401 ||
       error?.status === 403 ||
+      error?.statusCode === 401 ||
+      error?.statusCode === 403 ||
       errStr.includes("401") ||
       errStr.includes("403") ||
       errStr.includes("unauthenticated") ||
       errStr.includes("permission_denied") ||
       errStr.includes("invalid authentication credentials") ||
       errStr.includes("access_token_type_unsupported") ||
-      errStr.includes("api key not valid");
+      errStr.includes("api key not valid") ||
+      errStr.includes("api_key_invalid");
 
     const isRateLimit =
       error?.status === 429 ||
+      error?.statusCode === 429 ||
+      error?.code === 429 ||
+      error?.status === "RESOURCE_EXHAUSTED" ||
       errStr.includes("429") ||
       errStr.includes("resource_exhausted") ||
-      errStr.includes("quota exceeded") ||
+      errStr.includes("quota") ||
+      errStr.includes("rate limit") ||
+      errStr.includes("rate-limit") ||
+      errStr.includes("rate_limit") ||
+      errStr.includes("rate-limits") ||
+      errStr.includes("exceeded your current quota") ||
       errStr.includes("too many requests");
 
     const isTemporary =

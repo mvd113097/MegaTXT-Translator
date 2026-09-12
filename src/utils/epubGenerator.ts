@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { TextChunk } from "../types";
 import { downloadFile } from "./fileDownloader";
+import { getContiguousCompletedChunks } from "./chunker";
 
 function escapeXml(unsafe: string): string {
   return unsafe
@@ -16,10 +17,12 @@ export interface EpubOptions {
   author?: string;
   language?: string;
   isBilingual?: boolean;
+  allowGaps?: boolean; // Default false. When false, strictly enforces contiguous chapters from index 0
 }
 
 /**
- * Builds a valid EPUB 3 / EPUB 2 compatible ebook archive from translated chunks
+ * Builds a valid EPUB 3 / EPUB 2 compatible ebook archive from translated chunks.
+ * Enforces the Never-Skip contiguous guarantee: only unbroken sequences starting from Chunk 1 are exported.
  */
 export async function generateEpubBlob(
   chunks: TextChunk[],
@@ -31,12 +34,15 @@ export async function generateEpubBlob(
   const language = options.language || "en";
   const isBilingual = !!options.isBilingual;
 
-  const validChunks = chunks.filter(
-    (c) => c.englishText && c.englishText.trim().length > 0
-  );
+  // Enforce contiguous completion guarantee unless explicitly overridden
+  const validChunks = options.allowGaps
+    ? chunks.filter((c) => c.englishText && c.englishText.trim().length > 0)
+    : getContiguousCompletedChunks(chunks);
 
   if (validChunks.length === 0) {
-    throw new Error("No translated content available to build EPUB.");
+    throw new Error(
+      "No contiguous translated content available to build EPUB (Chapter 1 must be translated first)."
+    );
   }
 
   // 1. mimetype (MUST be first file, uncompressed STORE)

@@ -205,6 +205,7 @@ async function generateWithQuotaScheduler(
     const errStr = String(err.message || "").toLowerCase();
     const isNotFoundOrDeprecated =
       err.status === 404 ||
+      err.statusCode === 404 ||
       errStr.includes("not_found") ||
       errStr.includes("no longer available") ||
       errStr.includes("deprecated");
@@ -212,24 +213,37 @@ async function generateWithQuotaScheduler(
     const isAuthOrInvalidKey =
       err.status === 401 ||
       err.status === 403 ||
+      err.statusCode === 401 ||
+      err.statusCode === 403 ||
       errStr.includes("401") ||
       errStr.includes("403") ||
       errStr.includes("unauthenticated") ||
       errStr.includes("permission_denied") ||
       errStr.includes("invalid authentication credentials") ||
       errStr.includes("access_token_type_unsupported") ||
-      errStr.includes("api key not valid");
+      errStr.includes("api key not valid") ||
+      errStr.includes("api_key_invalid");
 
     const isRateLimit =
       err.status === 429 ||
+      err.statusCode === 429 ||
+      err.code === 429 ||
+      err.status === "RESOURCE_EXHAUSTED" ||
       errStr.includes("429") ||
       errStr.includes("resource_exhausted") ||
-      errStr.includes("quota exceeded") ||
+      errStr.includes("quota") ||
+      errStr.includes("rate limit") ||
+      errStr.includes("rate-limit") ||
+      errStr.includes("rate_limit") ||
+      errStr.includes("rate-limits") ||
+      errStr.includes("exceeded your current quota") ||
       errStr.includes("too many requests");
 
     const isTemporary =
       err.status === 503 ||
       err.status === 500 ||
+      err.statusCode === 503 ||
+      err.statusCode === 500 ||
       errStr.includes("503") ||
       errStr.includes("500") ||
       errStr.includes("unavailable") ||
@@ -441,34 +455,56 @@ function saveCloudJobToDisk() {
   }
 }
 
-// Background Worker Loop on the Server - Strict Sequential "Never-Skip" Engine
+// Background Worker Loop on the Server - Parallel Translation with Sequential Export Frontier
+const inFlightChunkIds = new Set<string>();
+
 async function startCloudWorkerLoop() {
   if (isCloudWorkerRunning) return;
   isCloudWorkerRunning = true;
 
-  console.log(`[Cloud Background Worker] Started strict sequential translation loop for: "${activeCloudJob?.fileName}"`);
+  const jobFileName = activeCloudJob?.fileName || "job";
+  const numWorkers = Math.max(1, Math.min(activeCloudJob?.concurrency || 4, quotaScheduler.enabledProjectCount || 4, 5));
+  console.log(
+    `[Cloud Background Worker] Started parallel translation engine (${numWorkers} concurrent workers) for: "${jobFileName}"`
+  );
 
-  try {
+  const runWorkerTask = async (workerId: number) => {
+    let workerAttemptStreak = 0;
+
     while (activeCloudJob && activeCloudJob.status === "running") {
-      // STRICT ORDER: Find the lowest-index chunk that is not completed or has empty translation
+      // Find the next available non-completed chunk not already in-flight
       const pendingChunk = activeCloudJob.chunks.find(
-        (c) => c.status !== "completed" || !c.englishText || !c.englishText.trim()
+        (c) =>
+          (c.status !== "completed" || !c.englishText || !c.englishText.trim()) &&
+          !inFlightChunkIds.has(c.id)
       );
 
       if (!pendingChunk) {
-        console.log(`[Cloud Background Worker] All chapters finished! Marking job as completed.`);
-        activeCloudJob.status = "completed";
-        activeCloudJob.lastActiveAt = Date.now();
-        saveCloudJobToDisk();
-        break;
+        // If no pending chunks and no other workers running, we are fully done
+        if (inFlightChunkIds.size === 0) {
+          const allCompleted = activeCloudJob.chunks.every(
+            (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+          );
+          if (allCompleted) {
+            console.log(`[Cloud Background Worker] All chapters finished! Marking job as completed.`);
+            activeCloudJob.status = "completed";
+            activeCloudJob.lastActiveAt = Date.now();
+            saveCloudJobToDisk();
+            break;
+          }
+        }
+        // Wait a bit before checking for retries or new items
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
       }
 
-      // Mark chunk as processing
+      // Claim chunk exclusively for this worker
+      inFlightChunkIds.add(pendingChunk.id);
       pendingChunk.status = "processing";
       activeCloudJob.lastActiveAt = Date.now();
       saveCloudJobToDisk();
 
-      // Find preceding context
+      // Find preceding context for narrative continuity
       let prevContext = "";
       const prevChunk = activeCloudJob.chunks[pendingChunk.index - 1];
       if (prevChunk && prevChunk.englishText) {
@@ -482,8 +518,6 @@ async function startCloudWorkerLoop() {
       while (!success && activeCloudJob && activeCloudJob.status === "running") {
         attemptCount++;
         try {
-          const ai = getGeminiClient();
-
           // Format style
           let styleGuidance = "";
           switch (activeCloudJob.style) {
@@ -573,34 +607,57 @@ Translate the above Chinese text directly into English:`;
           pendingChunk.durationMs = Date.now() - startChunkTime;
           pendingChunk.errorMessage = undefined;
           success = true;
+          workerAttemptStreak = 0;
 
-          console.log(`[Cloud Background Worker] Successfully completed chunk ${pendingChunk.index + 1}/${activeCloudJob.chunks.length} ("${pendingChunk.chapterTitle || 'Part ' + (pendingChunk.index + 1)}") using ${projectUsed} (${modelUsed}) in ${pendingChunk.durationMs}ms`);
+          console.log(
+            `[Cloud Worker #${workerId}] Successfully completed chunk ${pendingChunk.index + 1}/${activeCloudJob.chunks.length} ("${
+              pendingChunk.chapterTitle || "Part " + (pendingChunk.index + 1)
+            }") using ${projectUsed} (${modelUsed}) in ${pendingChunk.durationMs}ms`
+          );
         } catch (chunkErr: any) {
           const cleanErr = formatCleanErrorMessage(chunkErr);
-          console.error(`[Cloud Background Worker] Notice on chunk ${pendingChunk.index + 1} (Attempt #${attemptCount}):`, cleanErr);
+          console.error(
+            `[Cloud Worker #${workerId}] Notice on chunk ${pendingChunk.index + 1} (Attempt #${attemptCount}):`,
+            cleanErr
+          );
           pendingChunk.status = "error";
           pendingChunk.errorMessage = `Attempt ${attemptCount}: ${cleanErr}. Auto-retrying...`;
           pendingChunk.durationMs = Date.now() - startChunkTime;
           activeCloudJob.lastActiveAt = Date.now();
           saveCloudJobToDisk();
 
-          // Exponential backoff to protect rate limits and allow quota reset
-          const waitCooldown = Math.min(attemptCount * 3000, 15000);
-          console.log(`[Cloud Background Worker] Cooldown ${waitCooldown / 1000}s before retrying chunk ${pendingChunk.index + 1}...`);
+          // Yield if stopped/paused
+          if (!activeCloudJob || activeCloudJob.status !== "running") {
+            break;
+          }
+
+          // Backoff cooldown before retrying
+          const waitCooldown = Math.min(attemptCount * 2500, 12000);
           await new Promise((r) => setTimeout(r, waitCooldown));
         }
       }
 
-      activeCloudJob.lastActiveAt = Date.now();
-      saveCloudJobToDisk();
+      inFlightChunkIds.delete(pendingChunk.id);
+      if (activeCloudJob) {
+        activeCloudJob.lastActiveAt = Date.now();
+        saveCloudJobToDisk();
+      }
 
-      // Pacing interval (2500ms) between consecutive chapters to stay comfortably under free-tier RPM limits
-      await new Promise((r) => setTimeout(r, 2500));
+      // Small pacing interval between worker tasks to stay comfortable with RPM
+      await new Promise((r) => setTimeout(r, 1200));
     }
+  };
+
+  try {
+    const workerPromises = Array.from({ length: numWorkers }, (_, idx) =>
+      runWorkerTask(idx + 1)
+    );
+    await Promise.all(workerPromises);
   } catch (workerErr) {
-    console.error("[Cloud Background Worker] Loop error:", workerErr);
+    console.error("[Cloud Background Worker] Pool error:", workerErr);
   } finally {
     isCloudWorkerRunning = false;
+    inFlightChunkIds.clear();
     saveCloudJobToDisk();
   }
 }
@@ -848,6 +905,23 @@ app.get("/api/cloud-job/status", (req, res) => {
   const inProgressChunks = activeCloudJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = activeCloudJob.chunks.filter((c) => c.status === "error").length;
 
+  // Calculate contiguous completion frontier from index 0
+  let contiguousFrontierIndex = -1;
+  let contiguousCount = 0;
+  for (let i = 0; i < activeCloudJob.chunks.length; i++) {
+    const c = activeCloudJob.chunks[i];
+    if (c && c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+      contiguousFrontierIndex = i;
+      contiguousCount++;
+    } else {
+      break;
+    }
+  }
+
+  const aheadCompletedCount = activeCloudJob.chunks.filter(
+    (c) => c.status === "completed" && !!c.englishText?.trim() && c.index > contiguousFrontierIndex
+  ).length;
+
   res.json({
     hasJob: true,
     job: {
@@ -866,6 +940,9 @@ app.get("/api/cloud-job/status", (req, res) => {
       completedChunks,
       inProgressChunks,
       errorChunks,
+      contiguousCount,
+      contiguousFrontierIndex,
+      aheadCompletedCount,
       projectsSummary: quotaScheduler.getActiveProjectSummary(),
       chunks: activeCloudJob.chunks,
     },

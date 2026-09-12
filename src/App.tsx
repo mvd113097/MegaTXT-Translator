@@ -25,6 +25,8 @@ import {
   chunkChineseText,
   countChineseCharacters,
   countEnglishWords,
+  getContiguousCompletedChunks,
+  analyzeChunkContinuity,
 } from "./utils/chunker";
 import { SAMPLE_GLOSSARY } from "./data/sampleNovel";
 import { downloadEpub } from "./utils/epubGenerator";
@@ -451,55 +453,73 @@ export default function App() {
       setStartTime(Date.now());
     }
 
-    while (!stopRequestedRef.current && !pauseRequestedRef.current) {
-      // Find the lowest-index non-completed chunk (strictly sequential)
-      const chunkToProcess = chunksRef.current.find((c) => c.status !== "completed");
+    const inFlightIds = new Set<string>();
+    const numWorkers = 2; // Bounded concurrent browser tasks
 
-      if (!chunkToProcess) break;
-
-      updateChunkStatus(chunkToProcess.id, "processing");
-
-      let prevContext = "";
-      const prevChunk = chunksRef.current[chunkToProcess.index - 1];
-      if (prevChunk && prevChunk.englishText) {
-        prevContext = prevChunk.englishText.slice(-200);
-      }
-
-      const startChunkTime = Date.now();
-      let success = false;
-      let attempt = 0;
-
-      while (!success && !stopRequestedRef.current && !pauseRequestedRef.current) {
-        attempt++;
-        const result = await translateSingleChunk(
-          chunkToProcess,
-          glossary,
-          style,
-          customInstructions,
-          prevContext
+    const runWorker = async () => {
+      while (!stopRequestedRef.current && !pauseRequestedRef.current) {
+        // Find next pending chunk not already being translated
+        const chunkToProcess = chunksRef.current.find(
+          (c) =>
+            (c.status !== "completed" || !c.englishText || !c.englishText.trim()) &&
+            !inFlightIds.has(c.id)
         );
 
-        const duration = Date.now() - startChunkTime;
-
-        if (result.success && result.englishText) {
-          updateChunkSuccess(chunkToProcess.id, result.englishText, duration);
-          setCharsTranslatedInRun((prev) => prev + chunkToProcess.charCount);
-          success = true;
-        } else {
-          updateChunkError(
-            chunkToProcess.id,
-            `Attempt ${attempt}: ${result.error || "Translation failed"}. Retrying strictly...`,
-            duration
-          );
-          // Wait exponential backoff cooldown before retrying this specific chunk
-          const cooldownMs = Math.min(attempt * 3000, 15000);
-          await new Promise((r) => setTimeout(r, cooldownMs));
+        if (!chunkToProcess) {
+          if (inFlightIds.size === 0) {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 400));
+          continue;
         }
-      }
 
-      // Pacing pause between chunks to protect free-tier RPM limits
-      await new Promise((r) => setTimeout(r, 2500));
-    }
+        inFlightIds.add(chunkToProcess.id);
+        updateChunkStatus(chunkToProcess.id, "processing");
+
+        let prevContext = "";
+        const prevChunk = chunksRef.current[chunkToProcess.index - 1];
+        if (prevChunk && prevChunk.englishText) {
+          prevContext = prevChunk.englishText.slice(-200);
+        }
+
+        const startChunkTime = Date.now();
+        let success = false;
+        let attempt = 0;
+
+        while (!success && !stopRequestedRef.current && !pauseRequestedRef.current) {
+          attempt++;
+          const result = await translateSingleChunk(
+            chunkToProcess,
+            glossary,
+            style,
+            customInstructions,
+            prevContext
+          );
+
+          const duration = Date.now() - startChunkTime;
+
+          if (result.success && result.englishText) {
+            updateChunkSuccess(chunkToProcess.id, result.englishText, duration);
+            setCharsTranslatedInRun((prev) => prev + chunkToProcess.charCount);
+            success = true;
+          } else {
+            updateChunkError(
+              chunkToProcess.id,
+              `Attempt ${attempt}: ${result.error || "Translation failed"}. Retrying...`,
+              duration
+            );
+            if (stopRequestedRef.current || pauseRequestedRef.current) break;
+            const cooldownMs = Math.min(attempt * 2500, 10000);
+            await new Promise((r) => setTimeout(r, cooldownMs));
+          }
+        }
+
+        inFlightIds.delete(chunkToProcess.id);
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    };
+
+    await Promise.all(Array.from({ length: numWorkers }, () => runWorker()));
 
     setIsRunning(false);
     if (pauseRequestedRef.current) {
@@ -710,23 +730,23 @@ export default function App() {
     }
   };
 
-  // Dedicated progress downloader: downloads all completed English words so far as EPUB (or TXT) WITHOUT stopping background translation
+  // Dedicated progress downloader: downloads strictly the unbroken continuous chapters from Chapter 1 without stopping background translation
   const handleDownloadProgress = async (format: "epub" | "txt" = "epub") => {
     if (!session) return;
-    const completedChunksList = session.chunks.filter(
-      (c) => c.status === "completed" && c.englishText && c.englishText.trim()
-    );
+    const continuity = analyzeChunkContinuity(session.chunks);
+    const continuousList = continuity.continuousChunks;
 
-    if (completedChunksList.length === 0) {
+    if (continuousList.length === 0) {
       setToastData({
-        message: "No chapters have completed translation yet. Click 'Start Cloud Translation' or 'Translate Next Chunk' first!",
+        message:
+          "Chapter 1 has not completed translation yet. The Never-Skip Engine guarantees all downloaded books start from Chapter 1 with zero gaps. Please wait for Chapter 1 to finish!",
         type: "warning",
       });
-      setTimeout(() => setToastData(null), 5000);
+      setTimeout(() => setToastData(null), 6000);
       return;
     }
 
-    const wordsCount = completedChunksList.reduce(
+    const wordsCount = continuousList.reduce(
       (acc, c) => acc + countEnglishWords(c.englishText),
       0
     );
@@ -735,7 +755,7 @@ export default function App() {
 
     try {
       if (format === "epub") {
-        const res = await downloadEpub(completedChunksList, session.fileName, {
+        const res = await downloadEpub(continuousList, session.fileName, {
           bookTitle: baseName.replace(/_/g, " "),
         });
 
@@ -750,8 +770,13 @@ export default function App() {
             : null
         );
 
+        const aheadNotice =
+          continuity.aheadCompletedCount > 0
+            ? ` (${continuity.aheadCompletedCount} upcoming chapter(s) ready ahead)`
+            : "";
+
         setToastData({
-          message: `EPUB eBook "${res.filename}" (${wordsCount.toLocaleString()} words, ${completedChunksList.length} chapters) prepared! Background translation continues uninterrupted.`,
+          message: `EPUB eBook "${res.filename}" (Chapters 1–${continuousList.length}, ${wordsCount.toLocaleString()} words)${aheadNotice} prepared! Background translation continues uninterrupted.`,
           downloadUrl: res.downloadUrl,
           filename: res.filename,
           type: "success",
@@ -760,22 +785,22 @@ export default function App() {
         return;
       }
 
-      // Plain TXT export
-      const startCh = completedChunksList[0].chapterTitle || `Part 1`;
+      // Plain TXT export strictly contiguous
+      const startCh = continuousList[0].chapterTitle || `Part 1`;
       const lastCh =
-        completedChunksList[completedChunksList.length - 1].chapterTitle ||
-        `Part ${completedChunksList.length}`;
+        continuousList[continuousList.length - 1].chapterTitle ||
+        `Part ${continuousList.length}`;
 
       const header = `================================================================================
 TRANSLATION PROGRESS SNAPSHOT: ${session.fileName}
-Total English Words Translated: ${wordsCount.toLocaleString()} words
-Completed Chunks: ${completedChunksList.length} of ${session.chunks.length} total
+Total English Words Translated (Continuous Sequence): ${wordsCount.toLocaleString()} words
+Completed Frontier: Chapters 1 through ${continuousList.length} of ${session.chunks.length} total
 Coverage: ${startCh} → ${lastCh}
 Background Translation Status: ACTIVE & RUNNING UNINTERRUPTED
 Export Timestamp: ${new Date().toLocaleString()}
 ================================================================================\n\n`;
 
-      const body = completedChunksList
+      const body = continuousList
         .map((c) => {
           const title = c.chapterTitle
             ? `${c.chapterTitle}\n\n`
@@ -789,7 +814,7 @@ Export Timestamp: ${new Date().toLocaleString()}
         wordsCount >= 1000
           ? `${(wordsCount / 1000).toFixed(1)}k_words`
           : `${wordsCount}_words`;
-      const downloadName = `${baseName}_progress_${wordSuffix}.txt`;
+      const downloadName = `${baseName}_continuous_ch1_to_${continuousList.length}_${wordSuffix}.txt`;
 
       const res = await downloadFile(fullContent, downloadName, "text/plain;charset=utf-8");
 
@@ -803,8 +828,13 @@ Export Timestamp: ${new Date().toLocaleString()}
           : null
       );
 
+      const aheadNotice =
+        continuity.aheadCompletedCount > 0
+          ? ` (${continuity.aheadCompletedCount} upcoming chapter(s) ready ahead)`
+          : "";
+
       setToastData({
-        message: `TXT progress snapshot "${downloadName}" (${wordsCount.toLocaleString()} words) prepared! Background translation continues uninterrupted.`,
+        message: `TXT continuous snapshot "${downloadName}" (Chapters 1–${continuousList.length}, ${wordsCount.toLocaleString()} words)${aheadNotice} prepared! Background translation continues uninterrupted.`,
         downloadUrl: res.downloadUrl,
         filename: downloadName,
         type: "success",

@@ -279,6 +279,25 @@ export interface ContinuityReport {
   highestCompletedIndex: number;
   continuousWordCount: number;
   totalCompletedWordCount: number;
+  contiguousFrontierIndex: number; // 0-indexed highest contiguous completed index (-1 if none)
+  aheadCompletedCount: number; // Chunks completed beyond the contiguous frontier
+}
+
+/**
+ * Returns strictly the contiguous sequence of completed chunks starting from chunk 1 (index 0).
+ * If chunk 4 is incomplete, returns only chunks 1..3 regardless of whether 5 and 6 are completed.
+ */
+export function getContiguousCompletedChunks(chunks: TextChunk[]): TextChunk[] {
+  const result: TextChunk[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (c && c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+      result.push(c);
+    } else {
+      break; // Stop strictly at the first gap
+    }
+  }
+  return result;
 }
 
 /**
@@ -286,18 +305,8 @@ export interface ContinuityReport {
  * or if parallel processing caused chapters ahead to finish while middle chapters are still loading.
  */
 export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
-  const continuousChunks: TextChunk[] = [];
-  let broken = false;
-
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    const isCompleted = c.status === "completed" && !!c.englishText?.trim();
-    if (!broken && isCompleted) {
-      continuousChunks.push(c);
-    } else {
-      broken = true;
-    }
-  }
+  const continuousChunks = getContiguousCompletedChunks(chunks);
+  const contiguousFrontierIndex = continuousChunks.length > 0 ? continuousChunks.length - 1 : -1;
 
   const allCompletedChunks = chunks.filter(
     (c) => c.status === "completed" && !!c.englishText?.trim()
@@ -312,6 +321,8 @@ export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
       highestCompletedIndex: -1,
       continuousWordCount: 0,
       totalCompletedWordCount: 0,
+      contiguousFrontierIndex: -1,
+      aheadCompletedCount: 0,
     };
   }
 
@@ -333,6 +344,10 @@ export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
     0
   );
 
+  const aheadCompletedCount = allCompletedChunks.filter(
+    (c) => c.index > contiguousFrontierIndex
+  ).length;
+
   return {
     hasGaps: missingChunks.length > 0,
     continuousChunks,
@@ -341,5 +356,7 @@ export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
     highestCompletedIndex,
     continuousWordCount,
     totalCompletedWordCount,
+    contiguousFrontierIndex,
+    aheadCompletedCount,
   };
 }

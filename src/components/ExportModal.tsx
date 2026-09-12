@@ -13,9 +13,11 @@ import {
   AlertCircle,
   Eye,
   CheckCircle2,
+  ShieldCheck,
+  Sparkles,
 } from "lucide-react";
 import { TextChunk } from "../types";
-import { countEnglishWords } from "../utils/chunker";
+import { countEnglishWords, analyzeChunkContinuity, getContiguousCompletedChunks } from "../utils/chunker";
 import { downloadEpub } from "../utils/epubGenerator";
 import { downloadFile } from "../utils/fileDownloader";
 
@@ -52,17 +54,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   if (!isOpen) return null;
 
-  const translatedChunks = chunks.filter(
-    (c) => c.englishText && c.englishText.trim()
-  );
-  const totalEnglishWords = translatedChunks.reduce(
+  const continuity = analyzeChunkContinuity(chunks);
+  const contiguousChunks = continuity.continuousChunks;
+  const totalEnglishWords = contiguousChunks.reduce(
     (acc, c) => acc + countEnglishWords(c.englishText),
     0
   );
   const baseName = fileName.replace(/\.[^/.]+$/, "") || "translated_novel";
-  const hasTranslations = translatedChunks.length > 0;
+  const hasContiguousTranslations = contiguousChunks.length > 0;
 
-  // Generate output string based on format (for TXT, MD, Chinese, and clipboard)
+  // Generate output string based on format (strictly contiguous from Chunk 1)
   const generateExportContent = (): string => {
     if (exportFormat === "chinese_txt") {
       return chunks
@@ -74,7 +75,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
 
     if (exportFormat === "english_txt" || exportFormat === "epub") {
-      return translatedChunks
+      return contiguousChunks
         .map((c) => {
           const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";
           return `${header}${c.englishText.trim()}`;
@@ -83,7 +84,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
 
     if (exportFormat === "bilingual_txt" || exportFormat === "bilingual_epub") {
-      return translatedChunks
+      return contiguousChunks
         .map((c) => {
           const header = c.chapterTitle
             ? `====================\n${c.chapterTitle}\n====================\n\n`
@@ -94,7 +95,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
 
     if (exportFormat === "markdown") {
-      return translatedChunks
+      return contiguousChunks
         .map((c) => {
           const title = c.chapterTitle
             ? `# ${c.chapterTitle}\n\n`
@@ -111,10 +112,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setErrorMessage(null);
     setDownloadSuccess(null);
 
-    // If requesting English/bilingual format but nothing translated yet
-    if (exportFormat !== "chinese_txt" && translatedChunks.length === 0) {
+    // If requesting English/bilingual format but nothing contiguous translated yet
+    if (exportFormat !== "chinese_txt" && contiguousChunks.length === 0) {
       setErrorMessage(
-        "No translated chapters ready yet. Please close this dialog and click 'Translate All Chunks' first to generate English translations, or switch format to 'Original Chinese TXT'."
+        "Chapter 1 has not finished translating yet. The Never-Skip Engine guarantees all books start from Chapter 1 without missing gaps. Please wait for Chapter 1 to finish, or switch format to 'Original Chinese TXT'."
       );
       return;
     }
@@ -123,7 +124,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     if (exportFormat === "epub" || exportFormat === "bilingual_epub") {
       try {
         setIsExporting(true);
-        const res = await downloadEpub(translatedChunks, fileName, {
+        const res = await downloadEpub(contiguousChunks, fileName, {
           bookTitle: baseName.replace(/_/g, " "),
           isBilingual: exportFormat === "bilingual_epub",
         });
@@ -177,7 +178,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const handleCopyAll = () => {
     const content = generateExportContent();
     if (!content) {
-      setErrorMessage("Nothing to copy. Translate some chunks first!");
+      setErrorMessage("Nothing to copy. Chapter 1 must be translated first!");
       return;
     }
     navigator.clipboard.writeText(content);
@@ -199,7 +200,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 Export Book & Documents
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {translatedChunks.length} of {chunks.length} chunks translated (
+                {contiguousChunks.length} of {chunks.length} continuous chapters ready (
                 {totalEnglishWords.toLocaleString()} English words)
               </p>
             </div>
@@ -214,14 +215,27 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         {/* Scrollable Body */}
         <div className="p-6 space-y-4 overflow-y-auto">
+          {/* Never-Skip Contiguous Guarantee Status */}
+          {continuity.hasGaps && (
+            <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 p-3.5 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5">
+              <ShieldCheck className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+              <div className="leading-relaxed">
+                <strong className="font-semibold">Never-Skip Contiguous Export Active:</strong>
+                <p className="mt-0.5 text-amber-800 dark:text-amber-300">
+                  Exporting <strong>Chapters 1 to {contiguousChunks.length}</strong>. Chapter #{continuity.missingChunks.map((c) => c.index + 1).join(", ")} is currently in-progress. {continuity.aheadCompletedCount > 0 && `${continuity.aheadCompletedCount} chapter(s) translated ahead will seamlessly join the export once the gap finishes.`}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Status / Notice if no translated chunks */}
-          {!hasTranslations && (
+          {!hasContiguousTranslations && (
             <div className="rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/40 p-3.5 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2.5">
               <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
               <div className="leading-relaxed">
-                <strong>No translated chapters ready yet.</strong>
+                <strong>Chapter 1 is translating...</strong>
                 <p className="mt-0.5 text-amber-700 dark:text-amber-300">
-                  Click <em>"Translate All Chunks"</em> or <em>"Translate Next Chunk"</em> in the main screen to generate English chapters. You can also export the original Chinese text right now.
+                  To ensure a complete, unfragmented reading experience in Moon+ Reader or Kindle, exports start from Chapter 1. You can also export the original Chinese text right now.
                 </p>
               </div>
             </div>

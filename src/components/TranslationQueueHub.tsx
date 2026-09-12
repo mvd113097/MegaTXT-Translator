@@ -208,8 +208,8 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
             {/* Download EPUB for Moon+ Reader */}
             <button
               id="moon-reader-download-epub-btn"
-              onClick={() => onDownloadProgress("epub", "auto")}
-              disabled={completedChunks.length === 0}
+              onClick={() => onDownloadProgress("epub", "continuous")}
+              disabled={continuity.continuousChunks.length === 0}
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-xs sm:text-sm font-bold text-white shadow-md shadow-emerald-200/50 dark:shadow-none hover:bg-emerald-700 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
               title="Download formatted EPUB eBook ready to open directly in Moon+ Reader"
             >
@@ -218,15 +218,9 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                 {continuity.hasGaps
                   ? `Download EPUB (Ch 1–${continuity.continuousChunks.length})`
                   : "Download EPUB for Moon+ Reader"}
-                {completedEnglishWords > 0 && (
+                {continuity.continuousWordCount > 0 && (
                   <span className="ml-1 opacity-90 font-normal">
-                    (
-                    {(
-                      (continuity.hasGaps
-                        ? continuity.continuousWordCount
-                        : completedEnglishWords) / 1000
-                    ).toFixed(1)}
-                    k words)
+                    ({(continuity.continuousWordCount / 1000).toFixed(1)}k words)
                   </span>
                 )}
               </span>
@@ -241,10 +235,10 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
             {/* Quick TXT option */}
             <button
               id="moon-reader-download-txt-btn"
-              onClick={() => onDownloadProgress("txt", "auto")}
-              disabled={completedChunks.length === 0}
+              onClick={() => onDownloadProgress("txt", "continuous")}
+              disabled={continuity.continuousChunks.length === 0}
               className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-750 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer shadow-2xs"
-              title="Download completed text snapshot as a plain .txt file"
+              title="Download continuous completed text snapshot as a plain .txt file"
             >
               <FileText className="h-4 w-4 text-slate-500 dark:text-slate-400" />
               <span>Download TXT</span>
