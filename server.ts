@@ -391,6 +391,7 @@ interface ServerTextChunk {
   errorMessage?: string;
   durationMs?: number;
   edited?: boolean;
+  lastErrorAt?: number;
 }
 
 interface CloudJob {
@@ -425,8 +426,12 @@ function loadCloudJobFromDisk() {
             c.englishText = undefined;
           }
           if (c.status === "error" || c.status === "processing") {
-            c.status = "pending";
-            c.errorMessage = undefined;
+            if (!c.englishText || !c.englishText.trim()) {
+              c.status = "pending";
+              c.errorMessage = undefined;
+            } else {
+              c.status = "completed";
+            }
           }
         }
       }
@@ -455,7 +460,7 @@ function saveCloudJobToDisk() {
   }
 }
 
-// Background Worker Loop on the Server - Parallel Translation with Sequential Export Frontier
+// Background Worker Loop on the Server - Parallel Translation with Never-Skip Contiguous Export Frontier
 const inFlightChunkIds = new Set<string>();
 
 async function startCloudWorkerLoop() {
@@ -469,18 +474,25 @@ async function startCloudWorkerLoop() {
   );
 
   const runWorkerTask = async (workerId: number) => {
-    let workerAttemptStreak = 0;
-
     while (activeCloudJob && activeCloudJob.status === "running") {
-      // Find the next available non-completed chunk not already in-flight
-      const pendingChunk = activeCloudJob.chunks.find(
-        (c) =>
-          (c.status !== "completed" || !c.englishText || !c.englishText.trim()) &&
-          !inFlightChunkIds.has(c.id)
-      );
+      const now = Date.now();
+      // Find the next available non-completed chunk not already claimed
+      // Prioritize pending chunks first, then error chunks whose retry cooldown (8s) has elapsed
+      const pendingChunk = activeCloudJob.chunks.find((c) => {
+        if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+          return false;
+        }
+        if (inFlightChunkIds.has(c.id)) {
+          return false;
+        }
+        if (c.status === "error" && c.lastErrorAt && now < c.lastErrorAt + 8000) {
+          return false;
+        }
+        return true;
+      });
 
       if (!pendingChunk) {
-        // If no pending chunks and no other workers running, we are fully done
+        // If no pending chunks and no other workers running, check completion
         if (inFlightChunkIds.size === 0) {
           const allCompleted = activeCloudJob.chunks.every(
             (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
@@ -493,7 +505,7 @@ async function startCloudWorkerLoop() {
             break;
           }
         }
-        // Wait a bit before checking for retries or new items
+        // Wait a bit before checking for retries or newly freed items
         await new Promise((r) => setTimeout(r, 600));
         continue;
       }
@@ -514,8 +526,9 @@ async function startCloudWorkerLoop() {
       const startChunkTime = Date.now();
       let success = false;
       let attemptCount = 0;
+      const MAX_ATTEMPTS_PER_PASS = 3;
 
-      while (!success && activeCloudJob && activeCloudJob.status === "running") {
+      while (!success && attemptCount < MAX_ATTEMPTS_PER_PASS && activeCloudJob && activeCloudJob.status === "running") {
         attemptCount++;
         try {
           // Format style
@@ -606,8 +619,8 @@ Translate the above Chinese text directly into English:`;
           pendingChunk.status = "completed";
           pendingChunk.durationMs = Date.now() - startChunkTime;
           pendingChunk.errorMessage = undefined;
+          pendingChunk.lastErrorAt = undefined;
           success = true;
-          workerAttemptStreak = 0;
 
           console.log(
             `[Cloud Worker #${workerId}] Successfully completed chunk ${pendingChunk.index + 1}/${activeCloudJob.chunks.length} ("${
@@ -623,6 +636,7 @@ Translate the above Chinese text directly into English:`;
           pendingChunk.status = "error";
           pendingChunk.errorMessage = `Attempt ${attemptCount}: ${cleanErr}. Auto-retrying...`;
           pendingChunk.durationMs = Date.now() - startChunkTime;
+          pendingChunk.lastErrorAt = Date.now();
           activeCloudJob.lastActiveAt = Date.now();
           saveCloudJobToDisk();
 
@@ -631,9 +645,11 @@ Translate the above Chinese text directly into English:`;
             break;
           }
 
-          // Backoff cooldown before retrying
-          const waitCooldown = Math.min(attemptCount * 2500, 12000);
-          await new Promise((r) => setTimeout(r, waitCooldown));
+          // Backoff cooldown before next in-flight retry attempt
+          if (attemptCount < MAX_ATTEMPTS_PER_PASS) {
+            const waitCooldown = Math.min(attemptCount * 2500, 10000);
+            await new Promise((r) => setTimeout(r, waitCooldown));
+          }
         }
       }
 
