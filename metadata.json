@@ -1,0 +1,6 @@
+{
+  "name": "MegaText Chinese to English Translator",
+  "description": "High-capacity translator engineered for large TXT files up to 1,000,000+ Chinese characters with smart chapter chunking, terminology consistency, and dual-language export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
