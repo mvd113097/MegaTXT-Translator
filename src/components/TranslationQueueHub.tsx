@@ -214,13 +214,21 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
               title="Download formatted EPUB eBook ready to open directly in Moon+ Reader"
             >
               <BookCheck className="h-4 w-4" />
-              <span>
-                {continuity.hasGaps
-                  ? `Download EPUB (Ch 1–${continuity.continuousChunks.length})`
-                  : "Download EPUB for Moon+ Reader"}
+              <span className="truncate">
+                {continuity.hasGaps ? (
+                  <>
+                    <span className="hidden sm:inline">Download EPUB (Ch 1–{continuity.continuousChunks.length})</span>
+                    <span className="sm:hidden">EPUB (1–{continuity.continuousChunks.length})</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="hidden sm:inline">Download EPUB for Moon+ Reader</span>
+                    <span className="sm:hidden">Download EPUB</span>
+                  </>
+                )}
                 {continuity.continuousWordCount > 0 && (
-                  <span className="ml-1 opacity-90 font-normal">
-                    ({(continuity.continuousWordCount / 1000).toFixed(1)}k words)
+                  <span className="ml-1 opacity-90 font-normal text-[10px] sm:text-xs">
+                    ({(continuity.continuousWordCount / 1000).toFixed(1)}k)
                   </span>
                 )}
               </span>

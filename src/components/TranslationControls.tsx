@@ -94,11 +94,11 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
           </div>
 
           {/* Mode switch buttons */}
-          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-800/90 p-1 text-xs shrink-0 shadow-xs">
+          <div className="flex w-full sm:inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-800/90 p-1 text-xs shadow-xs">
             <button
               type="button"
               onClick={() => onChangeMode("cloud")}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition ${
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 sm:px-3 py-1.5 font-medium transition ${
                 mode === "cloud"
                   ? "bg-indigo-600 text-white shadow-xs font-semibold"
                   : "text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
@@ -106,12 +106,15 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
               title="Translates continuously on server. Close browser anytime!"
             >
               <Cloud className="h-3.5 w-3.5" />
-              <span>Option 1: ☁️ Cloud Mode (Browser Closed)</span>
+              <span className="truncate">
+                <span className="hidden sm:inline">Option 1: ☁️ Cloud Mode (Browser Closed)</span>
+                <span className="sm:hidden">☁️ Cloud Mode</span>
+              </span>
             </button>
             <button
               type="button"
               onClick={() => onChangeMode("browser")}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition ${
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 sm:px-3 py-1.5 font-medium transition ${
                 mode === "browser"
                   ? "bg-indigo-600 text-white shadow-xs font-semibold"
                   : "text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
@@ -119,7 +122,10 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
               title="Translates in open browser tab"
             >
               <Globe className="h-3.5 w-3.5" />
-              <span>Option 2: ⚡ Browser Mode (Tab Open)</span>
+              <span className="truncate">
+                <span className="hidden sm:inline">Option 2: ⚡ Browser Mode (Tab Open)</span>
+                <span className="sm:hidden">⚡ Browser Mode</span>
+              </span>
             </button>
           </div>
         </div>
@@ -205,18 +211,17 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
           </div>
         </div>
 
-        {/* Speed / Concurrency */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Order & Concurrency:</span>
           <select
             value={concurrency}
             onChange={(e) => onChangeConcurrency(Number(e.target.value))}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 focus:border-indigo-500 focus:outline-none max-w-[160px] sm:max-w-none"
             title="Number of chapters translated in parallel"
           >
-            <option value={1}>1 stream (Strict 1→2→3 Sequential • Zero Gaps)</option>
-            <option value={2}>2 streams (Fast Parallel • Chapters may finish out of order)</option>
-            <option value={3}>3 streams (Maximum Speed • Chapters may finish out of order)</option>
+            <option value={1}>1 stream (Strict 1→2→3)</option>
+            <option value={2}>2 streams (Fast Parallel)</option>
+            <option value={3}>3 streams (Maximum Speed)</option>
           </select>
         </div>
 
@@ -291,12 +296,16 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
                 title="Download whatever is finished so far as a full EPUB eBook without interrupting the translation"
               >
                 <BookCheck className="h-3.5 w-3.5" />
-                <span>
-                  Download EPUB (
-                  {completedEnglishWords > 1000
-                    ? `${(completedEnglishWords / 1000).toFixed(1)}k words`
-                    : `${completedEnglishWords} words`}
-                  )
+                <span className="truncate">
+                  <span className="hidden sm:inline">Download EPUB</span>
+                  <span className="sm:hidden">EPUB</span>
+                  <span className="ml-1 opacity-90">
+                    (
+                    {completedEnglishWords > 1000
+                      ? `${(completedEnglishWords / 1000).toFixed(1)}k`
+                      : `${completedEnglishWords}`}
+                    )
+                  </span>
                 </span>
                 {lastDownloadedWords > 0 && newWordsSinceLast > 0 && (
                   <span className="rounded-full bg-emerald-700 px-1.5 py-0.2 text-[10px] font-bold text-emerald-100">

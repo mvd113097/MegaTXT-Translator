@@ -46,14 +46,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-bold text-slate-900 dark:text-slate-100 sm:text-lg">
+              <h1 className="text-sm font-bold text-slate-900 dark:text-slate-100 sm:text-lg">
                 MegaText Translator
               </h1>
-              <span className="hidden rounded-full bg-indigo-50 dark:bg-indigo-950/80 px-2.5 py-0.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300 sm:inline-flex">
+              <span className="hidden rounded-full bg-indigo-50 dark:bg-indigo-950/80 px-2.5 py-0.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300 md:inline-flex">
                 ZH → EN
               </span>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="hidden text-[10px] text-slate-500 dark:text-slate-400 sm:block">
               High-throughput 1,000,000+ Chinese character text engine
             </p>
           </div>
@@ -121,13 +121,13 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             id="open-glossary-btn"
             onClick={onOpenGlossary}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 shadow-xs transition hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 sm:px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 shadow-xs transition hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95"
             title="Manage character names, terms, and glossary"
           >
             <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-            <span>Glossary</span>
+            <span className="hidden sm:inline">Glossary</span>
             {glossaryCount > 0 && (
-              <span className="ml-1 rounded-full bg-indigo-100 dark:bg-indigo-900/60 px-1.5 py-0.2 text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
+              <span className="ml-0.5 sm:ml-1 rounded-full bg-indigo-100 dark:bg-indigo-900/60 px-1.5 py-0.2 text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
                 {glossaryCount}
               </span>
             )}
