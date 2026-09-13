@@ -138,11 +138,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="reset-workspace-btn"
               onClick={onReset}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 transition hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 active:scale-95"
-              title="Upload another file or clear current session"
+              className="flex items-center gap-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/60 px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300 transition hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 active:scale-95 cursor-pointer"
+              title="Upload another book or clear current session"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">New File</span>
+              <RefreshCw className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span className="font-semibold whitespace-nowrap">New Book</span>
             </button>
           )}
         </div>

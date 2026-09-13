@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Clock, Zap, FileText, Download, BookOpen, BookCheck, ChevronDown } from "lucide-react";
+import { Clock, Zap, FileText, Download, BookOpen, BookCheck, ChevronDown, RefreshCw } from "lucide-react";
 import { TranslationMetrics } from "../types";
 
 interface ProgressBarProps {
@@ -7,6 +7,7 @@ interface ProgressBarProps {
   fileName: string;
   onQuickDownloadProgress: (format?: "epub" | "txt") => void;
   isRunning: boolean;
+  onReset?: () => void;
 }
 
 function formatDuration(seconds: number): string {
@@ -26,6 +27,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   fileName,
   onQuickDownloadProgress,
   isRunning,
+  onReset,
 }) => {
   const [showFormatMenu, setShowFormatMenu] = useState(false);
 
@@ -57,6 +59,19 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
               <BookOpen className="h-3 w-3" />
               <span>{metrics.completedEnglishWords.toLocaleString()} English words ready</span>
             </span>
+          )}
+
+          {/* Prominent Reset / Translate Another Book Button */}
+          {onReset && (
+            <button
+              id="card-reset-book-btn"
+              onClick={onReset}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/60 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:text-indigo-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 transition cursor-pointer active:scale-95 ml-auto sm:ml-2"
+              title="Upload another book or clear current session"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span>Translate Another Book</span>
+            </button>
           )}
         </div>
 

@@ -16,6 +16,7 @@ import {
   Globe,
   WifiOff,
   ShieldCheck,
+  RefreshCw,
 } from "lucide-react";
 import { TranslationStyle, TranslationMode } from "../types";
 
@@ -42,6 +43,7 @@ interface TranslationControlsProps {
   totalChunks: number;
   completedEnglishWords: number;
   lastDownloadedWords: number;
+  onReset?: () => void;
 }
 
 export const TranslationControls: React.FC<TranslationControlsProps> = ({
@@ -67,6 +69,7 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
   totalChunks,
   completedEnglishWords,
   lastDownloadedWords,
+  onReset,
 }) => {
   const [showFormatDropdown, setShowFormatDropdown] = useState(false);
   const isFinished = totalChunks > 0 && completedChunks === totalChunks;
@@ -260,6 +263,19 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
             >
               <Play className="h-3.5 w-3.5" />
               <span>{mode === "cloud" ? "Start Cloud Translation ☁️" : "Translate All Chunks ⚡"}</span>
+            </button>
+          )}
+
+          {/* Translate Another Book button */}
+          {onReset && (
+            <button
+              id="controls-new-book-btn"
+              onClick={onReset}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 transition hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 active:scale-95 cursor-pointer"
+              title="Upload another book or clear current session"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span>Translate Another Book</span>
             </button>
           )}
 

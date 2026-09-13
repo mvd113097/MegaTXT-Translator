@@ -1023,6 +1023,7 @@ Export Timestamp: ${new Date().toLocaleString()}
               fileName={session.fileName}
               onQuickDownloadProgress={handleDownloadProgress}
               isRunning={isRunning}
+              onReset={handleReset}
             />
 
             {/* Translation Action Controls */}
@@ -1066,6 +1067,7 @@ Export Timestamp: ${new Date().toLocaleString()}
               totalChunks={totalChunks}
               completedEnglishWords={completedEnglishWords}
               lastDownloadedWords={lastDownloadedWordCount}
+              onReset={handleReset}
             />
 
             {/* Moon+ Reader Focused Batch Queue & Download Hub */}
