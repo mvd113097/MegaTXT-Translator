@@ -65,11 +65,11 @@ export interface TranslationMetrics {
 
 export interface AuthStatus {
   authenticated: boolean;
-  requiresGoogle: boolean;
+  requiresGoogle?: boolean;
   requiresPasscode: boolean;
-  googleVerified: boolean;
+  googleVerified?: boolean;
   passcodeVerified: boolean;
   userEmail?: string | null;
-  authorizedEmail: string;
+  authorizedEmail?: string;
   hasPasscodeConfigured: boolean;
 }

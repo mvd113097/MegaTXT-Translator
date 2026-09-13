@@ -147,25 +147,61 @@ p.first-p {
   zip.file("OEBPS/titlepage.xhtml", titlePageHtml);
   chapterFiles.push({ id: "titlepage", filename: "titlepage.xhtml", title: "Title Page" });
 
+  // Helper regex for detecting heading lines in translated English text
+  const chapterHeaderPattern =
+    /^(?:Chapter\s+[0-9IVXLCDM]+|Prologue|Epilogue|Volume\s+[0-9IVXLCDM]+|Book\s+[0-9IVXLCDM]+|Act\s+[0-9IVXLCDM]+|Part\s+[0-9IVXLCDM]+|Section\s+[0-9IVXLCDM]+|Interlude|Side\s+Story|Extra\s+Chapter|Extra\s+[0-9]+|C\d+[\s:.-]|第\s*[0-9零一二三四五六七八九十百千万]+\s*[章回节卷集部篇])/i;
+
   for (let i = 0; i < validChunks.length; i++) {
     const chunk = validChunks[i];
     const chapterId = `chapter_${i + 1}`;
     const filename = `${chapterId}.xhtml`;
-    const rawTitle = chunk.chapterTitle || `Section ${chunk.index + 1}`;
-    const safeTitle = escapeXml(rawTitle);
+    
+    // Parse paragraphs from English translation
+    const allEnParagraphs = chunk.englishText
+      ? chunk.englishText.split(/\n+/).map((p) => p.trim()).filter(Boolean)
+      : [];
 
+    let displayTitle = chunk.chapterTitle || `Section ${chunk.index + 1}`;
+    let bodyEnParagraphs = allEnParagraphs;
+
+    // Check if the translated text begins with an English chapter title heading
+    if (allEnParagraphs.length > 0) {
+      const firstLine = allEnParagraphs[0];
+      const isHeaderLine =
+        (chapterHeaderPattern.test(firstLine) && firstLine.length < 120) ||
+        (firstLine.length < 60 && !/[.!?…。!?"”'’]$/.test(firstLine) && !firstLine.includes(",") && allEnParagraphs.length > 1);
+
+      if (isHeaderLine) {
+        // Use the translated English header as the display title
+        const cleanedHeader = firstLine.replace(/^#+\s*/, "").replace(/^\*\*|\*\*$/g, "").trim();
+        displayTitle = cleanedHeader;
+        bodyEnParagraphs = allEnParagraphs.slice(1);
+
+        // If chunk metadata had a part indicator like (Part 2) that isn't in the heading, append it
+        const partMatch = chunk.chapterTitle?.match(/\(Part\s+\d+\)/i);
+        if (partMatch && !displayTitle.toLowerCase().includes("part")) {
+          displayTitle = `${displayTitle} ${partMatch[0]}`;
+        }
+      } else if (displayTitle === "Prologue / Introduction" || displayTitle.startsWith("Section ")) {
+        // If metadata had a placeholder and first line wasn't standard header, inspect if first line is a short title
+        if (firstLine.length < 80 && !/[.!?]$/.test(firstLine)) {
+          displayTitle = firstLine;
+          bodyEnParagraphs = allEnParagraphs.slice(1);
+        }
+      }
+    }
+
+    const safeTitle = escapeXml(displayTitle);
     let contentHtml = "";
 
     if (isBilingual) {
       // Bilingual mode: show paired paragraphs
-      const zhParagraphs = chunk.chineseText.split(/\n+/).filter((p) => p.trim());
-      const enParagraphs = chunk.englishText.split(/\n+/).filter((p) => p.trim());
-
+      const zhParagraphs = chunk.chineseText.split(/\n+/).map((p) => p.trim()).filter(Boolean);
       contentHtml += `<h2>${safeTitle}</h2>\n`;
-      const maxLen = Math.max(zhParagraphs.length, enParagraphs.length);
+      const maxLen = Math.max(zhParagraphs.length, bodyEnParagraphs.length);
       for (let pIdx = 0; pIdx < maxLen; pIdx++) {
-        const zh = zhParagraphs[pIdx] ? escapeXml(zhParagraphs[pIdx].trim()) : "";
-        const en = enParagraphs[pIdx] ? escapeXml(enParagraphs[pIdx].trim()) : "";
+        const zh = zhParagraphs[pIdx] ? escapeXml(zhParagraphs[pIdx]) : "";
+        const en = bodyEnParagraphs[pIdx] ? escapeXml(bodyEnParagraphs[pIdx]) : "";
         contentHtml += `<div class="bilingual-pair">\n`;
         if (zh) contentHtml += `  <p class="chinese-source">${zh}</p>\n`;
         if (en) contentHtml += `  <p class="english-target">${en}</p>\n`;
@@ -174,10 +210,9 @@ p.first-p {
     } else {
       // Standard English novel text
       contentHtml += `<h2>${safeTitle}</h2>\n`;
-      const paragraphs = chunk.englishText.split(/\n+/).filter((p) => p.trim());
-      paragraphs.forEach((p, pIdx) => {
+      bodyEnParagraphs.forEach((p, pIdx) => {
         const pClass = pIdx === 0 ? ' class="first-p"' : "";
-        contentHtml += `<p${pClass}>${escapeXml(p.trim())}</p>\n`;
+        contentHtml += `<p${pClass}>${escapeXml(p)}</p>\n`;
       });
     }
 
@@ -195,7 +230,7 @@ p.first-p {
 </html>`;
 
     zip.file(`OEBPS/${filename}`, chapterHtml);
-    chapterFiles.push({ id: chapterId, filename, title: rawTitle });
+    chapterFiles.push({ id: chapterId, filename, title: displayTitle });
   }
 
   // 5. OEBPS/nav.xhtml (EPUB 3 Table of Contents)

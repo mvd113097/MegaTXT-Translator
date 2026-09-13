@@ -7,7 +7,7 @@ export interface ChunkOptions {
 
 // Regex to detect common Chinese novel chapter headings
 const CHAPTER_REGEX =
-  /(?:^|\n)\s*(第[0-9零一二三四五六七八九十百千万]+[章回节卷集部篇][^\n]*|Chapter\s+[0-9]+[^\n]*)/gi;
+  /(?:^|\n)\s*(第\s*[0-9零一二三四五六七八九十百千万]+\s*[章回节卷集部篇][^\n]*|Chapter\s+[0-9]+[^\n]*|卷\s*[0-9零一二三四五六七八九十百千万]+[^\n]*|【\s*第\s*[0-9零一二三四五六七八九十百千万]+\s*[章回节卷集部篇][^\n]*】|\([0-9]+\)[^\n]*)/gi;
 
 /**
  * Counts the exact number of Chinese CJK characters in a string
@@ -132,24 +132,31 @@ export function chunkChineseText(
     return [];
   }
 
+  const cleanedText = rawText.replace(/^\uFEFF/, "").trimStart();
+
   // Check if text has chapter markers
   if (splitByChapters) {
-    const matches = Array.from(rawText.matchAll(CHAPTER_REGEX));
+    const matches = Array.from(cleanedText.matchAll(CHAPTER_REGEX));
 
     if (matches.length >= 2) {
       // Multiple chapters detected!
       const chunks: TextChunk[] = [];
       let currentIndex = 0;
 
-      // Handle any text before the first chapter (e.g. prologue or title)
+      // Handle any text before the first chapter (e.g. prologue, novel title, or preamble)
       const firstMatchIndex = matches[0].index || 0;
       if (firstMatchIndex > 0) {
-        const prologue = rawText.slice(0, firstMatchIndex).trim();
-        if (prologue) {
+        const preamble = cleanedText.slice(0, firstMatchIndex).trim();
+        if (preamble) {
+          const lines = preamble.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+          let preambleTitle = "Prologue / Introduction";
+          if (lines.length > 0 && lines[0].length < 60 && !/[.!?…。]$/.test(lines[0])) {
+            preambleTitle = lines[0];
+          }
           const subChunks = splitTextIntoParagraphChunks(
-            prologue,
+            preamble,
             targetSize,
-            "Prologue / Introduction",
+            preambleTitle,
             currentIndex
           );
           chunks.push(...subChunks);
@@ -167,8 +174,8 @@ export function chunkChineseText(
           const chapterTitle = match[1].trim();
           const startPos = match.index! + match[0].length;
           const endPos =
-            i < matches.length - 1 ? matches[i + 1].index! : rawText.length;
-          const chapterContent = rawText.slice(startPos, endPos).trim();
+            i < matches.length - 1 ? matches[i + 1].index! : cleanedText.length;
+          const chapterContent = cleanedText.slice(startPos, endPos).trim();
           const fullChapterText = `${chapterTitle}\n\n${chapterContent}`;
 
           if (bufferText && bufferText.length + fullChapterText.length > targetSize * 1.15) {
@@ -233,9 +240,9 @@ export function chunkChineseText(
         const chapterTitle = match[1].trim();
         const startPos = match.index! + match[0].length;
         const endPos =
-          i < matches.length - 1 ? matches[i + 1].index! : rawText.length;
+          i < matches.length - 1 ? matches[i + 1].index! : cleanedText.length;
 
-        const chapterContent = rawText.slice(startPos, endPos).trim();
+        const chapterContent = cleanedText.slice(startPos, endPos).trim();
         const fullChapterText = `${chapterTitle}\n\n${chapterContent}`;
 
         if (fullChapterText.length <= targetSize * 1.3) {
@@ -288,9 +295,11 @@ export interface ContinuityReport {
  * If chunk 4 is incomplete, returns only chunks 1..3 regardless of whether 5 and 6 are completed.
  */
 export function getContiguousCompletedChunks(chunks: TextChunk[]): TextChunk[] {
+  // Always sort chunks strictly by index to guarantee correct order of pages/chapters
+  const sortedChunks = [...chunks].sort((a, b) => a.index - b.index);
   const result: TextChunk[] = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
+  for (let i = 0; i < sortedChunks.length; i++) {
+    const c = sortedChunks[i];
     if (c && c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
       result.push(c);
     } else {
@@ -305,10 +314,12 @@ export function getContiguousCompletedChunks(chunks: TextChunk[]): TextChunk[] {
  * or if parallel processing caused chapters ahead to finish while middle chapters are still loading.
  */
 export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
-  const continuousChunks = getContiguousCompletedChunks(chunks);
+  // Always work with sorted chunks strictly by index
+  const sortedChunks = [...chunks].sort((a, b) => a.index - b.index);
+  const continuousChunks = getContiguousCompletedChunks(sortedChunks);
   const contiguousFrontierIndex = continuousChunks.length > 0 ? continuousChunks.length - 1 : -1;
 
-  const allCompletedChunks = chunks.filter(
+  const allCompletedChunks = sortedChunks.filter(
     (c) => c.status === "completed" && !!c.englishText?.trim()
   );
 
@@ -329,7 +340,7 @@ export function analyzeChunkContinuity(chunks: TextChunk[]): ContinuityReport {
   const highestCompletedIndex = Math.max(...allCompletedChunks.map((c) => c.index));
   const missingChunks: TextChunk[] = [];
   for (let i = 0; i <= highestCompletedIndex; i++) {
-    const c = chunks[i];
+    const c = sortedChunks.find((ch) => ch.index === i);
     if (!c || c.status !== "completed" || !c.englishText?.trim()) {
       if (c) missingChunks.push(c);
     }

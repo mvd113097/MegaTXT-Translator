@@ -525,6 +525,7 @@ interface ServerTextChunk {
 
 interface CloudJob {
   id: string;
+  sessionId?: string;
   fileName: string;
   fileSizeBytes: number;
   totalChineseChars: number;
@@ -538,18 +539,100 @@ interface CloudJob {
   lastActiveAt: number;
 }
 
-let activeCloudJob: CloudJob | null = null;
+const JOBS_DIR = path.join(DATA_DIR, "jobs");
+if (!fs.existsSync(JOBS_DIR)) {
+  fs.mkdirSync(JOBS_DIR, { recursive: true });
+}
+
+const cloudJobs = new Map<string, CloudJob>();
 let isCloudWorkerRunning = false;
 
-// Load saved cloud job from disk if exists on startup
-function loadCloudJobFromDisk() {
+function sanitizeSessionKey(s: string): string {
+  return s.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getSessionId(req: express.Request): string {
+  const headerSessionId = req.headers["x-session-id"] || req.headers["x-device-session-id"];
+  if (headerSessionId && typeof headerSessionId === "string" && headerSessionId.trim()) {
+    return headerSessionId.trim();
+  }
+  const querySessionId = req.query.sessionId || req.query.deviceId;
+  if (querySessionId && typeof querySessionId === "string" && querySessionId.trim()) {
+    return querySessionId.trim();
+  }
+  const authHeader = req.headers.authorization;
+  if (authHeader) {
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (token) return "token_" + token.slice(-16);
+  }
+  return "legacy_default";
+}
+
+function getJobForSession(req: express.Request): CloudJob | null {
+  const sId = getSessionId(req);
+  if (cloudJobs.has(sId)) {
+    return cloudJobs.get(sId)!;
+  }
+  // If request has NO explicit device session header (legacy client without headers), check legacy_default
+  const hasCustomSessionHeader = !!(req.headers["x-session-id"] || req.headers["x-device-session-id"] || req.query.sessionId || req.query.deviceId);
+  if (!hasCustomSessionHeader && cloudJobs.has("legacy_default")) {
+    return cloudJobs.get("legacy_default")!;
+  }
+  return null;
+}
+
+function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
   try {
-    if (fs.existsSync(CLOUD_JOB_FILE)) {
-      const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
-      activeCloudJob = JSON.parse(data);
-      if (activeCloudJob) {
-        // Fix any corrupt/empty completed chunks or interrupted chunks
-        for (const c of activeCloudJob.chunks) {
+    const safeKey = sanitizeSessionKey(sessionId);
+    const jobFilePath = path.join(JOBS_DIR, `job_${safeKey}.json`);
+    if (job) {
+      fs.writeFileSync(jobFilePath, JSON.stringify(job, null, 2), "utf-8");
+      // Keep legacy root file synced if this is the legacy or default job
+      if (sessionId === "legacy_default" || cloudJobs.size === 1) {
+        fs.writeFileSync(CLOUD_JOB_FILE, JSON.stringify(job, null, 2), "utf-8");
+      }
+    } else {
+      if (fs.existsSync(jobFilePath)) {
+        fs.unlinkSync(jobFilePath);
+      }
+      if (sessionId === "legacy_default" && fs.existsSync(CLOUD_JOB_FILE)) {
+        fs.unlinkSync(CLOUD_JOB_FILE);
+      }
+    }
+  } catch (err) {
+    console.error(`Failed to save cloud job for session ${sessionId} to disk:`, err);
+  }
+}
+
+function setJobForSession(sessionId: string, job: CloudJob | null) {
+  if (job) {
+    job.sessionId = sessionId;
+    cloudJobs.set(sessionId, job);
+    saveJobToDisk(sessionId, job);
+  } else {
+    cloudJobs.delete(sessionId);
+    saveJobToDisk(sessionId, null);
+  }
+}
+
+// Load saved cloud jobs from disk on startup
+function loadCloudJobsFromDisk() {
+  try {
+    if (!fs.existsSync(JOBS_DIR)) {
+      fs.mkdirSync(JOBS_DIR, { recursive: true });
+    }
+
+    const jobFiles = fs.readdirSync(JOBS_DIR).filter((f) => f.startsWith("job_") && f.endsWith(".json"));
+    for (const file of jobFiles) {
+      try {
+        const fullPath = path.join(JOBS_DIR, file);
+        const data = fs.readFileSync(fullPath, "utf-8");
+        const job: CloudJob = JSON.parse(data);
+        const sId = job.sessionId || file.replace(/^job_/, "").replace(/\.json$/, "");
+        job.sessionId = sId;
+
+        // Fix any corrupt/empty completed chunks
+        for (const c of job.chunks) {
           if (c.status === "completed" && (!c.englishText || !c.englishText.trim())) {
             c.status = "pending";
             c.englishText = undefined;
@@ -563,98 +646,115 @@ function loadCloudJobFromDisk() {
             }
           }
         }
-      }
-      console.log(`Loaded existing cloud job: "${activeCloudJob?.fileName}" (${activeCloudJob?.chunks.length} chunks)`);
-      // If it was running when server restarted, we can resume background worker
-      if (activeCloudJob && activeCloudJob.status === "running") {
-        startCloudWorkerLoop();
+        cloudJobs.set(sId, job);
+        console.log(`Loaded session job [${sId}]: "${job.fileName}" (${job.chunks.length} chunks)`);
+      } catch (fileErr) {
+        console.warn(`Could not load job file ${file}:`, fileErr);
       }
     }
+
+    // Also check legacy single cloud_job.json
+    if (fs.existsSync(CLOUD_JOB_FILE) && !cloudJobs.has("legacy_default")) {
+      try {
+        const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
+        const legacyJob: CloudJob = JSON.parse(data);
+        if (legacyJob && Array.isArray(legacyJob.chunks)) {
+          legacyJob.sessionId = "legacy_default";
+          cloudJobs.set("legacy_default", legacyJob);
+          saveJobToDisk("legacy_default", legacyJob);
+          console.log(`Imported legacy cloud job: "${legacyJob.fileName}" (${legacyJob.chunks.length} chunks)`);
+        }
+      } catch (legacyErr) {
+        console.warn("Could not load legacy cloud job:", legacyErr);
+      }
+    }
+
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+    if (runningJobs.length > 0) {
+      startCloudWorkerLoop();
+    }
   } catch (err) {
-    console.error("Failed to load cloud job from disk:", err);
+    console.error("Failed to load cloud jobs from disk:", err);
   }
 }
 
-function saveCloudJobToDisk() {
-  try {
-    if (activeCloudJob) {
-      fs.writeFileSync(CLOUD_JOB_FILE, JSON.stringify(activeCloudJob, null, 2), "utf-8");
-    } else {
-      if (fs.existsSync(CLOUD_JOB_FILE)) {
-        fs.unlinkSync(CLOUD_JOB_FILE);
-      }
-    }
-  } catch (err) {
-    console.error("Failed to save cloud job to disk:", err);
-  }
-}
-
-// Background Worker Loop on the Server - Parallel Translation with Never-Skip Contiguous Export Frontier
+// Background Worker Loop on the Server - Parallel Multi-Session Translation Engine
 const inFlightChunkIds = new Set<string>();
 
 async function startCloudWorkerLoop() {
   if (isCloudWorkerRunning) return;
   isCloudWorkerRunning = true;
 
-  const jobFileName = activeCloudJob?.fileName || "job";
-  const numWorkers = Math.max(1, Math.min(activeCloudJob?.concurrency || 5, quotaScheduler.enabledProjectCount || 5, 5));
-  console.log(
-    `[Cloud Background Worker] Started parallel translation engine (${numWorkers} concurrent workers) for: "${jobFileName}"`
-  );
+  console.log(`[Cloud Background Worker] Started multi-session parallel translation engine`);
+
+  const numWorkers = 4;
 
   const runWorkerTask = async (workerId: number) => {
-    while (activeCloudJob && activeCloudJob.status === "running") {
-      const now = Date.now();
-      // Find the next available non-completed chunk not already claimed
-      // Prioritize pending chunks first, then error chunks whose retry cooldown (8s) has elapsed
-      const firstChunk = activeCloudJob.chunks.find((c) => {
-        if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
-          return false;
-        }
-        if (inFlightChunkIds.has(c.id)) {
-          return false;
-        }
-        if (c.status === "error" && c.lastErrorAt && now < c.lastErrorAt + 8000) {
-          return false;
-        }
-        return true;
-      });
-
-      if (!firstChunk) {
-        // If no pending chunks and no other workers running, check completion
+    while (isCloudWorkerRunning) {
+      const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+      if (runningJobs.length === 0) {
         if (inFlightChunkIds.size === 0) {
-          const allCompleted = activeCloudJob.chunks.every(
+          isCloudWorkerRunning = false;
+          console.log(`[Cloud Background Worker] No active running jobs. Pausing worker loop.`);
+          break;
+        }
+      }
+
+      const now = Date.now();
+      let targetJob: CloudJob | null = null;
+      let firstChunk: ServerTextChunk | null = null;
+
+      // Find the next available non-completed chunk across all running jobs
+      for (const job of runningJobs) {
+        const candidate = job.chunks.find((c) => {
+          if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+            return false;
+          }
+          if (inFlightChunkIds.has(c.id)) {
+            return false;
+          }
+          if (c.status === "error" && c.lastErrorAt && now < c.lastErrorAt + 8000) {
+            return false;
+          }
+          return true;
+        });
+
+        if (candidate) {
+          targetJob = job;
+          firstChunk = candidate;
+          break;
+        } else {
+          // Check if this job has completed all its chunks
+          const allCompleted = job.chunks.every(
             (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
           );
-          if (allCompleted) {
-            console.log(`[Cloud Background Worker] All chapters finished! Marking job as completed.`);
-            activeCloudJob.status = "completed";
-            activeCloudJob.lastActiveAt = Date.now();
-            saveCloudJobToDisk();
-            break;
+          if (allCompleted && job.status === "running") {
+            console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) completed!`);
+            job.status = "completed";
+            job.lastActiveAt = Date.now();
+            saveJobToDisk(job.sessionId || "legacy_default", job);
           }
         }
-        // Wait a bit before checking for retries or newly freed items
+      }
+
+      if (!targetJob || !firstChunk) {
         await new Promise((r) => setTimeout(r, 600));
         continue;
       }
 
-      // Build a batch up to MAX_BATCH_CHAR_BUDGET characters (e.g., 7,000 Chinese characters)
+      // Build batch for targetJob up to MAX_BATCH_CHAR_BUDGET
       let batchChunks = [firstChunk];
       let currentBatchChars = firstChunk.chineseText.length;
 
-      // If the chunk previously had an error or is on retry, DO NOT batch it with others!
-      // Translating retried chunks individually prevents one bad chunk from failing others
       if (firstChunk.status !== "error") {
-        for (let i = firstChunk.index + 1; i < activeCloudJob.chunks.length; i++) {
-          const candidate = activeCloudJob.chunks[i];
+        for (let i = firstChunk.index + 1; i < targetJob.chunks.length; i++) {
+          const candidate = targetJob.chunks[i];
           if (candidate.status === "completed" && candidate.englishText && candidate.englishText.trim().length > 0) {
             break;
           }
           if (inFlightChunkIds.has(candidate.id)) {
             break;
           }
-          // Do not pull error chunks into a healthy batch
           if (candidate.status === "error") {
             break;
           }
@@ -671,17 +771,16 @@ async function startCloudWorkerLoop() {
         }
       }
 
-      // Claim all chunks in batch exclusively for this worker
       for (const chunk of batchChunks) {
         inFlightChunkIds.add(chunk.id);
         chunk.status = "processing";
       }
-      activeCloudJob.lastActiveAt = Date.now();
-      saveCloudJobToDisk();
+      targetJob.lastActiveAt = Date.now();
+      saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
 
-      // Find preceding context for narrative continuity
+      // Preceding context
       let prevContext = "";
-      const prevChunk = activeCloudJob.chunks[firstChunk.index - 1];
+      const prevChunk = targetJob.chunks[firstChunk.index - 1];
       if (prevChunk && prevChunk.englishText) {
         prevContext = prevChunk.englishText.slice(-200);
       }
@@ -691,9 +790,8 @@ async function startCloudWorkerLoop() {
       let attemptCount = 0;
       const MAX_ATTEMPTS_PER_PASS = 3;
 
-      // Format style
       let styleGuidance = "";
-      switch (activeCloudJob.style) {
+      switch (targetJob.style) {
         case "xianxia":
           styleGuidance =
             "Style: Xianxia / Wuxia / Chinese Webnovel localization. Use vivid, dynamic literary prose suitable for high-fantasy novels. Keep recognized martial arts/cultivation tropes natural and punchy. Preserve Pinyin for technique names if appropriate or provide evocative English renderings. Keep honorifics consistent (e.g. Senior Brother, Sect Elder, Young Master).";
@@ -718,8 +816,8 @@ async function startCloudWorkerLoop() {
       }
 
       let glossaryBlock = "";
-      if (Array.isArray(activeCloudJob.glossary) && activeCloudJob.glossary.length > 0) {
-        const formattedTerms = activeCloudJob.glossary
+      if (Array.isArray(targetJob.glossary) && targetJob.glossary.length > 0) {
+        const formattedTerms = targetJob.glossary
           .filter((item) => item.original && item.translation)
           .map(
             (item) =>
@@ -737,10 +835,9 @@ You MUST strictly adhere to the above glossary mappings for consistency across c
         }
       }
 
-      while (!success && attemptCount < MAX_ATTEMPTS_PER_PASS && activeCloudJob && activeCloudJob.status === "running") {
+      while (!success && attemptCount < MAX_ATTEMPTS_PER_PASS && targetJob.status === "running") {
         attemptCount++;
         try {
-
           let contextBlock = "";
           if (prevContext.trim()) {
             contextBlock = `
@@ -768,7 +865,7 @@ Translation Guidelines:
 8. Creative Fiction Context: You are translating a published web novel / literary work of fantasy fiction. Faithfully translate all romance, affection, intimate dialogue, battle scenes, and cultivation narratives as standard published literature without summarizing or refusing.`;
 
             userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
-              activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
+              targetJob.customInstructions ? `Special Instructions: ${targetJob.customInstructions}\n\n` : ""
             }CHINESE SOURCE TEXT (${single.chapterTitle || "Chunk " + (single.index + 1)}):
 """
 ${single.chineseText}
@@ -809,7 +906,7 @@ ${c.chineseText}
               .join("\n\n");
 
             userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
-              activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
+              targetJob.customInstructions ? `Special Instructions: ${targetJob.customInstructions}\n\n` : ""
             }CHINESE CHAPTER BATCH TO TRANSLATE (${batchChunks.length} item(s)):
 
 ${batchPrompts}
@@ -843,11 +940,10 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               inFlightChunkIds.delete(single.id);
               validCount = 1;
             } else {
-              // Immediate paragraph decomposition fallback
               const decomp = await translateWithDecomposition(
                 single.chineseText,
                 styleGuidance,
-                activeCloudJob.customInstructions,
+                targetJob.customInstructions,
                 glossaryBlock
               );
               if (decomp.text && decomp.text.trim().length > 0) {
@@ -867,7 +963,6 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               }
             }
           } else {
-            // Multi-chunk batch validation
             const expectedChunks = batchChunks.map((c) => ({
               id: c.id,
               index: c.index + 1,
@@ -887,11 +982,10 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 inFlightChunkIds.delete(chunk.id);
                 validCount++;
               } else {
-                // Immediate individual translation fallback for this chapter
                 console.log(`[Cloud Worker #${workerId}] Batch parsing fallback: translating chunk #${chunk.index + 1} individually...`);
                 try {
                   const singlePrompt = `${contextBlock ? contextBlock + "\n" : ""}${
-                    activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
+                    targetJob.customInstructions ? `Special Instructions: ${targetJob.customInstructions}\n\n` : ""
                   }CHINESE SOURCE TEXT (${chunk.chapterTitle || "Chunk " + (chunk.index + 1)}):
 """
 ${chunk.chineseText}
@@ -938,12 +1032,9 @@ Translation Guidelines:
             }
           }
 
-          if (activeCloudJob) {
-            activeCloudJob.lastActiveAt = Date.now();
-            saveCloudJobToDisk();
-          }
+          targetJob.lastActiveAt = Date.now();
+          saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
 
-          // Isolate retry batch: filter out successfully completed chunks so retries NEVER re-send valid chunks
           batchChunks = batchChunks.filter((c) => c.status !== "completed");
           success = batchChunks.length === 0;
 
@@ -957,15 +1048,13 @@ Translation Guidelines:
             cleanErr
           );
 
-          // If a single chunk failed (e.g. content safety filter / prohibited content trigger),
-          // run the intelligent decomposition translator to break it into small paragraphs
           if (batchChunks.length === 1 && firstChunk) {
             console.log(`[Cloud Worker #${workerId}] Attempting paragraph decomposition fallback for chunk ${firstChunk.index + 1}...`);
             try {
               const decompResult = await translateWithDecomposition(
                 firstChunk.chineseText,
                 styleGuidance,
-                activeCloudJob.customInstructions,
+                targetJob.customInstructions,
                 glossaryBlock
               );
               if (decompResult.text && decompResult.text.trim().length > 0) {
@@ -977,10 +1066,8 @@ Translation Guidelines:
                 inFlightChunkIds.delete(firstChunk.id);
                 success = true;
                 batchChunks = [];
-                if (activeCloudJob) {
-                  activeCloudJob.lastActiveAt = Date.now();
-                  saveCloudJobToDisk();
-                }
+                targetJob.lastActiveAt = Date.now();
+                saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
                 console.log(`[Cloud Worker #${workerId}] Chunk ${firstChunk.index + 1} succeeded via paragraph decomposition!`);
                 break;
               }
@@ -996,10 +1083,10 @@ Translation Guidelines:
             chunk.lastErrorAt = Date.now();
           }
 
-          activeCloudJob.lastActiveAt = Date.now();
-          saveCloudJobToDisk();
+          targetJob.lastActiveAt = Date.now();
+          saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
 
-          if (!activeCloudJob || activeCloudJob.status !== "running") {
+          if (targetJob.status !== "running") {
             break;
           }
 
@@ -1013,12 +1100,9 @@ Translation Guidelines:
       for (const chunk of batchChunks) {
         inFlightChunkIds.delete(chunk.id);
       }
-      if (activeCloudJob) {
-        activeCloudJob.lastActiveAt = Date.now();
-        saveCloudJobToDisk();
-      }
+      targetJob.lastActiveAt = Date.now();
+      saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
 
-      // Small pacing interval between worker tasks to stay comfortable with RPM (reduced from 1200ms to 100ms)
       await new Promise((r) => setTimeout(r, 100));
     }
   };
@@ -1033,24 +1117,21 @@ Translation Guidelines:
   } finally {
     isCloudWorkerRunning = false;
     inFlightChunkIds.clear();
-    saveCloudJobToDisk();
   }
 }
 
-// Load any pending job on boot
-loadCloudJobFromDisk();
+// Load any pending jobs on boot
+loadCloudJobsFromDisk();
 
 // -------------------------------------------------------------
-// Security & Dual-Factor Gate (Google Identity + Master Passcode)
+// Security & Master Passcode Gate
 // -------------------------------------------------------------
-const AUTHORIZED_EMAIL = (process.env.AUTHORIZED_EMAIL || "cheesy3097@gmail.com").trim().toLowerCase();
 const ACCESS_PASSCODE = (process.env.ACCESS_PASSCODE || "").trim();
 const AUTH_SECRET = process.env.AUTH_SECRET || crypto.randomBytes(32).toString("hex");
 
-// In-memory valid token store with expiration (7 days)
+// In-memory valid token store with expiration (30 days)
 interface SessionTokenData {
-  userEmail: string;
-  googleVerified: boolean;
+  userEmail?: string;
   passcodeVerified: boolean;
   createdAt: number;
   expiresAt: number;
@@ -1101,21 +1182,19 @@ setInterval(() => {
   if (changed) saveSessions();
 }, 60 * 60 * 1000);
 
-function createSessionToken(userEmail: string, googleVerified: boolean, passcodeVerified: boolean): string {
+function createSessionToken(passcodeVerified: boolean): string {
   const token = crypto.randomBytes(32).toString("hex");
   const now = Date.now();
   validSessions.set(token, {
-    userEmail,
-    googleVerified,
     passcodeVerified,
     createdAt: now,
-    expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+    expiresAt: now + 30 * 24 * 60 * 60 * 1000, // 30 days
   });
   saveSessions();
   return token;
 }
 
-function verifyAuthToken(req: express.Request): { isValid: boolean; userEmail?: string } {
+function verifyAuthToken(req: express.Request): { isValid: boolean } {
   const authHeader = req.headers.authorization;
   if (!authHeader) return { isValid: false };
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
@@ -1128,18 +1207,12 @@ function verifyAuthToken(req: express.Request): { isValid: boolean; userEmail?: 
     return { isValid: false };
   }
 
-  // Check if both requirements are fulfilled
-  const googleRequired = !!AUTHORIZED_EMAIL;
   const passcodeRequired = !!ACCESS_PASSCODE;
-
-  if (googleRequired && (!session.googleVerified || session.userEmail.toLowerCase() !== AUTHORIZED_EMAIL)) {
-    return { isValid: false };
-  }
   if (passcodeRequired && !session.passcodeVerified) {
     return { isValid: false };
   }
 
-  return { isValid: true, userEmail: session.userEmail };
+  return { isValid: true };
 }
 
 // Authentication status endpoint (public)
@@ -1147,99 +1220,43 @@ app.get("/api/auth/status", (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : "";
   const session = token ? validSessions.get(token) : null;
-  const isSessionValid = session && session.expiresAt > Date.now();
+  const isSessionValid = !!(session && session.expiresAt > Date.now());
 
-  const requiresGoogle = !!AUTHORIZED_EMAIL;
   const requiresPasscode = !!ACCESS_PASSCODE;
-
-  const googleVerified = !!(isSessionValid && session?.googleVerified && session.userEmail.toLowerCase() === AUTHORIZED_EMAIL);
-  const passcodeVerified = !!(isSessionValid && session?.passcodeVerified);
-
-  const fullyAuthenticated = (!requiresGoogle || googleVerified) && (!requiresPasscode || passcodeVerified);
+  const passcodeVerified = isSessionValid ? !!session?.passcodeVerified : !requiresPasscode;
+  const fullyAuthenticated = !requiresPasscode || passcodeVerified;
 
   res.json({
     authenticated: fullyAuthenticated,
-    requiresGoogle,
+    requiresGoogle: false,
     requiresPasscode,
-    googleVerified,
+    googleVerified: true,
     passcodeVerified,
-    userEmail: isSessionValid ? session?.userEmail : null,
-    authorizedEmail: AUTHORIZED_EMAIL,
     hasPasscodeConfigured: !!ACCESS_PASSCODE,
   });
 });
 
-// Dual Login / Verification Endpoint
+// Master Passcode Login Endpoint
 app.post("/api/auth/login", (req, res) => {
   try {
-    const { email = "", passcode = "", googleCredential = "", token = "" } = req.body;
-    let providedEmail = String(email || "").trim().toLowerCase();
-
-    // If a Google Identity credential (JWT) is provided, decode payload
-    if (googleCredential) {
-      try {
-        const parts = googleCredential.split(".");
-        if (parts.length >= 2) {
-          const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf-8"));
-          if (payload.email) {
-            providedEmail = String(payload.email).trim().toLowerCase();
-          }
-        }
-      } catch (jwtErr) {
-        console.warn("[Auth] Could not parse Google credential JWT:", jwtErr);
-      }
-    }
-
-    const requiresGoogle = !!AUTHORIZED_EMAIL;
+    const { passcode = "" } = req.body;
     const requiresPasscode = !!ACCESS_PASSCODE;
 
-    // Check existing partial session if token passed
-    let existingSession = token ? validSessions.get(token) : null;
-    let googleVerified = existingSession ? existingSession.googleVerified : false;
-    let passcodeVerified = existingSession ? existingSession.passcodeVerified : false;
-    let currentEmail = existingSession ? existingSession.userEmail : providedEmail;
-
-    // 1. Verify Google Email if provided
-    if (providedEmail) {
-      if (providedEmail === AUTHORIZED_EMAIL) {
-        googleVerified = true;
-        currentEmail = providedEmail;
-      } else {
-        res.status(403).json({
-          error: `Access Denied: The Google account "${providedEmail}" is not authorized. Only ${AUTHORIZED_EMAIL} may access this private translation engine.`,
-          unauthorizedEmail: providedEmail,
-        });
-        return;
-      }
-    }
-
-    // 2. Verify Passcode if provided or configured
     if (requiresPasscode) {
-      if (passcode && passcode.trim() === ACCESS_PASSCODE) {
-        passcodeVerified = true;
-      } else if (passcode && passcode.trim() !== ACCESS_PASSCODE) {
+      if (!passcode || passcode.trim() !== ACCESS_PASSCODE) {
         res.status(401).json({ error: "Invalid master passcode. Access denied." });
         return;
       }
-    } else {
-      passcodeVerified = true;
     }
 
-    if (!requiresGoogle) {
-      googleVerified = true;
-    }
-
-    const isComplete = (!requiresGoogle || googleVerified) && (!requiresPasscode || passcodeVerified);
-    const newToken = createSessionToken(currentEmail, googleVerified, passcodeVerified);
+    const newToken = createSessionToken(true);
 
     res.json({
       success: true,
-      authenticated: isComplete,
+      authenticated: true,
       token: newToken,
-      userEmail: currentEmail,
-      googleVerified,
-      passcodeVerified,
-      requiresGoogle,
+      passcodeVerified: true,
+      requiresGoogle: false,
       requiresPasscode,
     });
   } catch (err: any) {
@@ -1263,7 +1280,7 @@ const requireAuthMiddleware: express.RequestHandler = (req, res, next) => {
   const { isValid } = verifyAuthToken(req);
   if (!isValid) {
     res.status(401).json({
-      error: "Unauthorized: Please sign in with your authorized Google Account (cheesy3097@gmail.com) and enter the master passcode to access the translation engine.",
+      error: "Unauthorized: Please enter the master passcode to access the translation engine.",
       requiresAuth: true,
     });
     return;
@@ -1286,8 +1303,8 @@ app.get("/api/health", (req, res) => {
     projects: projectsStatus,
     models: available,
     primaryModel: available[0] || "gemini-3.5-flash",
-    hasActiveCloudJob: !!activeCloudJob,
-    cloudJobStatus: activeCloudJob?.status || "idle",
+    hasActiveCloudJob: !!getJobForSession(req),
+    cloudJobStatus: getJobForSession(req)?.status || "idle",
   });
 });
 
@@ -1302,55 +1319,33 @@ app.get("/api/projects/status", (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Cloud Job API Endpoints
+// Cloud Job API Endpoints (Session-Isolated)
 // -------------------------------------------------------------
 
-// Get status & progress of cloud job (Data-saving lightweight mode by default)
+// Get status & progress of cloud job for current session (Data-saving lightweight mode by default)
 app.get("/api/cloud-job/status", (req, res) => {
-  if (!activeCloudJob) {
+  const targetJob = getJobForSession(req);
+  if (!targetJob) {
     res.json({ hasJob: false, job: null });
     return;
   }
 
   const includeFullText = req.query.full === "true";
 
-  // Ensure any completed offline translations (e.g., chunk 82, 124) are synced into memory
-  try {
-    const files = fs.readdirSync(DATA_DIR);
-    for (const file of files) {
-      const match = file.match(/^chunk_(\d+)_translated\.txt$/);
-      if (match && activeCloudJob) {
-        const fileNum = parseInt(match[1], 10);
-        const targetChunk = activeCloudJob.chunks.find(
-          (c) => c.index === fileNum || c.chapterTitle?.includes(`第${fileNum}章`)
-        );
-        if (targetChunk && (targetChunk.status !== "completed" || !targetChunk.englishText)) {
-          targetChunk.englishText = fs.readFileSync(path.join(DATA_DIR, file), "utf-8").trim();
-          targetChunk.status = "completed";
-          targetChunk.errorMessage = undefined;
-          targetChunk.lastErrorAt = undefined;
-          saveCloudJobToDisk();
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("Could not sync chunk files:", e);
-  }
+  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed").length;
+  const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
+  const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
 
-  const completedChunks = activeCloudJob.chunks.filter((c) => c.status === "completed").length;
-  const inProgressChunks = activeCloudJob.chunks.filter((c) => c.status === "processing").length;
-  const errorChunks = activeCloudJob.chunks.filter((c) => c.status === "error").length;
-
-  if (completedChunks === activeCloudJob.chunks.length && activeCloudJob.status !== "completed") {
-    activeCloudJob.status = "completed";
-    saveCloudJobToDisk();
+  if (completedChunks === targetJob.chunks.length && targetJob.status !== "completed") {
+    targetJob.status = "completed";
+    saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
   }
 
   // Calculate contiguous completion frontier from index 0
   let contiguousFrontierIndex = -1;
   let contiguousCount = 0;
-  for (let i = 0; i < activeCloudJob.chunks.length; i++) {
-    const c = activeCloudJob.chunks[i];
+  for (let i = 0; i < targetJob.chunks.length; i++) {
+    const c = targetJob.chunks[i];
     if (c && c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
       contiguousFrontierIndex = i;
       contiguousCount++;
@@ -1359,12 +1354,12 @@ app.get("/api/cloud-job/status", (req, res) => {
     }
   }
 
-  const aheadCompletedCount = activeCloudJob.chunks.filter(
+  const aheadCompletedCount = targetJob.chunks.filter(
     (c) => c.status === "completed" && !!c.englishText?.trim() && c.index > contiguousFrontierIndex
   ).length;
 
   // Render chunks (lightweight metadata by default to save 99%+ mobile data)
-  const chunksData = activeCloudJob.chunks.map((c) => {
+  const chunksData = targetJob.chunks.map((c) => {
     const wordCount = c.englishText ? countEnglishWords(c.englishText) : 0;
     if (includeFullText) {
       return { ...c, wordCount };
@@ -1387,18 +1382,18 @@ app.get("/api/cloud-job/status", (req, res) => {
   res.json({
     hasJob: true,
     job: {
-      id: activeCloudJob.id,
-      fileName: activeCloudJob.fileName,
-      fileSizeBytes: activeCloudJob.fileSizeBytes,
-      totalChineseChars: activeCloudJob.totalChineseChars,
-      style: activeCloudJob.style,
-      customInstructions: activeCloudJob.customInstructions,
-      glossary: activeCloudJob.glossary,
-      concurrency: activeCloudJob.concurrency,
-      status: activeCloudJob.status,
-      startedAt: activeCloudJob.startedAt,
-      lastActiveAt: activeCloudJob.lastActiveAt,
-      totalChunks: activeCloudJob.chunks.length,
+      id: targetJob.id,
+      fileName: targetJob.fileName,
+      fileSizeBytes: targetJob.fileSizeBytes,
+      totalChineseChars: targetJob.totalChineseChars,
+      style: targetJob.style,
+      customInstructions: targetJob.customInstructions,
+      glossary: targetJob.glossary,
+      concurrency: targetJob.concurrency,
+      status: targetJob.status,
+      startedAt: targetJob.startedAt,
+      lastActiveAt: targetJob.lastActiveAt,
+      totalChunks: targetJob.chunks.length,
       completedChunks,
       inProgressChunks,
       errorChunks,
@@ -1413,18 +1408,19 @@ app.get("/api/cloud-job/status", (req, res) => {
 
 // Sync full chapter texts for completed chunks or requested chunk indices on-demand
 app.get("/api/cloud-job/sync-texts", (req, res) => {
-  if (!activeCloudJob) {
+  const targetJob = getJobForSession(req);
+  if (!targetJob) {
     res.json({ success: false, chunks: [] });
     return;
   }
 
   const indicesParam = req.query.indices as string;
-  let targetChunks = activeCloudJob.chunks;
+  let targetChunks = targetJob.chunks;
   if (indicesParam) {
     const setIdx = new Set(indicesParam.split(",").map(Number));
-    targetChunks = activeCloudJob.chunks.filter((c) => setIdx.has(c.index));
+    targetChunks = targetJob.chunks.filter((c) => setIdx.has(c.index));
   } else if (req.query.completedOnly === "true") {
-    targetChunks = activeCloudJob.chunks.filter(
+    targetChunks = targetJob.chunks.filter(
       (c) => c.status === "completed" && !!c.englishText?.trim()
     );
   }
@@ -1445,13 +1441,14 @@ app.get("/api/cloud-job/sync-texts", (req, res) => {
 
 // Fetch single full chunk by index for Chapter Reader or manual editing
 app.get("/api/cloud-job/chunk/:index", (req, res) => {
-  if (!activeCloudJob) {
+  const targetJob = getJobForSession(req);
+  if (!targetJob) {
     res.status(404).json({ error: "No active cloud job." });
     return;
   }
 
   const idx = parseInt(req.params.index, 10);
-  const chunk = activeCloudJob.chunks[idx];
+  const chunk = targetJob.chunks[idx];
   if (!chunk) {
     res.status(404).json({ error: "Chunk not found." });
     return;
@@ -1493,10 +1490,12 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, (req, res) => {
       return;
     }
 
+    const sessionId = getSessionId(req);
     const jobId = "cloud_job_" + Date.now();
 
-    activeCloudJob = {
+    const newJob: CloudJob = {
       id: jobId,
+      sessionId,
       fileName,
       fileSizeBytes,
       totalChineseChars,
@@ -1510,7 +1509,7 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, (req, res) => {
       lastActiveAt: Date.now(),
     };
 
-    saveCloudJobToDisk();
+    setJobForSession(sessionId, newJob);
     startCloudWorkerLoop();
 
     res.json({
@@ -1526,18 +1525,22 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, (req, res) => {
 
 // Pause cloud job
 app.post("/api/cloud-job/pause", requireAuthMiddleware, (req, res) => {
-  if (activeCloudJob) {
-    activeCloudJob.status = "paused";
-    saveCloudJobToDisk();
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
+  if (targetJob) {
+    targetJob.status = "paused";
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
   }
   res.json({ success: true, status: "paused" });
 });
 
 // Resume cloud job
 app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
-  if (activeCloudJob) {
-    activeCloudJob.status = "running";
-    saveCloudJobToDisk();
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
+  if (targetJob) {
+    targetJob.status = "running";
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
     startCloudWorkerLoop();
   }
   res.json({ success: true, status: "running" });
@@ -1545,19 +1548,22 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
 
 // Stop and clear cloud job
 app.post("/api/cloud-job/stop", requireAuthMiddleware, (req, res) => {
-  if (activeCloudJob) {
-    activeCloudJob.status = "idle";
-    activeCloudJob = null;
-    saveCloudJobToDisk();
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
+  if (targetJob) {
+    targetJob.status = "idle";
+    setJobForSession(targetJob.sessionId || sessionId, null);
   }
   res.json({ success: true, message: "Cloud job removed." });
 });
 
 // Sync manual edit to a chunk or retry outcome
 app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, (req, res) => {
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
   const { chunkId, englishText, status } = req.body;
-  if (activeCloudJob && chunkId) {
-    const chunk = activeCloudJob.chunks.find((c) => c.id === chunkId);
+  if (targetJob && chunkId) {
+    const chunk = targetJob.chunks.find((c) => c.id === chunkId);
     if (chunk) {
       if (englishText !== undefined) {
         chunk.englishText = englishText;
@@ -1567,8 +1573,8 @@ app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, (req, res) => {
         chunk.status = status;
       }
       chunk.errorMessage = undefined;
-      activeCloudJob.lastActiveAt = Date.now();
-      saveCloudJobToDisk();
+      targetJob.lastActiveAt = Date.now();
+      saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
     }
   }
   res.json({ success: true });
@@ -1576,16 +1582,18 @@ app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, (req, res) => {
 
 // Update settings on the cloud job (e.g. style, instructions, glossary) while running or paused
 app.post("/api/cloud-job/update-settings", requireAuthMiddleware, (req, res) => {
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
   const { style, customInstructions, glossary, concurrency } = req.body;
-  if (activeCloudJob) {
-    if (style) activeCloudJob.style = style;
-    if (customInstructions !== undefined) activeCloudJob.customInstructions = customInstructions;
-    if (glossary) activeCloudJob.glossary = glossary;
-    if (concurrency) activeCloudJob.concurrency = concurrency;
-    activeCloudJob.lastActiveAt = Date.now();
-    saveCloudJobToDisk();
+  if (targetJob) {
+    if (style) targetJob.style = style;
+    if (customInstructions !== undefined) targetJob.customInstructions = customInstructions;
+    if (glossary) targetJob.glossary = glossary;
+    if (concurrency) targetJob.concurrency = concurrency;
+    targetJob.lastActiveAt = Date.now();
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
   }
-  res.json({ success: true, job: activeCloudJob });
+  res.json({ success: true, job: targetJob });
 });
 
 // Main translation endpoint for chunks

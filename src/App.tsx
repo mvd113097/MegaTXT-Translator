@@ -134,9 +134,26 @@ export default function App() {
     setTimeout(() => setToastData(null), 4000);
   };
 
-  // Helper to attach authorization header
+  // Generate or retrieve persistent unique client/device session ID
+  const getClientSessionId = () => {
+    try {
+      let sid = localStorage.getItem("megatext_client_session_id");
+      if (!sid) {
+        sid = "sess_" + Math.random().toString(36).substring(2, 12) + "_" + Date.now().toString(36);
+        localStorage.setItem("megatext_client_session_id", sid);
+      }
+      return sid;
+    } catch {
+      return "sess_default";
+    }
+  };
+
+  // Helper to attach authorization and session isolation headers
   const getAuthHeaders = () => {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-session-id": getClientSessionId(),
+    };
     if (authToken) {
       headers["Authorization"] = `Bearer ${authToken}`;
     }
@@ -285,15 +302,16 @@ export default function App() {
         if (data.hasJob && data.job) {
           const sJob = data.job;
           setServerCloudJob(sJob);
+          const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
           setSession((prev) => {
             const prevCompleted = prev?.chunks?.filter((c) => c.status === "completed").length || 0;
-            const serverCompleted = sJob.completedChunks || (sJob.chunks ? sJob.chunks.filter((c: any) => c.status === "completed").length : 0);
+            const serverCompleted = sJob.completedChunks || (sortedChunks.filter((c: any) => c.status === "completed").length);
             if (!prev || prev.fileName === sJob.fileName || (serverCompleted > prevCompleted)) {
               return {
                 fileName: sJob.fileName,
                 fileSizeBytes: sJob.fileSizeBytes || 0,
                 totalChineseChars: sJob.totalChineseChars || 0,
-                chunks: sJob.chunks,
+                chunks: sortedChunks,
                 style: (sJob.style as TranslationStyle) || "xianxia",
                 customInstructions: sJob.customInstructions || "",
                 glossary: sJob.glossary || [],
@@ -307,7 +325,7 @@ export default function App() {
             }
             return prev;
           });
-          chunksRef.current = sJob.chunks;
+          chunksRef.current = sortedChunks;
           if (typeof sJob.concurrency === "number" && sJob.concurrency >= 1 && sJob.concurrency <= 5) {
             setConcurrency(sJob.concurrency);
             try {
@@ -336,11 +354,12 @@ export default function App() {
   // Load existing server job explicitly if requested
   const handleLoadServerJob = () => {
     if (!serverCloudJob) return;
+    const sortedChunks = serverCloudJob.chunks ? [...serverCloudJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
     setSession({
       fileName: serverCloudJob.fileName,
       fileSizeBytes: serverCloudJob.fileSizeBytes || 0,
       totalChineseChars: serverCloudJob.totalChineseChars || 0,
-      chunks: serverCloudJob.chunks,
+      chunks: sortedChunks,
       style: (serverCloudJob.style as TranslationStyle) || "xianxia",
       customInstructions: serverCloudJob.customInstructions || "",
       glossary: serverCloudJob.glossary || [],
@@ -349,7 +368,7 @@ export default function App() {
       createdAt: serverCloudJob.startedAt,
       lastUpdated: serverCloudJob.lastActiveAt,
     });
-    chunksRef.current = serverCloudJob.chunks;
+    chunksRef.current = sortedChunks;
     if (serverCloudJob.status === "running") {
       setIsRunning(true);
       setIsPaused(false);
@@ -389,7 +408,7 @@ export default function App() {
                 chineseText: incChunk.chineseText !== undefined ? incChunk.chineseText : (existing?.chineseText || ""),
                 englishText: incChunk.englishText !== undefined ? incChunk.englishText : (existing?.englishText || ""),
               };
-            });
+            }).sort((a: any, b: any) => a.index - b.index);
 
             chunksRef.current = mergedChunks;
             return {
@@ -748,7 +767,7 @@ export default function App() {
         // Sync immediately with the server's cloud job so polling doesn't overwrite it
         await fetch("/api/cloud-job/update-chunk", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             chunkId,
             englishText: result.englishText,
@@ -1075,29 +1094,27 @@ Export Timestamp: ${new Date().toLocaleString()}
         onLogout={handleLogout}
       />
 
-      {/* Full-screen Dual-Factor Security Gate (Google Auth + Passcode) */}
+      {/* Full-screen Master Passcode Security Gate */}
       {!isAuthLoading && authStatus && !authStatus.authenticated && (
         <AuthGateModal
           authStatus={authStatus}
-          onLoginSuccess={(token, userEmail) => {
+          onLoginSuccess={(token) => {
             setAuthToken(token);
             setAuthStatus((prev) =>
               prev
                 ? {
                     ...prev,
                     authenticated: true,
-                    googleVerified: true,
                     passcodeVerified: true,
-                    userEmail,
                   }
                 : null
             );
             checkAuthStatus(token);
             setToastData({
-              message: `🔓 Access granted. Welcome back, ${userEmail}!`,
+              message: "🔓 Access granted. Workspace unlocked!",
               type: "success",
             });
-            setTimeout(() => setToastData(null), 5000);
+            setTimeout(() => setToastData(null), 4000);
           }}
         />
       )}

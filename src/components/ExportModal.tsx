@@ -66,7 +66,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   // Generate output string based on format (strictly contiguous from Chunk 1)
   const generateExportContent = (): string => {
     if (exportFormat === "chinese_txt") {
-      return chunks
+      const sortedChunks = [...chunks].sort((a, b) => a.index - b.index);
+      return sortedChunks
         .map((c) => {
           const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";
           return `${header}${c.chineseText.trim()}`;

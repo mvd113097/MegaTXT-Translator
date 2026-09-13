@@ -7,6 +7,7 @@ import {
   Sun,
   Moon,
   LogOut,
+  Lock,
 } from "lucide-react";
 
 interface NavbarProps {
@@ -67,17 +68,17 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action Controls - Compact, no horizontal scrolling needed */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Compact Sign Out Button / Icon */}
-          {userEmail && (
+          {/* Compact Lock / Sign Out Button */}
+          {onLogout && (
             <button
               id="signout-badge-btn"
               onClick={onLogout}
-              className="flex h-8 w-8 sm:h-8.5 sm:w-auto sm:px-2.5 items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 transition hover:bg-rose-50 dark:hover:bg-rose-950/60 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 dark:hover:border-rose-800 active:scale-95 cursor-pointer shrink-0 shadow-xs"
-              title={`Sign out (${userEmail})`}
-              aria-label="Sign out"
+              className="flex h-8 w-8 sm:h-8.5 sm:w-auto sm:px-2.5 items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 transition hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white active:scale-95 cursor-pointer shrink-0 shadow-xs"
+              title="Lock translation workspace"
+              aria-label="Lock workspace"
             >
-              <LogOut className="h-4 w-4 shrink-0" />
-              <span className="hidden sm:inline text-xs font-medium">Sign out</span>
+              <Lock className="h-3.5 w-3.5 shrink-0 text-indigo-500 dark:text-indigo-400" />
+              <span className="hidden sm:inline text-xs font-medium">Lock</span>
             </button>
           )}
 
