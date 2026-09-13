@@ -7,7 +7,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
-import { parseAndValidateBatchResponse, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
+import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 
 dotenv.config();
 
@@ -129,6 +129,8 @@ async function generateWithQuotaScheduler(
 
   const modelName = modelSelection.modelName;
   const currentModelIdx = modelSelection.index;
+
+  quotaScheduler.acquireProject(project.id);
 
   try {
     const response = await project.client.models.generateContent({
@@ -374,6 +376,8 @@ async function generateWithQuotaScheduler(
     }
 
     throw err;
+  } finally {
+    quotaScheduler.releaseProject(project.id);
   }
 }
 

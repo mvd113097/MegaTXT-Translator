@@ -10,7 +10,7 @@ import {
   countEnglishWords,
 } from "../src/utils/chunker";
 import { QuotaAwareKeyScheduler } from "../server/quotaScheduler";
-import { parseAndValidateBatchResponse, MAX_BATCH_CHAR_BUDGET } from "../server/batchParser";
+import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "../server/batchParser";
 
 function createMockChunk(
   index: number,
@@ -509,14 +509,58 @@ Chapter 3 translated text.
   }
 
   // -------------------------------------------------------------
-  // Test 14: Configurable Character Budget Limit
+  // Test 14: Configurable Character Budget & Batch Grouping Logic
   // -------------------------------------------------------------
-  console.log("\n[Test Suite 14] Configurable Character Budget Batching");
+  console.log("\n[Test Suite 14] Configurable Character Budget & Batch Grouping");
   {
     assert(
       typeof MAX_BATCH_CHAR_BUDGET === "number" && MAX_BATCH_CHAR_BUDGET >= 5000 && MAX_BATCH_CHAR_BUDGET <= 10000,
       "MAX_BATCH_CHAR_BUDGET is configured within safe range (5,000–10,000 Chinese chars)",
       `Configured Budget: ${MAX_BATCH_CHAR_BUDGET}`
+    );
+
+    // 1. Multiple small chunks combined up to budget
+    const smallChunks = [
+      { id: "c1", index: 0, chineseText: "A".repeat(2000) },
+      { id: "c2", index: 1, chineseText: "B".repeat(2500) },
+      { id: "c3", index: 2, chineseText: "C".repeat(2000) },
+      { id: "c4", index: 3, chineseText: "D".repeat(3000) }, // Would push total to 9500 > 7000
+    ];
+
+    const batches = groupChunksIntoBatches(smallChunks, new Set(), 7000);
+    assert(
+      batches.length === 2 && batches[0].length === 3 && batches[1].length === 1,
+      "Batches split automatically when 7,000 character budget would be exceeded",
+      `Batch 1 size: ${batches[0]?.length}, Batch 2 size: ${batches[1]?.length}`
+    );
+
+    // 2. Large chapter remains independent in single-chunk batch
+    const largeChapter = [
+      { id: "c_huge", index: 0, chineseText: "X".repeat(8500) },
+      { id: "c_next", index: 1, chineseText: "Y".repeat(1500) },
+    ];
+    const largeBatches = groupChunksIntoBatches(largeChapter, new Set(), 7000);
+    assert(
+      largeBatches.length === 2 && largeBatches[0].length === 1 && largeBatches[0][0].id === "c_huge",
+      "Large chapter (>7000 chars) remains independent in its own single-chunk batch",
+      `Large batch count: ${largeBatches.length}`
+    );
+
+    // 3. Duplicate marker response rejection
+    const dupResponse = `
+<<<CHAPTER_START id="c1" index=1>>>
+Text...
+<<<CHAPTER_END id="c1">>>
+
+<<<CHAPTER_START id="c1" index=1>>>
+Duplicate Text...
+<<<CHAPTER_END id="c1">>>
+`;
+    const dupResult = parseAndValidateBatchResponse(dupResponse, [{ id: "c1", index: 1 }]);
+    assert(
+      dupResult.get("c1")?.isValid === false,
+      "Duplicate batch chapter response is rejected as invalid for retry",
+      `Dup isValid: ${dupResult.get("c1")?.isValid}`
     );
   }
 

@@ -1042,7 +1042,16 @@ Export Timestamp: ${new Date().toLocaleString()}
                 );
               }}
               concurrency={concurrency}
-              onChangeConcurrency={setConcurrency}
+              onChangeConcurrency={(newConc) => {
+                setConcurrency(newConc);
+                if (mode === "cloud" && session) {
+                  fetch("/api/cloud-job/update-settings", {
+                    method: "POST",
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({ concurrency: newConc }),
+                  }).catch(() => {});
+                }
+              }}
               isRunning={isRunning}
               isPaused={isPaused}
               onStart={handleStart}

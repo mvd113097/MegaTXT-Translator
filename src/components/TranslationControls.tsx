@@ -221,7 +221,9 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
           >
             <option value={1}>1 stream (Strict 1→2→3)</option>
             <option value={2}>2 streams (Fast Parallel)</option>
-            <option value={3}>3 streams (Maximum Speed)</option>
+            <option value={3}>3 streams (Parallel)</option>
+            <option value={4}>4 streams (High Speed)</option>
+            <option value={5}>5 streams (Maximum Speed - 5 Projects)</option>
           </select>
         </div>
 

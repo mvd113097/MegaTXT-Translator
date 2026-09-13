@@ -10,7 +10,57 @@ export interface ParsedBatchChapter {
 export const MAX_BATCH_CHAR_BUDGET = parseInt(process.env.MAX_BATCH_CHAR_BUDGET || "7000", 10);
 
 /**
- * Strict machine-parseable batch response validator.
+ * Groups adjacent pending chunks into batches up to maxBudget Chinese characters.
+ * Large chapters exceeding the budget remain in their own independent single-chunk batch.
+ */
+export function groupChunksIntoBatches<T extends { id: string; index: number; charCount?: number; chineseText: string }>(
+  chunks: T[],
+  inFlightIds: Set<string> = new Set(),
+  maxBudget: number = MAX_BATCH_CHAR_BUDGET,
+  maxItemsPerBatch: number = 4
+): T[][] {
+  const batches: T[][] = [];
+  const claimed = new Set<string>();
+
+  for (let i = 0; i < chunks.length; i++) {
+    const first = chunks[i];
+    if (inFlightIds.has(first.id) || claimed.has(first.id)) {
+      continue;
+    }
+
+    const currentBatch = [first];
+    claimed.add(first.id);
+    let currentChars = first.chineseText.length;
+
+    // Expand batch with contiguous adjacent chunks up to budget
+    for (let j = i + 1; j < chunks.length; j++) {
+      const next = chunks[j];
+      if (next.index !== chunks[j - 1].index + 1) {
+        break; // Must be contiguous
+      }
+      if (inFlightIds.has(next.id) || claimed.has(next.id)) {
+        break;
+      }
+      const len = next.chineseText.length;
+      if (currentChars + len > maxBudget) {
+        break; // Respect max character budget
+      }
+      if (currentBatch.length >= maxItemsPerBatch) {
+        break;
+      }
+
+      currentBatch.push(next);
+      claimed.add(next.id);
+      currentChars += len;
+    }
+
+    batches.push(currentBatch);
+  }
+
+  return batches;
+}
+
+/**
  * Validates that every expected chapter ID in a batch is returned exactly once
  * inside matching <<<CHAPTER_START id="...">>> and <<<CHAPTER_END id="...">>> markers.
  * 
