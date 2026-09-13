@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   UploadCloud,
   FileText,
@@ -36,12 +36,29 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
     estimatedChunks: number;
   } | null>(null);
 
-  // Settings (Default to 7,000 for maximum free volume: ~135 requests per 1M characters)
-  const [targetChunkChars, setTargetChunkChars] = useState(7000);
+  // Settings (Default to 7,000 for maximum free volume, or read from preferred stored settings)
+  const [targetChunkChars, setTargetChunkChars] = useState<number>(() => {
+    const saved = localStorage.getItem("preferred_target_chunk_chars");
+    return saved ? Number(saved) : 7000;
+  });
   const [splitByChapters, setSplitByChapters] = useState(true);
   const [isReading, setIsReading] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Automatically recalculate estimated chunks when targetChunkChars changes
+  useEffect(() => {
+    const activeText = activeTab === "file" ? fileContent : pastedText;
+    if (activeText.trim()) {
+      setFileStats((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          estimatedChunks: Math.max(1, Math.ceil(activeText.length / targetChunkChars)),
+        };
+      });
+    }
+  }, [targetChunkChars, fileContent, pastedText, activeTab]);
 
   // Handle uploaded file
   const handleFileProcess = (file: File) => {
@@ -351,7 +368,11 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 <select
                   id="chunk-size-select"
                   value={targetChunkChars}
-                  onChange={(e) => setTargetChunkChars(Number(e.target.value))}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    setTargetChunkChars(value);
+                    localStorage.setItem("preferred_target_chunk_chars", String(value));
+                  }}
                   className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                 >
                   <option value={7000}>
