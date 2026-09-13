@@ -31,7 +31,7 @@ import {
 import { SAMPLE_GLOSSARY } from "./data/sampleNovel";
 import { downloadEpub } from "./utils/epubGenerator";
 import { downloadFile } from "./utils/fileDownloader";
-import { CheckCircle, ExternalLink, AlertTriangle, Download, Cloud, ShieldCheck } from "lucide-react";
+import { CheckCircle, ExternalLink, AlertTriangle, Download, Cloud, ShieldCheck, BookOpen, RefreshCw } from "lucide-react";
 
 const STORAGE_KEY = "megatext_translator_session_v1";
 
@@ -1023,7 +1023,6 @@ Export Timestamp: ${new Date().toLocaleString()}
               fileName={session.fileName}
               onQuickDownloadProgress={handleDownloadProgress}
               isRunning={isRunning}
-              onReset={handleReset}
             />
 
             {/* Translation Action Controls */}
