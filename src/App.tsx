@@ -1117,27 +1117,27 @@ Export Timestamp: ${new Date().toLocaleString()}
             {isCompleted && (
               <div
                 id="translation-completed-hero-banner"
-                className="rounded-2xl border-2 border-emerald-500/80 dark:border-emerald-600 bg-gradient-to-br from-emerald-500/10 via-teal-500/5 to-emerald-500/15 dark:from-emerald-950/60 dark:via-slate-900 dark:to-emerald-950/60 p-5 sm:p-6 shadow-xl shadow-emerald-500/10 transition animate-in fade-in zoom-in-95 duration-200"
+                className="rounded-2xl border-2 border-emerald-500/80 dark:border-emerald-600 bg-gradient-to-br from-emerald-500/10 via-teal-500/5 to-emerald-500/15 dark:from-emerald-950/60 dark:via-slate-900 dark:to-emerald-950/60 p-4 sm:p-6 shadow-xl shadow-emerald-500/10 transition animate-in fade-in duration-200 overflow-hidden"
               >
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-                  <div className="flex items-start gap-4">
-                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-md shadow-emerald-500/30">
-                      <CheckCircle2 className="h-7 w-7" />
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 sm:gap-5">
+                  <div className="flex items-start gap-3 sm:gap-4 min-w-0 flex-1">
+                    <div className="flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-md shadow-emerald-500/30 mt-0.5">
+                      <CheckCircle2 className="h-5 w-5 sm:h-7 sm:w-7" />
                     </div>
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 text-white px-3 py-0.5 text-xs font-black uppercase tracking-wider shadow-xs">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
+                    <div className="space-y-1.5 min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 text-white px-2.5 py-0.5 text-[11px] sm:text-xs font-black uppercase tracking-wider shadow-xs whitespace-nowrap">
+                          <CheckCircle2 className="h-3 w-3 sm:h-3.5 sm:w-3.5 shrink-0" />
                           Translation Completed
                         </span>
-                        <span className="rounded-full bg-emerald-100 dark:bg-emerald-900/60 px-2.5 py-0.5 text-xs font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
+                        <span className="rounded-full bg-emerald-100 dark:bg-emerald-900/60 px-2 py-0.5 text-[11px] sm:text-xs font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 whitespace-nowrap">
                           100% Translated (0 Gaps)
                         </span>
                       </div>
-                      <h2 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white tracking-tight">
+                      <h2 className="text-base sm:text-xl font-black text-slate-900 dark:text-white tracking-tight break-all sm:break-words leading-snug">
                         {session.fileName} is 100% Finished!
                       </h2>
-                      <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl">
+                      <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl break-words">
                         All <strong className="text-slate-900 dark:text-white">{totalChunks} chapters</strong> ({completedChars.toLocaleString()} Chinese characters) were successfully translated into{" "}
                         <strong className="text-emerald-700 dark:text-emerald-400 font-bold">~{completedEnglishWords.toLocaleString()} English words</strong>. Your novel is fully preserved and ready for offline reading in Moon+ Reader or Kindle.
                       </p>
@@ -1145,26 +1145,26 @@ Export Timestamp: ${new Date().toLocaleString()}
                   </div>
 
                   {/* Immediate 1-Click Action Buttons */}
-                  <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 shrink-0 pt-2 lg:pt-0">
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 shrink-0 pt-1 lg:pt-0 w-full lg:w-auto">
                     <button
                       id="completed-banner-download-epub-btn"
                       type="button"
                       onClick={() => handleDownloadProgress("epub")}
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-4 sm:px-5 py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-emerald-600/30 hover:shadow-emerald-600/50 active:scale-95 transition cursor-pointer"
+                      className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 sm:px-5 py-2.5 sm:py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-emerald-600/30 hover:shadow-emerald-600/50 active:scale-95 transition cursor-pointer whitespace-nowrap"
                       title="Download the full translated novel as an EPUB eBook"
                     >
-                      <BookCheck className="h-4 w-4 sm:h-5 sm:w-5" />
-                      <span>Download Complete Book (EPUB)</span>
+                      <BookCheck className="h-4 w-4 sm:h-5 sm:w-5 shrink-0" />
+                      <span>Download EPUB</span>
                     </button>
 
                     <button
                       id="completed-banner-download-txt-btn"
                       type="button"
                       onClick={() => handleDownloadProgress("txt")}
-                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-400/80 dark:border-emerald-700 bg-white dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-slate-750 px-3.5 sm:px-4 py-3 text-xs sm:text-sm font-bold text-emerald-800 dark:text-emerald-200 shadow-xs active:scale-95 transition cursor-pointer"
+                      className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-400/80 dark:border-emerald-700 bg-white dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-slate-750 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold text-emerald-800 dark:text-emerald-200 shadow-xs active:scale-95 transition cursor-pointer whitespace-nowrap"
                       title="Download as standard UTF-8 text file"
                     >
-                      <FileText className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                      <FileText className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                       <span>Download TXT</span>
                     </button>
 
@@ -1172,22 +1172,21 @@ Export Timestamp: ${new Date().toLocaleString()}
                       id="completed-banner-export-modal-btn"
                       type="button"
                       onClick={() => setIsExportOpen(true)}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-3 py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-3 py-2.5 sm:py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer whitespace-nowrap"
                       title="Open full export options (bilingual, markdown, formatting)"
                     >
-                      <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                      <span>Export Options</span>
+                      <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                      <span>Export</span>
                     </button>
 
                     <button
                       id="completed-banner-new-book-btn"
                       type="button"
                       onClick={handleReset}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 px-3 py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 px-3 py-2.5 sm:py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer"
                       title="Translate a new novel"
                     >
-                      <RefreshCw className="h-4 w-4" />
-                      <span className="hidden sm:inline">New Book</span>
+                      <RefreshCw className="h-4 w-4 shrink-0" />
                     </button>
                   </div>
                 </div>

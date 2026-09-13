@@ -87,20 +87,30 @@ export function parseAndValidateBatchResponse(
     return results;
   }
 
-  // Regex to match <<<CHAPTER_START id="XXX" (optional index=YYY)>>>
-  const startRegex = /<<<CHAPTER_START\s+id=["']([^"']+)["'](?:\s+index=(\d+))?[^>]*>>>/g;
+  // Regex to match <<<CHAPTER_START id="XXX" (optional index=YYY)>>> or <<<CHAPTER_START index=YYY id="XXX">>>
+  // with or without quotes
+  const startRegex = /<<<CHAPTER_START\s+(?:id=["']?([^"'\s>]+)["']?)?(?:\s*index=["']?(\d+)["']?)?[^>]*>>>/gi;
   let match: RegExpExecArray | null;
 
   while ((match = startRegex.exec(rawResponseText)) !== null) {
-    const id = match[1];
+    let id = match[1];
     const parsedIdx = match[2] ? parseInt(match[2], 10) : 0;
+
+    // If id was empty or numeric index was passed, find corresponding expected chunk
+    if (!id && parsedIdx > 0) {
+      const matchedExp = expectedChunks.find((e) => e.index === parsedIdx);
+      if (matchedExp) id = matchedExp.id;
+    }
+
+    if (!id) continue;
     occurrences.set(id, (occurrences.get(id) || 0) + 1);
 
     const startIndex = match.index + match[0].length;
-    const endTagPattern = `<<<CHAPTER_END\\s+id=["']${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']>>>`;
-    const endRegex = new RegExp(endTagPattern, "g");
-    endRegex.lastIndex = startIndex;
-    const endMatch = endRegex.exec(rawResponseText);
+    // Look for CHAPTER_END with either id or index
+    const endTagPattern = `<<<CHAPTER_END(?:\\s+id=["']?${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']?|\\s+index=["']?${parsedIdx}["']?)?[^>]*>>>`;
+    const endRegex = new RegExp(endTagPattern, "i");
+    const restText = rawResponseText.slice(startIndex);
+    const endMatch = endRegex.exec(restText);
 
     if (!endMatch) {
       // Unclosed marker or truncated response!
@@ -114,7 +124,7 @@ export function parseAndValidateBatchResponse(
       continue;
     }
 
-    const englishContent = rawResponseText.slice(startIndex, endMatch.index).trim();
+    const englishContent = restText.slice(0, endMatch.index).trim();
     let isValid = true;
     let errorReason: string | undefined = undefined;
 
