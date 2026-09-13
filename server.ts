@@ -46,15 +46,13 @@ function getGeminiClient(): GoogleGenAI {
 
 // High reliability free-tier translation engine with multi-project quota pooling,
 // exponential backoff, and content-filter resilience.
-// Deprecated models (gemini-1.5-*, gemini-2.0-*, gemini-2.5-*) are omitted to prevent 404 Not Found errors.
+// Supported modern models per Google GenAI SDK guidelines:
 const FREE_TIER_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-3.6-flash",
-  "gemini-2.0-flash",
-  "gemini-3.7-flash",
   "gemini-3.8-flash",
   "gemini-flash-latest",
+  "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-3.7-flash",
   "gemini-3.1-flash-lite"
 ];
 
@@ -140,6 +138,12 @@ async function generateWithQuotaScheduler(
         systemInstruction,
         temperature: 0.3,
         topP: 0.9,
+        safetySettings: [
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+        ],
       },
     });
 
@@ -511,27 +515,32 @@ async function startCloudWorkerLoop() {
       let batchChunks = [firstChunk];
       let currentBatchChars = firstChunk.chineseText.length;
 
-      for (let i = firstChunk.index + 1; i < activeCloudJob.chunks.length; i++) {
-        const candidate = activeCloudJob.chunks[i];
-        if (candidate.status === "completed" && candidate.englishText && candidate.englishText.trim().length > 0) {
-          break;
-        }
-        if (inFlightChunkIds.has(candidate.id)) {
-          break;
-        }
-        if (candidate.status === "error" && candidate.lastErrorAt && now < candidate.lastErrorAt + 8000) {
-          break;
-        }
-        const candidateLen = candidate.chineseText.length;
-        if (currentBatchChars + candidateLen > MAX_BATCH_CHAR_BUDGET) {
-          break;
-        }
-        if (batchChunks.length >= 4) {
-          break;
-        }
+      // If the chunk previously had an error or is on retry, DO NOT batch it with others!
+      // Translating retried chunks individually prevents one bad chunk from failing others
+      if (firstChunk.status !== "error") {
+        for (let i = firstChunk.index + 1; i < activeCloudJob.chunks.length; i++) {
+          const candidate = activeCloudJob.chunks[i];
+          if (candidate.status === "completed" && candidate.englishText && candidate.englishText.trim().length > 0) {
+            break;
+          }
+          if (inFlightChunkIds.has(candidate.id)) {
+            break;
+          }
+          // Do not pull error chunks into a healthy batch
+          if (candidate.status === "error") {
+            break;
+          }
+          const candidateLen = candidate.chineseText.length;
+          if (currentBatchChars + candidateLen > MAX_BATCH_CHAR_BUDGET) {
+            break;
+          }
+          if (batchChunks.length >= 4) {
+            break;
+          }
 
-        batchChunks.push(candidate);
-        currentBatchChars += candidateLen;
+          batchChunks.push(candidate);
+          currentBatchChars += candidateLen;
+        }
       }
 
       // Claim all chunks in batch exclusively for this worker
@@ -611,7 +620,33 @@ IMMEDIATELY PRECEDING CONTEXT (For narrative continuity & pronoun resolution onl
 `;
           }
 
-          const systemInstruction = `You are a master professional Chinese-to-English translator and editor.
+          let systemInstruction = "";
+          let userPrompt = "";
+
+          if (batchChunks.length === 1) {
+            const single = batchChunks[0];
+            systemInstruction = `You are a master professional Chinese-to-English translator and editor.
+Your task is to translate Chinese text into English with the highest standard of accuracy, fluency, and reading pleasure.
+
+Translation Guidelines:
+1. Translate the Chinese text completely and faithfully without summarizing, omitting, or truncating any paragraphs or dialogues.
+2. Maintain the original paragraph breaks and dialogue formatting.
+3. ${styleGuidance}
+4. ${glossaryBlock || "Ensure all character names, titles, and locations remain consistent."}
+5. Resolve Chinese pronouns (他/她/它/他们) accurately based on context and dialogue tags.
+6. Translate Chinese four-character idioms (成语) and cultural expressions into natural English conceptual equivalents.
+7. Return ONLY the translated English text directly. Do NOT add conversational greetings, introductory notes, or markers.`;
+
+            userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
+              activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
+            }CHINESE SOURCE TEXT (${single.chapterTitle || "Chunk " + (single.index + 1)}):
+"""
+${single.chineseText}
+"""
+
+Translate the above Chinese text directly into English:`;
+          } else {
+            systemInstruction = `You are a master professional Chinese-to-English translator and editor.
 Your task is to translate Chinese text into English with the highest standard of accuracy, fluency, and reading pleasure.
 
 Translation Guidelines:
@@ -631,24 +666,25 @@ Translation Guidelines:
    Every single chapter in this request MUST be returned separately with its matching id in <<<CHAPTER_START id="...">>> and <<<CHAPTER_END id="...">>>.
    Do NOT combine chapters or omit markers.`;
 
-          const batchPrompts = batchChunks
-            .map((c) => {
-              return `<<<CHAPTER_START id="${c.id}" index=${c.index + 1} title="${c.chapterTitle || "Part " + (c.index + 1)}">>>
+            const batchPrompts = batchChunks
+              .map((c) => {
+                return `<<<CHAPTER_START id="${c.id}" index=${c.index + 1} title="${c.chapterTitle || "Part " + (c.index + 1)}">>>
 CHINESE SOURCE TEXT (${c.chapterTitle || "Chunk " + (c.index + 1)}):
 """
 ${c.chineseText}
 """
 <<<CHAPTER_END id="${c.id}">>>`;
-            })
-            .join("\n\n");
+              })
+              .join("\n\n");
 
-          const userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
-            activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
-          }CHINESE CHAPTER BATCH TO TRANSLATE (${batchChunks.length} item(s)):
+            userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
+              activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
+            }CHINESE CHAPTER BATCH TO TRANSLATE (${batchChunks.length} item(s)):
 
 ${batchPrompts}
 
 Translate all chapters above into English, returning each inside its exact <<<CHAPTER_START id="...">>> and <<<CHAPTER_END id="...">>> markers:`;
+          }
 
           const { text: rawTranslatedText, modelUsed, projectUsed } = await generateWithQuotaScheduler(
             userPrompt,
@@ -1034,9 +1070,31 @@ app.get("/api/cloud-job/status", (req, res) => {
 
   const includeFullText = req.query.full === "true";
 
+  // Ensure any completed offline translations (e.g., chunk 82) are synced into memory
+  try {
+    const chunk82File = path.join(DATA_DIR, "chunk_82_translated.txt");
+    if (fs.existsSync(chunk82File) && activeCloudJob.chunks[82]) {
+      const c82 = activeCloudJob.chunks[82];
+      if (c82.status !== "completed" || !c82.englishText) {
+        c82.englishText = fs.readFileSync(chunk82File, "utf-8").trim();
+        c82.status = "completed";
+        c82.errorMessage = undefined;
+        c82.lastErrorAt = undefined;
+        saveCloudJobToDisk();
+      }
+    }
+  } catch (e) {
+    console.warn("Could not sync chunk 82 file:", e);
+  }
+
   const completedChunks = activeCloudJob.chunks.filter((c) => c.status === "completed").length;
   const inProgressChunks = activeCloudJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = activeCloudJob.chunks.filter((c) => c.status === "error").length;
+
+  if (completedChunks === activeCloudJob.chunks.length && activeCloudJob.status !== "completed") {
+    activeCloudJob.status = "completed";
+    saveCloudJobToDisk();
+  }
 
   // Calculate contiguous completion frontier from index 0
   let contiguousFrontierIndex = -1;

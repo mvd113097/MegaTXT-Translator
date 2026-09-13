@@ -294,13 +294,18 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                     )}
 
                     {chunk.status === "error" && (
-                      <span
-                        className="inline-flex items-center gap-1 rounded-full bg-rose-50 dark:bg-rose-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700 dark:text-rose-300"
-                        title={chunk.errorMessage || "Error occurred during translation"}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const msg = chunk.errorMessage || "Temporary rate limit or empty response from model. Auto-retry is active.";
+                          alert(`Chapter #${chunk.index + 1} Error Details:\n\n${msg}\n\nClick the circular reload button or the top Orange button to re-run immediately.`);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-full bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700 dark:text-rose-300 cursor-pointer transition"
+                        title="Click to view exact error details"
                       >
                         <AlertCircle className="h-3 w-3" />
                         <span>Failed (Retrying)</span>
-                      </span>
+                      </button>
                     )}
 
                     {/* Retranslate button */}
