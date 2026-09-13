@@ -77,20 +77,32 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
 
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-xs transition-colors duration-200 space-y-4">
-      {/* Mode Selection Banner (Option 1 vs Option 2) */}
-      <div className="rounded-xl border border-indigo-100 dark:border-indigo-950/60 bg-gradient-to-r from-indigo-50/70 via-sky-50/50 to-slate-50 dark:from-indigo-950/30 dark:via-slate-900 dark:to-slate-900 p-3">
+      {/* Mode Selection / Completion Banner */}
+      <div className={`rounded-xl border p-3 transition-colors ${
+        isFinished
+          ? "border-emerald-300 dark:border-emerald-800/80 bg-gradient-to-r from-emerald-50/90 via-teal-50/50 to-slate-50 dark:from-emerald-950/40 dark:via-slate-900 dark:to-slate-900"
+          : "border-indigo-100 dark:border-indigo-950/60 bg-gradient-to-r from-indigo-50/70 via-sky-50/50 to-slate-50 dark:from-indigo-950/30 dark:via-slate-900 dark:to-slate-900"
+      }`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-indigo-900 dark:text-indigo-300">
-                Translation Mode:
+              <span className={`text-xs font-bold uppercase tracking-wider ${
+                isFinished ? "text-emerald-950 dark:text-emerald-300" : "text-indigo-900 dark:text-indigo-300"
+              }`}>
+                {isFinished ? "Status:" : "Translation Mode:"}
               </span>
-              <span className="rounded-full bg-indigo-100 dark:bg-indigo-900/60 px-2 py-0.5 text-[10px] font-bold text-indigo-800 dark:text-indigo-200">
-                {mode === "cloud" ? "Option 1 Selected" : "Option 2 Selected"}
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                isFinished
+                  ? "bg-emerald-100 dark:bg-emerald-900/80 text-emerald-900 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700"
+                  : "bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200"
+              }`}>
+                {isFinished ? "🎉 Translation Completed (100%)" : mode === "cloud" ? "Option 1 Selected" : "Option 2 Selected"}
               </span>
             </div>
             <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-400">
-              {mode === "cloud"
+              {isFinished
+                ? "✨ All chapters have been translated and verified. Your entire novel is 100% completed and ready to download in Moon+ Reader compatible EPUB or TXT format."
+                : mode === "cloud"
                 ? "☁️ Translates on server in background. You can safely close the browser, turn off your screen, and uses 0 mobile data while translating."
                 : "⚡ Translates in real-time in this open browser tab."}
             </p>
@@ -232,7 +244,15 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          {isRunning ? (
+          {isFinished ? (
+            <div
+              id="controls-completed-status-badge"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500 bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs shadow-emerald-200 dark:shadow-none animate-in fade-in"
+            >
+              <CheckCircle className="h-4 w-4 text-emerald-100" />
+              <span>Status: Completed</span>
+            </div>
+          ) : isRunning ? (
             <button
               id="pause-translation-btn"
               onClick={onPause}
@@ -250,11 +270,6 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
               <Play className="h-3.5 w-3.5" />
               <span>Resume {mode === "cloud" ? "Cloud" : "Batch"}</span>
             </button>
-          ) : isFinished ? (
-            <div className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-              <CheckCircle className="h-3.5 w-3.5" />
-              <span>All Chunks Translated</span>
-            </div>
           ) : (
             <button
               id="start-batch-btn"

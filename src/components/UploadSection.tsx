@@ -8,15 +8,22 @@ import {
   AlertCircle,
   FileCode,
   Zap,
+  BookCheck,
 } from "lucide-react";
 import { countChineseCharacters } from "../utils/chunker";
 import { SAMPLE_CHINESE_NOVEL } from "../data/sampleNovel";
 
 interface UploadSectionProps {
   onLoadText: (text: string, fileName: string, targetChunkChars: number, splitByChapters: boolean) => void;
+  serverJob?: any | null;
+  onLoadServerJob?: () => void;
 }
 
-export const UploadSection: React.FC<UploadSectionProps> = ({ onLoadText }) => {
+export const UploadSection: React.FC<UploadSectionProps> = ({
+  onLoadText,
+  serverJob,
+  onLoadServerJob,
+}) => {
   const [activeTab, setActiveTab] = useState<"file" | "paste">("file");
   const [dragActive, setDragActive] = useState(false);
   const [pastedText, setPastedText] = useState("");
@@ -108,6 +115,49 @@ export const UploadSection: React.FC<UploadSectionProps> = ({ onLoadText }) => {
 
   return (
     <div className="mx-auto max-w-4xl py-6">
+      {/* Existing Server Job Available Banner */}
+      {serverJob && (
+        <div
+          id="server-job-recovery-banner"
+          className="mb-6 rounded-2xl border border-emerald-400 dark:border-emerald-700 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 dark:from-emerald-950/70 dark:via-slate-900 dark:to-emerald-950/70 p-5 shadow-lg shadow-emerald-500/10 transition animate-in fade-in"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-xs">
+                <CheckCircle2 className="h-6 w-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+                    {serverJob.status === "completed" ? "Completed" : "In Progress"}
+                  </span>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate max-w-xs sm:max-w-md">
+                    {serverJob.fileName}
+                  </h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                  {serverJob.status === "completed"
+                    ? `🎉 Translation Completed! All ${serverJob.chunks?.length || 102} chapters are 100% finished and stored on the server.`
+                    : `Cloud translation is active (${serverJob.completedChunks || 0} chapters translated).`}
+                </p>
+              </div>
+            </div>
+
+            {onLoadServerJob && (
+              <button
+                type="button"
+                id="resume-server-job-btn"
+                onClick={onLoadServerJob}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-700 active:scale-95 transition cursor-pointer shrink-0"
+              >
+                <BookCheck className="h-4 w-4" />
+                <span>{serverJob.status === "completed" ? "Open & Download Completed Novel" : "Open Cloud Job"}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Intro hero banner */}
       <div className="mb-6 text-center">
         <div className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 dark:border-indigo-800/60 bg-indigo-50 dark:bg-indigo-950/60 px-3 py-1 text-xs font-semibold text-indigo-800 dark:text-indigo-300">

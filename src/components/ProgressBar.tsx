@@ -1,5 +1,5 @@
 import React from "react";
-import { Clock, Zap, FileText, BookOpen } from "lucide-react";
+import { Clock, Zap, FileText, BookOpen, CheckCircle2 } from "lucide-react";
 import { TranslationMetrics } from "../types";
 
 interface ProgressBarProps {
@@ -7,6 +7,7 @@ interface ProgressBarProps {
   fileName: string;
   onQuickDownloadProgress?: (format?: "epub" | "txt") => void;
   isRunning: boolean;
+  isCompleted?: boolean;
 }
 
 function formatDuration(seconds: number): string {
@@ -25,7 +26,13 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   metrics,
   fileName,
   isRunning,
+  isCompleted: propIsCompleted,
 }) => {
+  const isFinished =
+    propIsCompleted !== undefined
+      ? propIsCompleted
+      : metrics.totalChunks > 0 && metrics.completedChunks === metrics.totalChunks;
+
   const percent =
     metrics.totalChunks > 0
       ? Math.min(100, Math.round((metrics.completedChunks / metrics.totalChunks) * 100))
@@ -37,16 +44,31 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
       : 0;
 
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-xs transition-colors duration-200">
+    <div className={`rounded-xl border p-4 shadow-xs transition-colors duration-200 ${
+      isFinished
+        ? "border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 shadow-emerald-500/5"
+        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+    }`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <FileText className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
           <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-xs sm:max-w-md">
             {fileName}
           </span>
-          <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
-            {metrics.completedChunks} / {metrics.totalChunks} Chunks ({percent}%)
-          </span>
+          
+          {isFinished ? (
+            <span
+              id="progress-completed-badge"
+              className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800 animate-in fade-in"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <span>{metrics.completedChunks} / {metrics.totalChunks} Chunks (100% Completed)</span>
+            </span>
+          ) : (
+            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+              {metrics.completedChunks} / {metrics.totalChunks} Chunks ({percent}%)
+            </span>
+          )}
 
           {/* Real-time English words translated indicator */}
           {metrics.completedEnglishWords > 0 && (
@@ -59,7 +81,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
 
         <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
           {/* Speed */}
-          {metrics.charsPerSecond > 0 && (
+          {!isFinished && metrics.charsPerSecond > 0 && (
             <div className="flex items-center gap-1">
               <Zap className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
               <span>{Math.round(metrics.charsPerSecond)} chars/sec</span>
@@ -67,7 +89,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           )}
 
           {/* ETA */}
-          {metrics.estimatedRemainingSeconds > 0 && (
+          {!isFinished && metrics.estimatedRemainingSeconds > 0 && (
             <div className="flex items-center gap-1">
               <Clock className="h-3.5 w-3.5 text-indigo-500 dark:text-indigo-400" />
               <span>ETA: {formatDuration(metrics.estimatedRemainingSeconds)}</span>
@@ -79,7 +101,11 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
       {/* Visual Bar */}
       <div className="mt-3 relative h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-indigo-600 transition-all duration-300 ease-out"
+          className={`h-full rounded-full transition-all duration-300 ease-out ${
+            isFinished
+              ? "bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600"
+              : "bg-gradient-to-r from-indigo-500 to-indigo-600"
+          }`}
           style={{ width: `${percent}%` }}
         />
       </div>
@@ -100,7 +126,16 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
         </span>
 
         <div className="flex items-center gap-3">
-          {isRunning && (
+          {isFinished && (
+            <span
+              id="progress-status-completed-text"
+              className="text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1.5 text-xs animate-in fade-in"
+            >
+              <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+              Status: Translation Completed (100%) — All Chapters Ready
+            </span>
+          )}
+          {!isFinished && isRunning && (
             <span className="text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1">
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-indigo-600 dark:bg-indigo-400 animate-pulse" />
               Translating book continuously in background...

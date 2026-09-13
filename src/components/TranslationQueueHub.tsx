@@ -155,7 +155,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 p-3 sm:px-4 bg-slate-50/60 dark:bg-slate-850/60">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
-              Translation Queue ({totalChunks} Chapters)
+              Translation Queue ({totalChunks} Chapters{totalChunks > 0 && completedChunks.length === totalChunks ? " — 100% Completed" : ""})
             </h3>
 
             {/* Filter pills */}
@@ -178,7 +178,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                     : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
                 }`}
               >
-                Ready ({completedChunks.length})
+                Completed ({completedChunks.length})
               </button>
               {processingChunks.length > 0 && (
                 <button
@@ -266,7 +266,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                     {chunk.status === "completed" && words > 0 && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
                         <CheckCircle2 className="h-3 w-3" />
-                        <span>Ready</span>
+                        <span>Completed</span>
                       </span>
                     )}
 

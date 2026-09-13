@@ -6,8 +6,6 @@ import {
   Layers,
   Sun,
   Moon,
-  ExternalLink,
-  ShieldCheck,
   LogOut,
 } from "lucide-react";
 
@@ -15,6 +13,10 @@ interface NavbarProps {
   hasFile: boolean;
   totalChars: number;
   completedChars: number;
+  isCompleted?: boolean;
+  isRunning?: boolean;
+  completedChunks?: number;
+  totalChunks?: number;
   onReset: () => void;
   onOpenGlossary: () => void;
   glossaryCount: number;
@@ -28,6 +30,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   hasFile,
   totalChars,
   completedChars,
+  isCompleted = false,
+  isRunning = false,
+  completedChunks = 0,
+  totalChunks = 0,
   onReset,
   onOpenGlossary,
   glossaryCount,
@@ -59,27 +65,24 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Action badges & Controls */}
-        <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar py-1">
-          {/* Owner Account Badge & Logout */}
+        {/* Action Controls - Compact, no horizontal scrolling needed */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Compact Sign Out Button / Icon */}
           {userEmail && (
             <button
               id="signout-badge-btn"
               onClick={onLogout}
-              className="flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-1 text-[11px] sm:text-xs text-emerald-800 dark:text-emerald-200 transition hover:bg-rose-50 dark:hover:bg-rose-950/60 hover:text-rose-700 dark:hover:text-rose-300 hover:border-rose-300 dark:hover:border-rose-800 active:scale-95 cursor-pointer shrink-0 shadow-xs"
-              title="Click to Sign Out and lock translator access"
+              className="flex h-8 w-8 sm:h-8.5 sm:w-auto sm:px-2.5 items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 transition hover:bg-rose-50 dark:hover:bg-rose-950/60 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 dark:hover:border-rose-800 active:scale-95 cursor-pointer shrink-0 shadow-xs"
+              title={`Sign out (${userEmail})`}
+              aria-label="Sign out"
             >
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span className="font-semibold max-w-[70px] sm:max-w-[140px] truncate">{userEmail}</span>
-              <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] font-bold text-rose-600 dark:text-rose-400 bg-rose-100 dark:bg-rose-950/80 px-1.5 py-0.2 rounded">
-                <LogOut className="h-3 w-3" />
-                <span>Exit</span>
-              </span>
+              <LogOut className="h-4 w-4 shrink-0" />
+              <span className="hidden sm:inline text-xs font-medium">Sign out</span>
             </button>
           )}
 
-          {/* AI Model Badge */}
-          <div className="hidden items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1 text-xs text-slate-700 dark:text-slate-300 md:flex">
+          {/* AI Model Badge (Only on desktop to save space) */}
+          <div className="hidden items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1 text-xs text-slate-700 dark:text-slate-300 lg:flex">
             <Sparkles className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
             <span className="font-medium">Gemini 3.8 Flash</span>
           </div>
@@ -103,7 +106,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             id="open-glossary-btn"
             onClick={onOpenGlossary}
-            className="flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 sm:px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 shadow-xs transition hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 shrink-0"
+            className="flex items-center gap-1 h-8 sm:h-8.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 sm:px-2.5 text-xs font-medium text-slate-700 dark:text-slate-200 shadow-xs transition hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 shrink-0"
             title="Manage character names, terms, and glossary"
           >
             <Layers className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />

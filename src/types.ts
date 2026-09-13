@@ -40,6 +40,7 @@ export interface TranslationSession {
   customInstructions: string;
   glossary: GlossaryTerm[];
   mode?: TranslationMode;
+  status?: "idle" | "running" | "paused" | "completed";
   createdAt: number;
   lastUpdated: number;
   lastDownloadedWordCount?: number;
