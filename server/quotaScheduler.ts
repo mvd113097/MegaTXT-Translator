@@ -24,6 +24,7 @@ export interface ProjectState {
   lastUsedAt: number;
   lastError: string | null;
   lastErrorAt: number | null;
+  activeRequestCount: number;
 }
 
 export interface SanitizedProjectStatus {
@@ -223,6 +224,7 @@ export class QuotaAwareKeyScheduler {
         lastUsedAt: 0,
         lastError: null,
         lastErrorAt: null,
+        activeRequestCount: 0,
       });
 
       projectCounter++;
@@ -255,11 +257,33 @@ export class QuotaAwareKeyScheduler {
   }
 
   /**
+   * Acquires a request slot on a project to enforce 1 active request per key.
+   */
+  public acquireProject(projectId: string): void {
+    const p = this.projects.get(projectId);
+    if (p) {
+      p.activeRequestCount = (p.activeRequestCount || 0) + 1;
+      p.lastUsedAt = Date.now();
+    }
+  }
+
+  /**
+   * Releases a request slot on a project when API call completes or fails.
+   */
+  public releaseProject(projectId: string): void {
+    const p = this.projects.get(projectId);
+    if (p) {
+      p.activeRequestCount = Math.max(0, (p.activeRequestCount || 1) - 1);
+    }
+  }
+
+  /**
    * Intelligent Quota-Aware Selection.
    * Selects an available project key that is NOT in cooldown, prioritizing least-recently-used
    * to balance load without assuming rigid quotas.
    *
-   * If all projects are cooling down, returns the project with the minimum remaining wait time.
+   * Enforces 1 active request per Gemini project key at a time.
+   * If all projects are cooling down or currently processing a request, returns waitMs.
    */
   public selectProject(excludeProjectIds: Set<string> = new Set()): {
     project: ProjectState;
@@ -310,8 +334,8 @@ export class QuotaAwareKeyScheduler {
     // If all eligible projects were excluded in this turn, clear exclusion to prevent complete blockage
     const pool = eligibleProjects.length > 0 ? eligibleProjects : enabledProjects;
 
-    // 1. Separate into ready vs cooling down
-    const readyProjects = pool.filter((p) => now >= p.cooldownUntil);
+    // 1. Filter ready projects that are not currently executing another request (activeRequestCount === 0)
+    const readyProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) < 1);
 
     if (readyProjects.length > 0) {
       // Pick the least recently used ready project (lowest lastUsedAt)
@@ -327,7 +351,16 @@ export class QuotaAwareKeyScheduler {
       return { project: selected, waitMs: 0 };
     }
 
-    // 2. All active projects are currently in cooldown. Pick the one that will be ready soonest.
+    // 2. If projects are ready but currently processing another request, wait briefly for in-flight request to release key
+    const readyButBusy = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) >= 1);
+    if (readyButBusy.length > 0) {
+      readyButBusy.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+      const busiest = readyButBusy[0];
+      this.lastSelectedProjectId = busiest.id;
+      return { project: busiest, waitMs: 150 };
+    }
+
+    // 3. All active projects are currently in cooldown. Pick the one that will be ready soonest.
     pool.sort((a, b) => a.cooldownUntil - b.cooldownUntil);
     const soonest = pool[0] || enabledProjects[0];
     const waitMs = Math.max(0, soonest.cooldownUntil - now);

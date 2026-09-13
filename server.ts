@@ -7,6 +7,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
+import { parseAndValidateBatchResponse, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 
 dotenv.config();
 
@@ -488,7 +489,7 @@ async function startCloudWorkerLoop() {
   isCloudWorkerRunning = true;
 
   const jobFileName = activeCloudJob?.fileName || "job";
-  const numWorkers = Math.max(1, Math.min(activeCloudJob?.concurrency || 4, quotaScheduler.enabledProjectCount || 4, 5));
+  const numWorkers = Math.max(1, Math.min(activeCloudJob?.concurrency || 5, quotaScheduler.enabledProjectCount || 5, 5));
   console.log(
     `[Cloud Background Worker] Started parallel translation engine (${numWorkers} concurrent workers) for: "${jobFileName}"`
   );
@@ -498,7 +499,7 @@ async function startCloudWorkerLoop() {
       const now = Date.now();
       // Find the next available non-completed chunk not already claimed
       // Prioritize pending chunks first, then error chunks whose retry cooldown (8s) has elapsed
-      const pendingChunk = activeCloudJob.chunks.find((c) => {
+      const firstChunk = activeCloudJob.chunks.find((c) => {
         if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
           return false;
         }
@@ -511,7 +512,7 @@ async function startCloudWorkerLoop() {
         return true;
       });
 
-      if (!pendingChunk) {
+      if (!firstChunk) {
         // If no pending chunks and no other workers running, check completion
         if (inFlightChunkIds.size === 0) {
           const allCompleted = activeCloudJob.chunks.every(
@@ -530,20 +531,49 @@ async function startCloudWorkerLoop() {
         continue;
       }
 
-      // Claim chunk exclusively for this worker
-      inFlightChunkIds.add(pendingChunk.id);
-      pendingChunk.status = "processing";
+      // Build a batch up to MAX_BATCH_CHAR_BUDGET characters (e.g., 7,000 Chinese characters)
+      const batchChunks = [firstChunk];
+      let currentBatchChars = firstChunk.chineseText.length;
+
+      for (let i = firstChunk.index + 1; i < activeCloudJob.chunks.length; i++) {
+        const candidate = activeCloudJob.chunks[i];
+        if (candidate.status === "completed" && candidate.englishText && candidate.englishText.trim().length > 0) {
+          break;
+        }
+        if (inFlightChunkIds.has(candidate.id)) {
+          break;
+        }
+        if (candidate.status === "error" && candidate.lastErrorAt && now < candidate.lastErrorAt + 8000) {
+          break;
+        }
+        const candidateLen = candidate.chineseText.length;
+        if (currentBatchChars + candidateLen > MAX_BATCH_CHAR_BUDGET) {
+          break;
+        }
+        if (batchChunks.length >= 4) {
+          break;
+        }
+
+        batchChunks.push(candidate);
+        currentBatchChars += candidateLen;
+      }
+
+      // Claim all chunks in batch exclusively for this worker
+      for (const chunk of batchChunks) {
+        inFlightChunkIds.add(chunk.id);
+        chunk.status = "processing";
+      }
       activeCloudJob.lastActiveAt = Date.now();
       saveCloudJobToDisk();
 
       // Find preceding context for narrative continuity
       let prevContext = "";
-      const prevChunk = activeCloudJob.chunks[pendingChunk.index - 1];
+      const prevChunk = activeCloudJob.chunks[firstChunk.index - 1];
       if (prevChunk && prevChunk.englishText) {
         prevContext = prevChunk.englishText.slice(-200);
       }
 
-      const startChunkTime = Date.now();
+      const startBatchTime = Date.now();
       let success = false;
       let attemptCount = 0;
       const MAX_ATTEMPTS_PER_PASS = 3;
@@ -614,58 +644,101 @@ Translation Guidelines:
 3. ${styleGuidance}
 4. ${glossaryBlock || "Ensure all character names, titles, and locations remain consistent."}
 5. Resolve Chinese pronouns (他/她/它/他们) accurately based on context and dialogue tags.
-6. Translate Chinese four-character idioms (成语) and cultural expressions into their natural English conceptual equivalents rather than awkward word-for-word transliterations, unless specific to martial arts names.
-7. Return ONLY the translated English text. Do NOT wrap in conversational intro/outro remarks like "Here is the translation:" or "Certainly!".`;
+6. Translate Chinese four-character idioms (成语) and cultural expressions into natural English conceptual equivalents.
+7. CRITICAL STRUCTURED BATCH FORMATTING REQUIREMENT:
+   You are translating ${batchChunks.length} chapter(s)/chunk(s) in this request.
+   You MUST return EACH translated chapter wrapped strictly inside its designated markers:
+   <<<CHAPTER_START id="CHUNK_ID" index=NUMBER>>>
+   [Translated English text of chapter/chunk...]
+   <<<CHAPTER_END id="CHUNK_ID">>>
+
+   Every single chapter in this request MUST be returned separately with its matching id in <<<CHAPTER_START id="...">>> and <<<CHAPTER_END id="...">>>.
+   Do NOT combine chapters or omit markers.`;
+
+          const batchPrompts = batchChunks
+            .map((c) => {
+              return `<<<CHAPTER_START id="${c.id}" index=${c.index + 1} title="${c.chapterTitle || "Part " + (c.index + 1)}">>>
+CHINESE SOURCE TEXT (${c.chapterTitle || "Chunk " + (c.index + 1)}):
+"""
+${c.chineseText}
+"""
+<<<CHAPTER_END id="${c.id}">>>`;
+            })
+            .join("\n\n");
 
           const userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
             activeCloudJob.customInstructions ? `Special Instructions: ${activeCloudJob.customInstructions}\n\n` : ""
-          }CHINESE SOURCE TEXT TO TRANSLATE (Chunk ${pendingChunk.index + 1} of ${activeCloudJob.chunks.length}):
-"""
-${pendingChunk.chineseText}
-"""
+          }CHINESE CHAPTER BATCH TO TRANSLATE (${batchChunks.length} item(s)):
 
-Translate the above Chinese text directly into English:`;
+${batchPrompts}
 
-          const { text: translatedText, modelUsed, projectUsed } = await generateWithQuotaScheduler(
+Translate all chapters above into English, returning each inside its exact <<<CHAPTER_START id="...">>> and <<<CHAPTER_END id="...">>> markers:`;
+
+          const { text: rawTranslatedText, modelUsed, projectUsed } = await generateWithQuotaScheduler(
             userPrompt,
             systemInstruction,
             0,
             8,
             4000,
-            pendingChunk.chineseText
+            batchChunks.map((c) => c.chineseText).join("\n")
           );
 
-          pendingChunk.englishText = translatedText;
-          pendingChunk.status = "completed";
-          pendingChunk.durationMs = Date.now() - startChunkTime;
-          pendingChunk.errorMessage = undefined;
-          pendingChunk.lastErrorAt = undefined;
-          success = true;
+          // Partial Batch Recovery & Machine-Parseable Validation
+          const expectedChunks = batchChunks.map((c) => ({
+            id: c.id,
+            index: c.index + 1,
+            charCount: c.chineseText.length,
+          }));
+
+          const parsedResults = parseAndValidateBatchResponse(rawTranslatedText, expectedChunks);
+
+          let validCount = 0;
+          let invalidCount = 0;
+
+          for (const chunk of batchChunks) {
+            const parsed = parsedResults.get(chunk.id);
+            if (parsed && parsed.isValid && parsed.englishText.trim().length > 0) {
+              chunk.englishText = parsed.englishText;
+              chunk.status = "completed";
+              chunk.durationMs = Date.now() - startBatchTime;
+              chunk.errorMessage = undefined;
+              chunk.lastErrorAt = undefined;
+              validCount++;
+            } else {
+              chunk.status = "error";
+              chunk.errorMessage = parsed?.errorReason || "Failed batch response validation. Queued for retry.";
+              chunk.lastErrorAt = Date.now();
+              chunk.durationMs = Date.now() - startBatchTime;
+              invalidCount++;
+            }
+          }
+
+          success = validCount === batchChunks.length;
 
           console.log(
-            `[Cloud Worker #${workerId}] Successfully completed chunk ${pendingChunk.index + 1}/${activeCloudJob.chunks.length} ("${
-              pendingChunk.chapterTitle || "Part " + (pendingChunk.index + 1)
-            }") using ${projectUsed} (${modelUsed}) in ${pendingChunk.durationMs}ms`
+            `[Cloud Worker #${workerId}] Batch result (${batchChunks.length} items: ${validCount} completed, ${invalidCount} retry queued) using ${projectUsed} (${modelUsed}) in ${Date.now() - startBatchTime}ms`
           );
-        } catch (chunkErr: any) {
-          const cleanErr = formatCleanErrorMessage(chunkErr);
+        } catch (batchErr: any) {
+          const cleanErr = formatCleanErrorMessage(batchErr);
           console.error(
-            `[Cloud Worker #${workerId}] Notice on chunk ${pendingChunk.index + 1} (Attempt #${attemptCount}):`,
+            `[Cloud Worker #${workerId}] Notice on batch starting at chunk ${firstChunk.index + 1} (Attempt #${attemptCount}):`,
             cleanErr
           );
-          pendingChunk.status = "error";
-          pendingChunk.errorMessage = `Attempt ${attemptCount}: ${cleanErr}. Auto-retrying...`;
-          pendingChunk.durationMs = Date.now() - startChunkTime;
-          pendingChunk.lastErrorAt = Date.now();
+
+          for (const chunk of batchChunks) {
+            chunk.status = "error";
+            chunk.errorMessage = `Attempt ${attemptCount}: ${cleanErr}. Auto-retrying...`;
+            chunk.durationMs = Date.now() - startBatchTime;
+            chunk.lastErrorAt = Date.now();
+          }
+
           activeCloudJob.lastActiveAt = Date.now();
           saveCloudJobToDisk();
 
-          // Yield if stopped/paused
           if (!activeCloudJob || activeCloudJob.status !== "running") {
             break;
           }
 
-          // Backoff cooldown before next in-flight retry attempt
           if (attemptCount < MAX_ATTEMPTS_PER_PASS) {
             const waitCooldown = Math.min(attemptCount * 2500, 10000);
             await new Promise((r) => setTimeout(r, waitCooldown));
@@ -673,7 +746,9 @@ Translate the above Chinese text directly into English:`;
         }
       }
 
-      inFlightChunkIds.delete(pendingChunk.id);
+      for (const chunk of batchChunks) {
+        inFlightChunkIds.delete(chunk.id);
+      }
       if (activeCloudJob) {
         activeCloudJob.lastActiveAt = Date.now();
         saveCloudJobToDisk();

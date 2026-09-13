@@ -10,6 +10,7 @@ import {
   countEnglishWords,
 } from "../src/utils/chunker";
 import { QuotaAwareKeyScheduler } from "../server/quotaScheduler";
+import { parseAndValidateBatchResponse, MAX_BATCH_CHAR_BUDGET } from "../server/batchParser";
 
 function createMockChunk(
   index: number,
@@ -339,6 +340,221 @@ async function runTests() {
       contiguousOnBoot.length === 2,
       "Contiguous frontier is safely restored to Chapters 1–2 until chunk 3 completes",
       `Frontier: ${contiguousOnBoot.length}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 10: 5-Worker Concurrent Pool Capacity & 1-Request-Per-Project Constraint
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 10] 5-Worker Pool & 1-Request-Per-Project Constraint");
+  {
+    const testKeys = ["KEY_A", "KEY_B", "KEY_C", "KEY_D", "KEY_E"];
+    const scheduler = new QuotaAwareKeyScheduler(testKeys);
+
+    const acquired: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = scheduler.selectProject();
+      if (res && res.waitMs === 0) {
+        scheduler.acquireProject(res.project.id);
+        acquired.push(res.project.name);
+      }
+    }
+
+    assert(
+      acquired.length === 5 && new Set(acquired).size === 5,
+      "QuotaScheduler successfully allocates 5 distinct projects to 5 concurrent workers",
+      `Allocated: ${acquired.join(", ")}`
+    );
+
+    // 6th worker attempt while all 5 projects are active
+    const extraAttempt = scheduler.selectProject();
+    assert(
+      extraAttempt.waitMs > 0,
+      "6th worker is queued/throttled (waitMs > 0) when all 5 projects have an active request",
+      `Extra attempt waitMs: ${extraAttempt.waitMs}`
+    );
+
+    // Release 1 project
+    const keyToRelease = testKeys[0];
+    const projToRelease = Array.from((scheduler as any).projects.values()).find((p: any) => p.apiKey === keyToRelease) as any;
+    scheduler.releaseProject(projToRelease.id);
+    const retryAttempt = scheduler.selectProject();
+    assert(
+      retryAttempt.waitMs === 0 && retryAttempt.project.apiKey === keyToRelease,
+      "Newly released project immediately becomes ready (waitMs=0) for waiting worker",
+      `Re-allocated: ${retryAttempt.project ? retryAttempt.project.name : "none"}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 11: Batch Response Structured Parsing & Marker Extraction
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 11] Structured Batch Marker Extraction & Validation");
+  {
+    const expected = [
+      { id: "chunk_1", index: 1, charCount: 2000 },
+      { id: "chunk_2", index: 2, charCount: 1800 },
+    ];
+
+    const mockResponse = `
+<<<CHAPTER_START id="chunk_1" index=1>>>
+Chapter 1: The Beginning
+Li Qiye stood on the mountain peak. The wind blew softly through his robes.
+<<<CHAPTER_END id="chunk_1">>>
+
+<<<CHAPTER_START id="chunk_2" index=2>>>
+Chapter 2: The Sect Entrance
+Inside the hall, Elders discussed the upcoming disciple trial.
+<<<CHAPTER_END id="chunk_2">>>
+`;
+
+    const result = parseAndValidateBatchResponse(mockResponse, expected);
+    const c1 = result.get("chunk_1");
+    const c2 = result.get("chunk_2");
+
+    assert(
+      c1 !== undefined && c1.isValid && c1.englishText.includes("Li Qiye stood"),
+      "Chunk 1 accurately extracted and validated from structured batch markers",
+      `C1 valid: ${c1?.isValid}`
+    );
+    assert(
+      c2 !== undefined && c2.isValid && c2.englishText.includes("Inside the hall"),
+      "Chunk 2 accurately extracted and validated from structured batch markers",
+      `C2 valid: ${c2?.isValid}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 12: Truncation, Missing End Tag, and Incomplete Chapter Safety
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 12] Truncation & Marker Integrity Detection");
+  {
+    const expected = [
+      { id: "chunk_10", index: 10, charCount: 2500 },
+      { id: "chunk_11", index: 11, charCount: 3000 },
+    ];
+
+    // Response truncated mid-way through chunk 11 (missing <<<CHAPTER_END id="chunk_11">>>)
+    const truncatedResponse = `
+<<<CHAPTER_START id="chunk_10" index=10>>>
+Chapter 10 complete translation text here.
+<<<CHAPTER_END id="chunk_10">>>
+
+<<<CHAPTER_START id="chunk_11" index=11>>>
+Chapter 11 started but was truncated by Gemini...
+`;
+
+    const result = parseAndValidateBatchResponse(truncatedResponse, expected);
+    const c10 = result.get("chunk_10");
+    const c11 = result.get("chunk_11");
+
+    assert(
+      c10 !== undefined && c10.isValid,
+      "Valid chapter in batch (Chunk 10) is preserved as completed",
+      `Chunk 10 valid: ${c10?.isValid}`
+    );
+    assert(
+      c11 !== undefined && !c11.isValid,
+      "Truncated chapter missing closing tag (Chunk 11) is flagged invalid for retry",
+      `Chunk 11 error: ${c11?.errorReason}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 13: Partial Batch Recovery (Save Valid, Retry Invalid)
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 13] Partial Batch Recovery");
+  {
+    const chunks: TextChunk[] = [
+      createMockChunk(0, "processing", "", "Ch 1"),
+      createMockChunk(1, "processing", "", "Ch 2"),
+      createMockChunk(2, "processing", "", "Ch 3"),
+    ];
+
+    // Mock API output where Ch 1 & Ch 3 succeeded, but Ch 2 marker was missing
+    const partialResponse = `
+<<<CHAPTER_START id="${chunks[0].id}" index=1>>>
+Chapter 1 translated text.
+<<<CHAPTER_END id="${chunks[0].id}">>>
+
+<<<CHAPTER_START id="${chunks[2].id}" index=3>>>
+Chapter 3 translated text.
+<<<CHAPTER_END id="${chunks[2].id}">>>
+`;
+
+    const expected = chunks.map((c) => ({ id: c.id, index: c.index + 1, charCount: 1000 }));
+    const parsedMap = parseAndValidateBatchResponse(partialResponse, expected);
+
+    for (const chunk of chunks) {
+      const res = parsedMap.get(chunk.id);
+      if (res && res.isValid) {
+        chunk.status = "completed";
+        chunk.englishText = res.englishText;
+      } else {
+        chunk.status = "error";
+        chunk.errorMessage = res?.errorReason || "Failed batch response validation";
+      }
+    }
+
+    assert(
+      chunks[0].status === "completed" && chunks[2].status === "completed",
+      "Valid chapters (1 and 3) are saved as completed without losing work",
+      `Ch1: ${chunks[0].status}, Ch3: ${chunks[2].status}`
+    );
+    assert(
+      chunks[1].status === "error",
+      "Failed chapter (2) is marked as error for immediate retry",
+      `Ch2: ${chunks[1].status}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 14: Configurable Character Budget Limit
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 14] Configurable Character Budget Batching");
+  {
+    assert(
+      typeof MAX_BATCH_CHAR_BUDGET === "number" && MAX_BATCH_CHAR_BUDGET >= 5000 && MAX_BATCH_CHAR_BUDGET <= 10000,
+      "MAX_BATCH_CHAR_BUDGET is configured within safe range (5,000–10,000 Chinese chars)",
+      `Configured Budget: ${MAX_BATCH_CHAR_BUDGET}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 15: Out-of-Order Batch Completion & Never-Skip Frontier
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 15] Out-of-Order Batch Completion & Never-Skip Export");
+  {
+    const chunks: TextChunk[] = Array.from({ length: 8 }, (_, i) => createMockChunk(i));
+
+    // Batch 2 (chunks 4, 5, 6) finishes first!
+    chunks[3].status = "completed";
+    chunks[3].englishText = "Ch 4 text";
+    chunks[4].status = "completed";
+    chunks[4].englishText = "Ch 5 text";
+    chunks[5].status = "completed";
+    chunks[5].englishText = "Ch 6 text";
+
+    let frontier = getContiguousCompletedChunks(chunks);
+    assert(
+      frontier.length === 0,
+      "Never-Skip export holds back out-of-order completion of Ch 4–6 while Ch 1–3 are pending",
+      `Frontier count: ${frontier.length}`
+    );
+
+    // Batch 1 (chunks 1, 2, 3) finishes next!
+    chunks[0].status = "completed";
+    chunks[0].englishText = "Ch 1 text";
+    chunks[1].status = "completed";
+    chunks[1].englishText = "Ch 2 text";
+    chunks[2].status = "completed";
+    chunks[2].englishText = "Ch 3 text";
+
+    frontier = getContiguousCompletedChunks(chunks);
+    assert(
+      frontier.length === 6,
+      "Once Ch 1–3 complete, Never-Skip frontier instantly expands to cover all 6 contiguous chapters without gaps",
+      `Frontier count: ${frontier.length}`
     );
   }
 
