@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
+import { sendTelegramNotification } from "./server/telegram";
 
 dotenv.config();
 
@@ -671,6 +672,8 @@ function loadCloudJobsFromDisk() {
 
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
     if (runningJobs.length > 0) {
+      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+      sendTelegramNotification(`⚡ <b>[Server Woken Up]</b>\nThe website is awake and has successfully resumed translating your book(s):\n${jobNames}`);
       startCloudWorkerLoop();
     }
   } catch (err) {
@@ -733,6 +736,7 @@ async function startCloudWorkerLoop() {
             job.status = "completed";
             job.lastActiveAt = Date.now();
             saveJobToDisk(job.sessionId || "legacy_default", job);
+            sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${job.fileName}</b> is fully translated and ready for download!`);
           }
         }
       }
@@ -1123,6 +1127,53 @@ Translation Guidelines:
 // Load any pending jobs on boot
 loadCloudJobsFromDisk();
 
+// Periodic Telegram status updates for running translation jobs
+const TELEGRAM_STATUS_INTERVAL_MIN = Number(process.env.TELEGRAM_STATUS_INTERVAL_MIN) || 5;
+setInterval(() => {
+  try {
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+    if (runningJobs.length === 0) return;
+
+    for (const job of runningJobs) {
+      const totalChunks = job.chunks.length;
+      if (totalChunks === 0) continue;
+
+      const completedChunks = job.chunks.filter((c) => c.status === "completed").length;
+      const processingChunks = job.chunks.filter((c) => c.status === "processing").length;
+      const errorChunks = job.chunks.filter((c) => c.status === "error").length;
+      const pendingChunks = job.chunks.filter((c) => c.status === "pending").length;
+
+      const percent = Math.round((completedChunks / totalChunks) * 100);
+
+      // Estimate word count of completed english translation
+      let wordCount = 0;
+      for (const c of job.chunks) {
+        if (c.status === "completed" && c.englishText) {
+          wordCount += c.englishText.split(/\s+/).filter(Boolean).length;
+        }
+      }
+
+      const elapsedMinutes = Math.round((Date.now() - job.startedAt) / 60000);
+
+      const message = `📈 <b>[Translation Progress Update]</b>\n\n` +
+        `📖 Novel: <b>${job.fileName}</b>\n` +
+        `🔄 Status: <b>${job.status.toUpperCase()}</b>\n` +
+        `⏱️ Active for: <b>${elapsedMinutes} minutes</b>\n\n` +
+        `✅ Progress: <b>${completedChunks} / ${totalChunks}</b> chunks (<b>${percent}%</b>)\n` +
+        `📝 Translated: <b>${wordCount.toLocaleString()}</b> English words\n\n` +
+        `⏳ Detail:\n` +
+        `• Completed: <b>${completedChunks}</b>\n` +
+        `• Processing: <b>${processingChunks}</b>\n` +
+        `• Error: <b>${errorChunks}</b>\n` +
+        `• Pending: <b>${pendingChunks}</b>`;
+
+      sendTelegramNotification(message);
+    }
+  } catch (err) {
+    console.error("[Telegram Status Interval] Error sending status update:", err);
+  }
+}, TELEGRAM_STATUS_INTERVAL_MIN * 60 * 1000);
+
 // -------------------------------------------------------------
 // Security & Master Passcode Gate
 // -------------------------------------------------------------
@@ -1339,6 +1390,7 @@ app.get("/api/cloud-job/status", (req, res) => {
   if (completedChunks === targetJob.chunks.length && targetJob.status !== "completed") {
     targetJob.status = "completed";
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
+    sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${targetJob.fileName}</b> is fully translated and ready for download!`);
   }
 
   // Calculate contiguous completion frontier from index 0
@@ -1918,5 +1970,40 @@ async function startServer() {
     console.log(`MegaText Translator server running on http://0.0.0.0:${PORT}`);
   });
 }
+
+// Graceful shutdown listeners to notify user when container is sleeping / scaling down
+process.on("SIGTERM", async () => {
+  console.log("[Process] SIGTERM received. Handling graceful shutdown...");
+  try {
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+    if (runningJobs.length > 0) {
+      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+      await sendTelegramNotification(
+        `⚠️ <b>[Server Sleeping / Paused]</b>\nThe website is going to sleep or shutting down. The translation of your book(s) has been paused:\n${jobNames}\n\nPlease open the website to wake it up and resume translation!`
+      );
+    }
+  } catch (err) {
+    console.error("[Process] Failed to send shutdown Telegram notification:", err);
+  } finally {
+    process.exit(0);
+  }
+});
+
+process.on("SIGINT", async () => {
+  console.log("[Process] SIGINT received. Handling graceful shutdown...");
+  try {
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+    if (runningJobs.length > 0) {
+      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+      await sendTelegramNotification(
+        `⚠️ <b>[Server Sleeping / Paused]</b>\nThe website is going to sleep or shutting down. The translation of your book(s) has been paused:\n${jobNames}\n\nPlease open the website to wake it up and resume translation!`
+      );
+    }
+  } catch (err) {
+    console.error("[Process] Failed to send shutdown Telegram notification:", err);
+  } finally {
+    process.exit(0);
+  }
+});
 
 startServer();
