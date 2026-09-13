@@ -63,13 +63,19 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar py-1">
           {/* Owner Account Badge & Logout */}
           {userEmail && (
-            <div
-              className="flex items-center gap-1 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 sm:px-2.5 py-1 text-[11px] sm:text-xs text-emerald-800 dark:text-emerald-300 shrink-0"
-              title={`Authorized owner session active for ${userEmail}`}
+            <button
+              id="signout-badge-btn"
+              onClick={onLogout}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-1 text-[11px] sm:text-xs text-emerald-800 dark:text-emerald-200 transition hover:bg-rose-50 dark:hover:bg-rose-950/60 hover:text-rose-700 dark:hover:text-rose-300 hover:border-rose-300 dark:hover:border-rose-800 active:scale-95 cursor-pointer shrink-0 shadow-xs"
+              title="Click to Sign Out and lock translator access"
             >
-              <ShieldCheck className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span className="font-semibold max-w-[50px] sm:max-w-[140px] truncate">{userEmail}</span>
-            </div>
+              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span className="font-semibold max-w-[70px] sm:max-w-[140px] truncate">{userEmail}</span>
+              <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] font-bold text-rose-600 dark:text-rose-400 bg-rose-100 dark:bg-rose-950/80 px-1.5 py-0.2 rounded">
+                <LogOut className="h-3 w-3" />
+                <span>Exit</span>
+              </span>
+            </button>
           )}
 
           {/* AI Model Badge */}
