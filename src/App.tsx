@@ -165,7 +165,16 @@ export default function App() {
   // Runner state
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [concurrency, setConcurrency] = useState(2);
+  const [concurrency, setConcurrency] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("megatext_concurrency");
+      if (saved) {
+        const val = parseInt(saved, 10);
+        if (val >= 1 && val <= 5) return val;
+      }
+    } catch {}
+    return 2;
+  });
   const [style, setStyle] = useState<TranslationStyle>(session?.style || "xianxia");
   const [customInstructions, setCustomInstructions] = useState(
     session?.customInstructions || ""
@@ -279,6 +288,12 @@ export default function App() {
             return prev;
           });
           chunksRef.current = sJob.chunks;
+          if (typeof sJob.concurrency === "number" && sJob.concurrency >= 1 && sJob.concurrency <= 5) {
+            setConcurrency(sJob.concurrency);
+            try {
+              localStorage.setItem("megatext_concurrency", String(sJob.concurrency));
+            } catch {}
+          }
           if (sJob.status === "running") {
             setIsRunning(true);
             setIsPaused(false);
@@ -1044,6 +1059,9 @@ Export Timestamp: ${new Date().toLocaleString()}
               concurrency={concurrency}
               onChangeConcurrency={(newConc) => {
                 setConcurrency(newConc);
+                try {
+                  localStorage.setItem("megatext_concurrency", String(newConc));
+                } catch {}
                 if (mode === "cloud" && session) {
                   fetch("/api/cloud-job/update-settings", {
                     method: "POST",
