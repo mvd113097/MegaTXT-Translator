@@ -397,20 +397,8 @@ export class QuotaAwareKeyScheduler {
     }
 
     const errStr = String(error?.message || "").toLowerCase();
-    const isAuthOrInvalidKey =
-      error?.status === 401 ||
-      error?.status === 403 ||
-      error?.statusCode === 401 ||
-      error?.statusCode === 403 ||
-      errStr.includes("401") ||
-      errStr.includes("403") ||
-      errStr.includes("unauthenticated") ||
-      errStr.includes("permission_denied") ||
-      errStr.includes("invalid authentication credentials") ||
-      errStr.includes("access_token_type_unsupported") ||
-      errStr.includes("api key not valid") ||
-      errStr.includes("api_key_invalid");
 
+    // 1. Check Rate Limit / Quota FIRST (handles HTTP 429 & 403 Quota/ResourceExhausted)
     const isRateLimit =
       error?.status === 429 ||
       error?.statusCode === 429 ||
@@ -425,6 +413,24 @@ export class QuotaAwareKeyScheduler {
       errStr.includes("rate-limits") ||
       errStr.includes("exceeded your current quota") ||
       errStr.includes("too many requests");
+
+    // 2. Check Auth / Invalid Key (strictly when NOT a rate/quota limit)
+    const isAuthOrInvalidKey =
+      !isRateLimit &&
+      (error?.status === 401 ||
+        error?.statusCode === 401 ||
+        errStr.includes("401") ||
+        errStr.includes("unauthenticated") ||
+        errStr.includes("invalid authentication credentials") ||
+        errStr.includes("access_token_type_unsupported") ||
+        errStr.includes("api key not valid") ||
+        errStr.includes("api_key_invalid") ||
+        (errStr.includes("invalid") && errStr.includes("key")) ||
+        ((error?.status === 403 || error?.statusCode === 403 || errStr.includes("403") || errStr.includes("permission_denied")) &&
+          !errStr.includes("quota") &&
+          !errStr.includes("limit") &&
+          !errStr.includes("exceeded") &&
+          !errStr.includes("resource")));
 
     const isTemporary =
       error?.status === 503 ||
@@ -443,9 +449,9 @@ export class QuotaAwareKeyScheduler {
 
     if (isAuthOrInvalidKey) {
       p.status = "disabled";
-      p.cooldownUntil = Date.now() + 86400000; // 24hr disable
+      p.cooldownUntil = Date.now() + 60000; // 60s quarantine before auto-probing recovery
       console.warn(
-        `[Quota Scheduler] ${p.name} (${p.keyMask}) disabled due to authentication/invalid key error.`
+        `[Quota Scheduler] ${p.name} (${p.keyMask}) quarantined for 60s due to authentication/invalid key error.`
       );
     } else if (isRateLimit) {
       p.total429Count++;

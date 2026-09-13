@@ -145,7 +145,7 @@ async function generateWithQuotaScheduler(
 
     let resultText = response.text || "";
 
-    // Empty or filtered response recovery
+    // Empty or filtered response recovery - Quota Efficient Failover
     if (!resultText.trim()) {
       const blockReason =
         (response as any).promptFeedback?.blockReason ||
@@ -153,60 +153,27 @@ async function generateWithQuotaScheduler(
       console.warn(
         `[Gemini Engine] Empty response or block on ${project.name} (${modelName}, reason: ${
           blockReason || "NONE"
-        }). Attempting literary recovery...`
+        }). Failing over immediately to another available project key...`
       );
 
-      // Attempt 1: Direct clean prompt
-      const textToTranslate = rawSourceText || userPrompt;
-      const cleanDirectPrompt = `You are a professional literary translator. Translate the following Chinese novel chapter accurately and completely into English, preserving all paragraphs and dialogues without summarizing:\n\n${textToTranslate}`;
+      // Record failure on project key and exclude it to prevent hammering the same project
+      quotaScheduler.recordFailure(project.id, new Error("Empty response / safety block"));
+      excludeProjectIds.add(project.id);
 
-      try {
-        const directRes = await project.client.models.generateContent({
-          model: modelName,
-          contents: cleanDirectPrompt,
-          config: { temperature: 0.3 },
-        });
-        if (directRes.text && directRes.text.trim()) {
-          console.log(
-            `[Gemini Engine] Direct prompt recovery succeeded (${directRes.text.length} chars) on ${project.name}.`
-          );
-          quotaScheduler.recordSuccess(project.id);
-          modelCooldowns.delete(modelName);
-          return { text: directRes.text, modelUsed: modelName, projectUsed: project.name };
+      if (quotaScheduler.enabledProjectCount > 0 && retries > 0) {
+        const nextExclude = new Set(excludeProjectIds);
+        if (nextExclude.size >= quotaScheduler.enabledProjectCount) {
+          nextExclude.clear();
         }
-      } catch (directErr: any) {
-        console.warn(`[Gemini Engine] Direct recovery error:`, directErr.message || directErr);
-      }
-
-      // Attempt 2: Split-chunk recovery for large text
-      if (textToTranslate.length > 2500) {
-        console.log(`[Gemini Engine] Split-chunk recovery for ${textToTranslate.length} chars...`);
-        const mid = Math.floor(textToTranslate.length / 2);
-        const splitIndex =
-          textToTranslate.indexOf("\n", mid) !== -1 ? textToTranslate.indexOf("\n", mid) : mid;
-        const part1 = textToTranslate.slice(0, splitIndex).trim();
-        const part2 = textToTranslate.slice(splitIndex).trim();
-
-        const [res1, res2] = await Promise.all([
-          project.client.models.generateContent({
-            model: modelName,
-            contents: `Translate the following Chinese passage faithfully into English:\n\n${part1}`,
-            config: { temperature: 0.3 },
-          }),
-          project.client.models.generateContent({
-            model: modelName,
-            contents: `Translate the following Chinese passage faithfully into English:\n\n${part2}`,
-            config: { temperature: 0.3 },
-          }),
-        ]);
-
-        const combined = `${res1.text || ""}\n\n${res2.text || ""}`.trim();
-        if (combined) {
-          console.log(`[Gemini Engine] Split-chunk recovery succeeded (${combined.length} chars).`);
-          quotaScheduler.recordSuccess(project.id);
-          modelCooldowns.delete(modelName);
-          return { text: combined, modelUsed: modelName, projectUsed: project.name };
-        }
+        return generateWithQuotaScheduler(
+          userPrompt,
+          systemInstruction,
+          (currentModelIdx + 1) % FREE_TIER_MODELS.length,
+          retries - 1,
+          currentDelay,
+          rawSourceText,
+          nextExclude
+        );
       }
 
       throw new Error(`Model returned empty translation response (Filter: ${blockReason || "unknown"}).`);
@@ -225,20 +192,6 @@ async function generateWithQuotaScheduler(
       errStr.includes("no longer available") ||
       errStr.includes("deprecated");
 
-    const isAuthOrInvalidKey =
-      err.status === 401 ||
-      err.status === 403 ||
-      err.statusCode === 401 ||
-      err.statusCode === 403 ||
-      errStr.includes("401") ||
-      errStr.includes("403") ||
-      errStr.includes("unauthenticated") ||
-      errStr.includes("permission_denied") ||
-      errStr.includes("invalid authentication credentials") ||
-      errStr.includes("access_token_type_unsupported") ||
-      errStr.includes("api key not valid") ||
-      errStr.includes("api_key_invalid");
-
     const isRateLimit =
       err.status === 429 ||
       err.statusCode === 429 ||
@@ -253,6 +206,23 @@ async function generateWithQuotaScheduler(
       errStr.includes("rate-limits") ||
       errStr.includes("exceeded your current quota") ||
       errStr.includes("too many requests");
+
+    const isAuthOrInvalidKey =
+      !isRateLimit &&
+      (err.status === 401 ||
+        err.statusCode === 401 ||
+        errStr.includes("401") ||
+        errStr.includes("unauthenticated") ||
+        errStr.includes("invalid authentication credentials") ||
+        errStr.includes("access_token_type_unsupported") ||
+        errStr.includes("api key not valid") ||
+        errStr.includes("api_key_invalid") ||
+        (errStr.includes("invalid") && errStr.includes("key")) ||
+        ((err.status === 403 || err.statusCode === 403 || errStr.includes("403") || errStr.includes("permission_denied")) &&
+          !errStr.includes("quota") &&
+          !errStr.includes("limit") &&
+          !errStr.includes("exceeded") &&
+          !errStr.includes("resource")));
 
     const isTemporary =
       err.status === 503 ||
@@ -328,7 +298,9 @@ async function generateWithQuotaScheduler(
 
     // 2. Safety filter
     if (isFilterOrBlock && retries > 0) {
-      console.log(`[Gemini Engine] Safety trigger on ${project.name}. Attempting literary framing...`);
+      console.log(`[Gemini Engine] Safety trigger on ${project.name}. Failing over to another available project...`);
+      quotaScheduler.recordFailure(project.id, err);
+      excludeProjectIds.add(project.id);
       const textToUse = rawSourceText || userPrompt;
       const cleanPrompt = `Translate the following classical Chinese novel chapter faithfully into English:\n\n${textToUse}`;
       return generateWithQuotaScheduler(
@@ -336,7 +308,7 @@ async function generateWithQuotaScheduler(
         "You are an objective translator for historical fiction.",
         currentModelIdx,
         retries - 1,
-        2000,
+        1500,
         rawSourceText,
         excludeProjectIds
       );
@@ -536,7 +508,7 @@ async function startCloudWorkerLoop() {
       }
 
       // Build a batch up to MAX_BATCH_CHAR_BUDGET characters (e.g., 7,000 Chinese characters)
-      const batchChunks = [firstChunk];
+      let batchChunks = [firstChunk];
       let currentBatchChars = firstChunk.chineseText.length;
 
       for (let i = firstChunk.index + 1; i < activeCloudJob.chunks.length; i++) {
@@ -707,6 +679,7 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               chunk.durationMs = Date.now() - startBatchTime;
               chunk.errorMessage = undefined;
               chunk.lastErrorAt = undefined;
+              inFlightChunkIds.delete(chunk.id);
               validCount++;
             } else {
               chunk.status = "error";
@@ -717,10 +690,17 @@ Translate all chapters above into English, returning each inside its exact <<<CH
             }
           }
 
-          success = validCount === batchChunks.length;
+          if (activeCloudJob) {
+            activeCloudJob.lastActiveAt = Date.now();
+            saveCloudJobToDisk();
+          }
+
+          // Isolate retry batch: filter out successfully completed chunks so retries NEVER re-send valid chunks
+          batchChunks = batchChunks.filter((c) => c.status !== "completed");
+          success = batchChunks.length === 0;
 
           console.log(
-            `[Cloud Worker #${workerId}] Batch result (${batchChunks.length} items: ${validCount} completed, ${invalidCount} retry queued) using ${projectUsed} (${modelUsed}) in ${Date.now() - startBatchTime}ms`
+            `[Cloud Worker #${workerId}] Batch result (${validCount + invalidCount} items: ${validCount} completed, ${invalidCount} retry queued) using ${projectUsed} (${modelUsed}) in ${Date.now() - startBatchTime}ms`
           );
         } catch (batchErr: any) {
           const cleanErr = formatCleanErrorMessage(batchErr);
@@ -758,8 +738,8 @@ Translate all chapters above into English, returning each inside its exact <<<CH
         saveCloudJobToDisk();
       }
 
-      // Small pacing interval between worker tasks to stay comfortable with RPM
-      await new Promise((r) => setTimeout(r, 1200));
+      // Small pacing interval between worker tasks to stay comfortable with RPM (reduced from 1200ms to 100ms)
+      await new Promise((r) => setTimeout(r, 100));
     }
   };
 

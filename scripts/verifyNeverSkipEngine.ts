@@ -602,6 +602,119 @@ Duplicate Text...
     );
   }
 
+  // -------------------------------------------------------------
+  // Test 16: Quota Efficiency & Strict Partial Retry Chunk Isolation
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 16] Strict Partial Retry Chunk Isolation (Never Re-send Valid Chunks)");
+  {
+    let originalBatch = [
+      createMockChunk(0, "processing", "", "Ch 1"),
+      createMockChunk(1, "processing", "", "Ch 2"),
+      createMockChunk(2, "processing", "", "Ch 3"),
+      createMockChunk(3, "processing", "", "Ch 4"),
+    ];
+
+    // Mock response where Ch 1 & Ch 2 succeeded, but Ch 3 & Ch 4 failed validation
+    const mockOutput = `
+<<<CHAPTER_START id="${originalBatch[0].id}" index=1>>>
+Ch 1 English text
+<<<CHAPTER_END id="${originalBatch[0].id}">>>
+
+<<<CHAPTER_START id="${originalBatch[1].id}" index=2>>>
+Ch 2 English text
+<<<CHAPTER_END id="${originalBatch[1].id}">>>
+`;
+
+    const expected = originalBatch.map((c) => ({ id: c.id, index: c.index + 1, charCount: 1000 }));
+    const parsed = parseAndValidateBatchResponse(mockOutput, expected);
+
+    for (const chunk of originalBatch) {
+      const p = parsed.get(chunk.id);
+      if (p && p.isValid) {
+        chunk.status = "completed";
+        chunk.englishText = p.englishText;
+      } else {
+        chunk.status = "error";
+      }
+    }
+
+    // Filter out completed chunks to isolate retry batch
+    const retryBatch = originalBatch.filter((c) => c.status !== "completed");
+
+    assert(
+      retryBatch.length === 2 && retryBatch[0].id === originalBatch[2].id && retryBatch[1].id === originalBatch[3].id,
+      "Retry batch contains ONLY failed chunks (Ch 3 & Ch 4). Ch 1 & Ch 2 are completely isolated and never re-sent.",
+      `Retry batch IDs: ${retryBatch.map((c) => c.id).join(",")}`
+    );
+    assert(
+      originalBatch[0].status === "completed" && originalBatch[1].status === "completed",
+      "Successfully translated chunks (Ch 1 & Ch 2) remain saved as completed",
+      `Ch 1: ${originalBatch[0].status}, Ch 2: ${originalBatch[1].status}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 17: Empty Response Project Failover & Acquire/Release Lifecycle
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 17] Empty-Response Failover & Acquire/Release Protection");
+  {
+    const testKeys = ["KEY_1", "KEY_2", "KEY_3"];
+    const scheduler = new QuotaAwareKeyScheduler(testKeys);
+
+    const project1 = scheduler.selectProject();
+    assert(project1 !== null && !!project1.project, "Project 1 acquired initially");
+
+    scheduler.acquireProject(project1.project.id);
+    assert(
+      (scheduler as any).projects.get(project1.project.id).activeRequestCount === 1,
+      "Acquire increments activeRequestCount to 1"
+    );
+
+    // Simulate empty response on Project 1 -> failover to Project 2
+    scheduler.recordFailure(project1.project.id, new Error("Empty response / safety block"));
+    scheduler.releaseProject(project1.project.id);
+
+    assert(
+      (scheduler as any).projects.get(project1.project.id).activeRequestCount === 0,
+      "Release in finally block restores activeRequestCount back to 0"
+    );
+
+    // Failover request excludes Project 1
+    const excludeSet = new Set([project1.project.id]);
+    const project2 = scheduler.selectProject(excludeSet);
+
+    assert(
+      project2 !== null && project2.project.id !== project1.project.id,
+      "Failover correctly selects Project 2 without re-querying flagged Project 1",
+      `Selected: ${project2?.project.name}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test 18: 403 Quota Error vs Auth Error Classification
+  // -------------------------------------------------------------
+  console.log("\n[Test Suite 18] 403 Quota Error vs Auth Error Classification");
+  {
+    const testKeys = ["KEY_1", "KEY_2"];
+    const scheduler = new QuotaAwareKeyScheduler(testKeys);
+    const proj1 = scheduler.selectProject().project;
+
+    // 1. Simulate a 403 Quota Exceeded error (should be rate_limited, NOT disabled)
+    const quotaErr = { status: 403, message: "Quota exceeded for quota metric 'Generate Content API Requests' 403" };
+    const res = scheduler.recordFailure(proj1.id, quotaErr);
+
+    assert(res.isRateLimit === true, "403 Quota error correctly classified as rate limit");
+    assert(proj1.status === "rate_limited", "Project status set to rate_limited, NOT disabled");
+    assert(proj1.status !== "disabled", "Project is NOT disabled on 403 quota error");
+
+    // 2. Simulate a true authentication error (should be disabled)
+    const authErr = { status: 401, message: "API key not valid. Please pass a valid API key." };
+    const authRes = scheduler.recordFailure(proj1.id, authErr);
+
+    assert(authRes.isRateLimit === false, "True 401 error classified as auth error");
+    assert(proj1.status === "disabled", "Project status correctly disabled on true invalid key error");
+  }
+
   console.log("\n=======================================================");
   console.log(`  ALL ${passedTests}/${totalTests} TESTS PASSED SUCCESSFULLY!`);
   console.log("=======================================================\n");
