@@ -49,9 +49,12 @@ function getGeminiClient(): GoogleGenAI {
 // exponential backoff, and content-filter resilience.
 // Supported modern models per Google GenAI SDK guidelines:
 const FREE_TIER_MODELS = [
-  "gemini-3.1-flash-lite",
   "gemini-3.8-flash",
-  "gemini-flash-latest"
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite"
 ];
 
 // In-memory tracking of model availability and quota cooldowns
@@ -690,7 +693,7 @@ async function startCloudWorkerLoop() {
 
   console.log(`[Cloud Background Worker] Started multi-session parallel translation engine`);
 
-  const numWorkers = 4;
+  const maxPossibleWorkers = 5;
 
   const runWorkerTask = async (workerId: number) => {
     while (isCloudWorkerRunning) {
@@ -701,6 +704,17 @@ async function startCloudWorkerLoop() {
           console.log(`[Cloud Background Worker] No active running jobs. Pausing worker loop.`);
           break;
         }
+      }
+
+      // Dynamically calculate the active worker limit based on selected concurrency and available projects
+      const maxJobConcurrency = runningJobs.length > 0 ? Math.max(...runningJobs.map(j => j.concurrency || 1)) : 1;
+      const availableKeysCount = quotaScheduler.enabledProjectCount || 1;
+      const activeWorkersLimit = Math.max(1, Math.min(maxJobConcurrency, availableKeysCount, 5));
+
+      if (workerId > activeWorkersLimit) {
+        // Excess worker above current dynamic limit - sleep and check again next loop
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
       }
 
       const now = Date.now();
@@ -1112,7 +1126,7 @@ Translation Guidelines:
   };
 
   try {
-    const workerPromises = Array.from({ length: numWorkers }, (_, idx) =>
+    const workerPromises = Array.from({ length: maxPossibleWorkers }, (_, idx) =>
       runWorkerTask(idx + 1)
     );
     await Promise.all(workerPromises);
