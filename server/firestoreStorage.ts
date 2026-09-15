@@ -45,6 +45,7 @@ export interface CloudJob {
 
 let dbInstance: Firestore | null = null;
 let isFirestoreAvailable = false;
+let lastFirestoreCheckTime = 0;
 
 export function initFirestore(): Firestore | null {
   if (dbInstance) return dbInstance;
@@ -52,7 +53,7 @@ export function initFirestore(): Firestore | null {
   try {
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
     if (!fs.existsSync(configPath)) {
-      console.log("[FirestoreStorage] No firebase-applet-config.json found, skipping cloud DB init.");
+      console.warn("[FirestoreStorage] No firebase-applet-config.json found, skipping cloud DB init.");
       return null;
     }
 
@@ -62,10 +63,10 @@ export function initFirestore(): Firestore | null {
 
     dbInstance = db;
     isFirestoreAvailable = true;
-    console.log(`[FirestoreStorage] Initialized Firestore client for project ${config.projectId}`);
+    console.log(`[FirestoreStorage] Initialized Firestore client for project ${config.projectId} (${config.firestoreDatabaseId})`);
     return db;
   } catch (err: any) {
-    console.warn("[FirestoreStorage] Failed to initialize Firestore client:", err.message);
+    console.error("[FirestoreStorage] Failed to initialize Firestore client:", err.message);
     isFirestoreAvailable = false;
     return null;
   }
@@ -75,99 +76,109 @@ export function isCloudStorageConnected(): boolean {
   return isFirestoreAvailable && !!dbInstance;
 }
 
-/**
- * Strict monotonic merger:
- * Ensures completed chapters and translated content are never downgraded or lost.
- */
-export function mergeMonotonicJob(authoritative: CloudJob, candidate: CloudJob): CloudJob {
-  if (!authoritative) return candidate;
-  if (!candidate) return authoritative;
-
-  const totalChunks = Math.max(authoritative.chunks.length, candidate.chunks.length);
-  const mergedChunks: ServerTextChunk[] = [];
-
-  for (let i = 0; i < totalChunks; i++) {
-    const authChunk = authoritative.chunks[i];
-    const candChunk = candidate.chunks[i];
-
-    if (!authChunk && candChunk) {
-      mergedChunks.push({ ...candChunk });
-      continue;
-    }
-    if (authChunk && !candChunk) {
-      mergedChunks.push({ ...authChunk });
-      continue;
-    }
-
-    // Both exist: check status monotonicity
-    const isAuthCompleted = authChunk.status === "completed" && !!authChunk.englishText?.trim();
-    const isCandCompleted = candChunk.status === "completed" && !!candChunk.englishText?.trim();
-
-    if (isAuthCompleted && !isCandCompleted) {
-      // Retain completed state from authoritative
-      mergedChunks.push({ ...authChunk });
-    } else if (isCandCompleted && !isAuthCompleted) {
-      // Promote to candidate's newly completed state
-      mergedChunks.push({ ...candChunk });
-    } else if (isAuthCompleted && isCandCompleted) {
-      // Pick the longer or edited one if available
-      const authLen = (authChunk.englishText || "").length;
-      const candLen = (candChunk.englishText || "").length;
-      if (candChunk.edited && !authChunk.edited) {
-        mergedChunks.push({ ...candChunk });
-      } else if (candLen >= authLen) {
-        mergedChunks.push({ ...candChunk });
-      } else {
-        mergedChunks.push({ ...authChunk });
-      }
-    } else {
-      // Neither is completed: keep the one with fewer errors / higher progress or default to candidate
-      mergedChunks.push({
-        ...candChunk,
-        chineseText: candChunk.chineseText || authChunk.chineseText,
-        chapterTitle: candChunk.chapterTitle || authChunk.chapterTitle,
-        charCount: candChunk.charCount || authChunk.charCount,
-      });
-    }
+export async function testFirestoreHealth(): Promise<boolean> {
+  const db = initFirestore();
+  if (!db) return false;
+  try {
+    const testDoc = doc(db, "_health", "ping");
+    await setDoc(testDoc, { ping: Date.now() }, { merge: true });
+    isFirestoreAvailable = true;
+    return true;
+  } catch (err: any) {
+    console.error("[FirestoreStorage] Health check failed:", err.message);
+    isFirestoreAvailable = false;
+    return false;
   }
+}
 
-  const completedCount = mergedChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-  const isFullyDone = completedCount === totalChunks && totalChunks > 0;
+/**
+ * Authoritative Firestore Reconciliation:
+ * Firestore is the sole authoritative source of truth for job progress and completed translations.
+ * Local disk (/data/jobs) is treated strictly as an unauthoritative read/cache layer.
+ * 
+ * Rules:
+ * 1. For an existing job in Firestore, Firestore state is 100% authoritative.
+ * 2. Local disk CANNOT promote any chunk or progress above what Firestore has durably recorded.
+ * 3. If Firestore = 165/283 and Local disk = 283/283, the recovered job MUST be exactly 165/283.
+ * 4. If Firestore = 165/283 and Local disk = 150/283, the recovered job MUST be exactly 165/283.
+ * 5. For completed chunks, the actual English text MUST come directly from Firestore.
+ * 6. Local disk only supplies non-contradictory auxiliary info (like source chineseText if missing in Firestore).
+ */
+export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | null): CloudJob {
+  if (!diskJob) return fsJob;
+  if (!fsJob) return diskJob;
 
-  // Monotonic status rules:
-  // If either was completed or all chunks are completed, status is permanently "completed"
-  let finalStatus: CloudJob["status"] = candidate.status;
-  if (isFullyDone || authoritative.status === "completed") {
+  const fsChunks = fsJob.chunks || [];
+  const diskChunks = diskJob.chunks || [];
+  const diskChunkMap = new Map(diskChunks.map((c) => [c.index, c]));
+
+  const reconciledChunks: ServerTextChunk[] = fsChunks.map((fsChunk) => {
+    const dChunk = diskChunkMap.get(fsChunk.index);
+    const isFsCompleted = fsChunk.status === "completed" && !!fsChunk.englishText?.trim();
+
+    return {
+      ...fsChunk,
+      // Status & English text are STRICTLY authoritative from Firestore
+      status: isFsCompleted ? "completed" : (fsChunk.status === "processing" ? "pending" : (fsChunk.status || "pending")),
+      englishText: isFsCompleted ? fsChunk.englishText : "",
+      // Non-contradictory auxiliary fields fallback to disk cache only if missing in Firestore
+      chineseText: fsChunk.chineseText || (dChunk ? dChunk.chineseText : ""),
+      chapterTitle: fsChunk.chapterTitle || (dChunk ? dChunk.chapterTitle : ""),
+      charCount: fsChunk.charCount || (dChunk ? dChunk.charCount : 0),
+      attempts: fsChunk.attempts || (dChunk ? dChunk.attempts : 0),
+      edited: isFsCompleted ? !!fsChunk.edited : false,
+      errorMessage: isFsCompleted ? undefined : fsChunk.errorMessage,
+    };
+  });
+
+  const completedCount = reconciledChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+  const totalCount = reconciledChunks.length;
+  const isAllDone = completedCount === totalCount && totalCount > 0;
+
+  let finalStatus: CloudJob["status"] = fsJob.status;
+  if (isAllDone || fsJob.status === "completed") {
     finalStatus = "completed";
-  } else if (candidate.status === "running" || authoritative.status === "running") {
+  } else if (fsJob.status === "running") {
     finalStatus = "running";
-  } else if (candidate.status === "paused" || authoritative.status === "paused") {
+  } else {
     finalStatus = "paused";
   }
 
   return {
-    ...candidate,
-    id: authoritative.id || candidate.id,
-    sessionId: candidate.sessionId || authoritative.sessionId,
-    fileName: candidate.fileName || authoritative.fileName,
-    chunks: mergedChunks,
+    ...fsJob,
+    sessionId: fsJob.sessionId || diskJob.sessionId || "legacy_default",
+    fileName: fsJob.fileName || diskJob.fileName,
+    fileSizeBytes: fsJob.fileSizeBytes || diskJob.fileSizeBytes || 0,
+    totalChineseChars: fsJob.totalChineseChars || diskJob.totalChineseChars || 0,
+    chunks: reconciledChunks,
+    style: fsJob.style || diskJob.style || "xianxia",
+    customInstructions: fsJob.customInstructions !== undefined ? fsJob.customInstructions : (diskJob.customInstructions || ""),
+    glossary: (fsJob.glossary && fsJob.glossary.length > 0) ? fsJob.glossary : (diskJob.glossary || []),
+    concurrency: fsJob.concurrency || diskJob.concurrency || 1,
     status: finalStatus,
-    startedAt: Math.min(authoritative.startedAt || Date.now(), candidate.startedAt || Date.now()),
-    lastActiveAt: Math.max(authoritative.lastActiveAt || 0, candidate.lastActiveAt || 0, Date.now()),
+    startedAt: fsJob.startedAt || diskJob.startedAt || Date.now(),
+    lastActiveAt: Math.max(fsJob.lastActiveAt || 0, diskJob.lastActiveAt || 0, Date.now()),
   };
+}
+
+export function mergeMonotonicJob(authoritative: CloudJob, candidate: CloudJob): CloudJob {
+  return reconcileAuthoritativeJob(authoritative, candidate);
 }
 
 /**
  * Persist job metadata to Firestore
  */
-export async function saveJobToFirestore(job: CloudJob): Promise<void> {
+export async function saveJobToFirestore(job: CloudJob): Promise<boolean> {
   const db = initFirestore();
-  if (!db || !job.id) return;
+  if (!db || !job.id) {
+    console.warn(`[FirestoreStorage] Cannot save job: DB not initialized or missing ID (job: ${job?.id})`);
+    return false;
+  }
 
   try {
     const jobRef = doc(db, "translation_jobs", job.id);
-    const completedCount = job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    const isCompleted = completedCount === job.chunks.length && job.chunks.length > 0;
+    const completedCount = (job.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+    const isCompleted = completedCount === (job.chunks?.length || 0) && (job.chunks?.length || 0) > 0;
 
     const payload = {
       id: job.id,
@@ -175,7 +186,7 @@ export async function saveJobToFirestore(job: CloudJob): Promise<void> {
       fileName: job.fileName,
       fileSizeBytes: job.fileSizeBytes || 0,
       totalChineseChars: job.totalChineseChars || 0,
-      totalChunks: job.chunks.length,
+      totalChunks: job.chunks ? job.chunks.length : 0,
       completedChunks: completedCount,
       style: job.style || "xianxia",
       customInstructions: job.customInstructions || "",
@@ -187,50 +198,61 @@ export async function saveJobToFirestore(job: CloudJob): Promise<void> {
     };
 
     await setDoc(jobRef, payload, { merge: true });
+    return true;
   } catch (err: any) {
-    console.warn(`[FirestoreStorage] Failed to save job ${job.id} metadata:`, err.message);
+    console.error(`[FirestoreStorage] CRITICAL: Failed to save job ${job.id} metadata to Firestore:`, err.message);
+    return false;
   }
 }
 
 /**
  * Persist translated chunk to Firestore
+ * MUST be called and succeed before chunk is marked permanently completed.
  */
-export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk): Promise<void> {
+export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk): Promise<boolean> {
   const db = initFirestore();
-  if (!db || !jobId) return;
+  if (!db || !jobId) {
+    console.error(`[FirestoreStorage] Cannot save chunk: DB not initialized or missing jobId (jobId: ${jobId})`);
+    return false;
+  }
 
   try {
     const chunkRef = doc(db, "translation_jobs", jobId, "chunks", `chunk_${chunk.index}`);
-    await setDoc(
-      chunkRef,
-      {
-        id: chunk.id,
-        index: chunk.index,
-        chapterTitle: chunk.chapterTitle || "",
-        chineseText: chunk.chineseText || "",
-        englishText: chunk.englishText || "",
-        charCount: chunk.charCount || 0,
-        status: chunk.status,
-        attempts: chunk.attempts || 0,
-        edited: !!chunk.edited,
-        updatedAt: Date.now(),
-      },
-      { merge: true }
-    );
+    const chunkPayload: any = {
+      id: chunk.id || `chunk_${chunk.index}`,
+      jobId: jobId,
+      index: chunk.index,
+      chapterTitle: chunk.chapterTitle || "",
+      chineseText: chunk.chineseText || "",
+      englishText: chunk.englishText || "",
+      charCount: chunk.charCount || 0,
+      status: chunk.status,
+      attempts: chunk.attempts || 0,
+      edited: !!chunk.edited,
+      durationMs: chunk.durationMs || 0,
+      updatedAt: Date.now(),
+    };
+
+    if (chunk.errorMessage) {
+      chunkPayload.errorMessage = chunk.errorMessage;
+    }
+
+    await setDoc(chunkRef, chunkPayload, { merge: true });
+    return true;
   } catch (err: any) {
-    console.warn(`[FirestoreStorage] Failed to save chunk ${chunk.index} of job ${jobId}:`, err.message);
+    console.error(`[FirestoreStorage] CRITICAL: Failed to save chunk ${chunk.index} for job ${jobId} to Firestore:`, err.message);
+    return false;
   }
 }
 
 /**
  * Batch save chunks to Firestore
  */
-export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTextChunk[]): Promise<void> {
+export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTextChunk[]): Promise<boolean> {
   const db = initFirestore();
-  if (!db || !jobId || chunks.length === 0) return;
+  if (!db || !jobId || chunks.length === 0) return false;
 
   try {
-    // Firestore batch limit is 500 operations
     const BATCH_SIZE = 100;
     for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
       const slice = chunks.slice(i, i + BATCH_SIZE);
@@ -240,7 +262,8 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
         batch.set(
           chunkRef,
           {
-            id: chunk.id,
+            id: chunk.id || `chunk_${chunk.index}`,
+            jobId: jobId,
             index: chunk.index,
             chapterTitle: chunk.chapterTitle || "",
             chineseText: chunk.chineseText || "",
@@ -249,6 +272,7 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
             status: chunk.status,
             attempts: chunk.attempts || 0,
             edited: !!chunk.edited,
+            durationMs: chunk.durationMs || 0,
             updatedAt: Date.now(),
           },
           { merge: true }
@@ -256,8 +280,10 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
       }
       await batch.commit();
     }
+    return true;
   } catch (err: any) {
-    console.warn(`[FirestoreStorage] Failed to batch save chunks for job ${jobId}:`, err.message);
+    console.error(`[FirestoreStorage] Failed to batch save chunks for job ${jobId}:`, err.message);
+    return false;
   }
 }
 
@@ -279,24 +305,30 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
 
     const chunks: ServerTextChunk[] = [];
     chunksSnap.forEach((docSnap) => {
-      const c = docSnap.data() as ServerTextChunk;
+      const c = docSnap.data();
+      const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+      const isCompleted = c.status === "completed" && hasEnglish;
+
       chunks.push({
-        id: c.id,
-        index: c.index,
-        chapterTitle: c.chapterTitle,
-        chineseText: c.chineseText,
+        id: c.id || docSnap.id,
+        index: typeof c.index === "number" ? c.index : 0,
+        chapterTitle: c.chapterTitle || "",
+        chineseText: c.chineseText || "",
         englishText: c.englishText || "",
-        charCount: c.charCount || 0,
-        status: c.status,
-        attempts: c.attempts || 0,
-        edited: c.edited,
+        charCount: typeof c.charCount === "number" ? c.charCount : 0,
+        status: isCompleted ? "completed" : (c.status === "processing" ? "pending" : (c.status || "pending")),
+        attempts: typeof c.attempts === "number" ? c.attempts : 0,
+        edited: !!c.edited,
+        durationMs: typeof c.durationMs === "number" ? c.durationMs : 0,
+        errorMessage: isCompleted ? undefined : c.errorMessage,
       });
     });
 
     chunks.sort((a, b) => a.index - b.index);
 
     const completedCount = chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    const isCompleted = completedCount === (data.totalChunks || chunks.length) && chunks.length > 0;
+    const totalCount = data.totalChunks || chunks.length;
+    const isCompleted = completedCount === totalCount && totalCount > 0;
 
     return {
       id: data.id || jobId,
@@ -309,13 +341,13 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       customInstructions: data.customInstructions || "",
       glossary: data.glossary || [],
       concurrency: data.concurrency || 1,
-      status: isCompleted ? "completed" : data.status || "idle",
+      status: isCompleted ? "completed" : (data.status || "idle"),
       startedAt: data.startedAt || Date.now(),
       lastActiveAt: data.lastActiveAt || Date.now(),
     };
   } catch (err: any) {
-    console.warn(`[FirestoreStorage] Failed to load job ${jobId} from Firestore:`, err.message);
-    return null;
+    console.error(`[FirestoreStorage] Failed to load job ${jobId} from Firestore:`, err.message);
+    throw err;
   }
 }
 
@@ -325,24 +357,27 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
 export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>> {
   const result = new Map<string, CloudJob>();
   const db = initFirestore();
-  if (!db) return result;
+  if (!db) {
+    throw new Error("Firestore client not initialized.");
+  }
 
-  try {
-    const jobsRef = collection(db, "translation_jobs");
-    const snapshot = await getDocs(jobsRef);
+  const jobsRef = collection(db, "translation_jobs");
+  const snapshot = await getDocs(jobsRef);
 
-    for (const docSnap of snapshot.docs) {
-      const jId = docSnap.id;
+  for (const docSnap of snapshot.docs) {
+    const jId = docSnap.id;
+    if (jId.startsWith("_")) continue; // Skip internal health docs
+    try {
       const job = await loadJobFromFirestore(jId);
       if (job) {
         const sKey = job.sessionId || "legacy_default";
         result.set(sKey, job);
       }
+    } catch (jobErr: any) {
+      console.error(`[FirestoreStorage] Failed to load job details for ${jId}:`, jobErr.message);
     }
-    console.log(`[FirestoreStorage] Loaded ${result.size} authoritative jobs from Firestore.`);
-  } catch (err: any) {
-    console.warn("[FirestoreStorage] Failed to load jobs collection from Firestore:", err.message);
   }
 
+  console.log(`[FirestoreStorage] Authoritative load complete: ${result.size} job(s) from Firestore.`);
   return result;
 }

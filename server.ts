@@ -627,7 +627,10 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
     const finalJob = existing && existing.fileName === job.fileName ? mergeMonotonicJob(existing, job) : job;
     cloudJobs.set(sessionId, finalJob);
     saveJobToDisk(sessionId, finalJob);
-    // Persist full chunk snapshot to cloud storage
+    // Persist full metadata and initial chunk snapshot to cloud storage
+    saveJobToFirestore(finalJob).catch((err) => {
+      console.warn(`[Storage] Firestore initial job sync note for ${finalJob.id}:`, err.message);
+    });
     saveChunksBatchToFirestore(finalJob.id, finalJob.chunks).catch((err) => {
       console.warn(`[Storage] Firestore initial chunks batch sync note for ${finalJob.id}:`, err.message);
     });
@@ -646,10 +649,13 @@ async function loadCloudJobsFromDisk() {
 
     // 1. Attempt to load authoritative state from cloud Firestore database
     let firestoreJobs = new Map<string, CloudJob>();
+    let firestoreLoadedSuccessfully = false;
     try {
       firestoreJobs = await loadAllJobsFromFirestore();
+      firestoreLoadedSuccessfully = true;
     } catch (fsErr: any) {
-      console.warn("[Startup] Notice loading from cloud Firestore:", fsErr.message);
+      console.error("[Startup] CRITICAL: Notice loading from cloud Firestore:", fsErr.message);
+      firestoreLoadedSuccessfully = false;
     }
 
     // 2. Read local disk files as local candidates
@@ -698,31 +704,48 @@ async function loadCloudJobsFromDisk() {
       }
     }
 
-    // 3. Monotonic reconciliation: merge persistent cloud state with local disk
+    // 3. Monotonic reconciliation: Firestore is strictly authoritative
+    // If cloud storage recovery failed or is unavailable, enter safe pause mode
+    if (!firestoreLoadedSuccessfully) {
+      console.error(
+        "[Startup] SAFE STATE: Authoritative Firestore persistence is unavailable. Halting auto-resume to protect data integrity."
+      );
+      for (const [sId, dJob] of diskJobs.entries()) {
+        dJob.status = "paused";
+        cloudJobs.set(sId, dJob);
+      }
+      return;
+    }
+
     const allSessionKeys = new Set([...firestoreJobs.keys(), ...diskJobs.keys()]);
     for (const sId of allSessionKeys) {
       const fsJob = firestoreJobs.get(sId);
       const dJob = diskJobs.get(sId);
 
-      let merged: CloudJob;
-      if (fsJob && dJob) {
-        // Persistent cloud state takes precedence, merged monotonically with local disk
-        merged = mergeMonotonicJob(fsJob, dJob);
-      } else if (fsJob) {
-        merged = fsJob;
+      let reconciled: CloudJob;
+      if (fsJob) {
+        // Firestore is strictly authoritative. Local disk is read-only cache.
+        reconciled = reconcileAuthoritativeJob(fsJob, dJob);
       } else {
-        merged = dJob!;
+        reconciled = dJob!;
+        // Sync new local disk job to cloud Firestore
+        saveJobToFirestore(reconciled).catch((err) => {
+          console.warn(`[Startup] Initial Firestore sync for new disk job ${reconciled.id}:`, err.message);
+        });
+        saveChunksBatchToFirestore(reconciled.id, reconciled.chunks).catch((err) => {
+          console.warn(`[Startup] Initial Firestore chunks sync for new disk job ${reconciled.id}:`, err.message);
+        });
       }
 
       // Check completed status: if all chunks have completed englishText, permanently lock as "completed"
-      const completedCount = merged.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-      if (completedCount === merged.chunks.length && merged.chunks.length > 0) {
-        merged.status = "completed";
+      const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      if (completedCount === reconciled.chunks.length && reconciled.chunks.length > 0) {
+        reconciled.status = "completed";
       }
 
-      cloudJobs.set(sId, merged);
-      saveJobToDisk(sId, merged);
-      console.log(`[Startup] Authoritative job registered [${sId}]: "${merged.fileName}" (${completedCount}/${merged.chunks.length} completed, status: ${merged.status})`);
+      cloudJobs.set(sId, reconciled);
+      saveJobToDisk(sId, reconciled);
+      console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${completedCount}/${reconciled.chunks.length} completed, status: ${reconciled.status})`);
     }
 
     // 4. Auto-resume ONLY truly running, uncompleted jobs
@@ -1014,12 +1037,22 @@ Translate all chapters above into English, returning each inside its exact <<<CH
 
             if (cleanText.length > 0) {
               single.englishText = cleanText;
-              single.status = "completed";
               single.durationMs = Date.now() - startBatchTime;
               single.errorMessage = undefined;
               single.lastErrorAt = undefined;
-              inFlightChunkIds.delete(single.id);
-              validCount = 1;
+
+              // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
+              single.status = "completed";
+              const persisted = await saveChunkToFirestore(targetJob.id, single);
+              if (persisted) {
+                inFlightChunkIds.delete(single.id);
+                validCount = 1;
+              } else {
+                single.status = "error";
+                single.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
+                single.lastErrorAt = Date.now();
+                invalidCount = 1;
+              }
             } else {
               const decomp = await translateWithDecomposition(
                 single.chineseText,
@@ -1029,12 +1062,22 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               );
               if (decomp.text && decomp.text.trim().length > 0) {
                 single.englishText = decomp.text.trim();
-                single.status = "completed";
                 single.durationMs = Date.now() - startBatchTime;
                 single.errorMessage = undefined;
                 single.lastErrorAt = undefined;
-                inFlightChunkIds.delete(single.id);
-                validCount = 1;
+
+                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
+                single.status = "completed";
+                const persisted = await saveChunkToFirestore(targetJob.id, single);
+                if (persisted) {
+                  inFlightChunkIds.delete(single.id);
+                  validCount = 1;
+                } else {
+                  single.status = "error";
+                  single.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
+                  single.lastErrorAt = Date.now();
+                  invalidCount = 1;
+                }
               } else {
                 single.status = "error";
                 single.errorMessage = "Empty translation response received.";
@@ -1056,12 +1099,22 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               const parsed = parsedResults.get(chunk.id);
               if (parsed && parsed.isValid && parsed.englishText.trim().length > 0) {
                 chunk.englishText = parsed.englishText;
-                chunk.status = "completed";
                 chunk.durationMs = Date.now() - startBatchTime;
                 chunk.errorMessage = undefined;
                 chunk.lastErrorAt = undefined;
-                inFlightChunkIds.delete(chunk.id);
-                validCount++;
+
+                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
+                chunk.status = "completed";
+                const persisted = await saveChunkToFirestore(targetJob.id, chunk);
+                if (persisted) {
+                  inFlightChunkIds.delete(chunk.id);
+                  validCount++;
+                } else {
+                  chunk.status = "error";
+                  chunk.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
+                  chunk.lastErrorAt = Date.now();
+                  invalidCount++;
+                }
               } else {
                 console.log(`[Cloud Worker #${workerId}] Batch parsing fallback: translating chunk #${chunk.index + 1} individually...`);
                 try {
@@ -1092,13 +1145,24 @@ Translation Guidelines:
                   let clean = (singleRes.text || "").trim().replace(/<<<CHAPTER_START[^>]*>>>/gi, "").replace(/<<<CHAPTER_END[^>]*>>>/gi, "").trim();
                   if (clean.length > 0) {
                     chunk.englishText = clean;
-                    chunk.status = "completed";
                     chunk.durationMs = Date.now() - startBatchTime;
                     chunk.errorMessage = undefined;
                     chunk.lastErrorAt = undefined;
-                    inFlightChunkIds.delete(chunk.id);
-                    validCount++;
-                    continue;
+
+                    // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
+                    chunk.status = "completed";
+                    const persisted = await saveChunkToFirestore(targetJob.id, chunk);
+                    if (persisted) {
+                      inFlightChunkIds.delete(chunk.id);
+                      validCount++;
+                      continue;
+                    } else {
+                      chunk.status = "error";
+                      chunk.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
+                      chunk.lastErrorAt = Date.now();
+                      invalidCount++;
+                      continue;
+                    }
                   }
                 } catch (singleErr: any) {
                   console.warn(`[Cloud Worker #${workerId}] Individual translation fallback failed for chunk #${chunk.index + 1}:`, singleErr.message);
@@ -1140,17 +1204,22 @@ Translation Guidelines:
               );
               if (decompResult.text && decompResult.text.trim().length > 0) {
                 firstChunk.englishText = decompResult.text;
-                firstChunk.status = "completed";
                 firstChunk.durationMs = Date.now() - startBatchTime;
                 firstChunk.errorMessage = undefined;
                 firstChunk.lastErrorAt = undefined;
-                inFlightChunkIds.delete(firstChunk.id);
-                success = true;
-                batchChunks = [];
-                targetJob.lastActiveAt = Date.now();
-                saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
-                console.log(`[Cloud Worker #${workerId}] Chunk ${firstChunk.index + 1} succeeded via paragraph decomposition!`);
-                break;
+
+                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
+                firstChunk.status = "completed";
+                const persisted = await saveChunkToFirestore(targetJob.id, firstChunk);
+                if (persisted) {
+                  inFlightChunkIds.delete(firstChunk.id);
+                  success = true;
+                  batchChunks = [];
+                  targetJob.lastActiveAt = Date.now();
+                  saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
+                  console.log(`[Cloud Worker #${workerId}] Chunk ${firstChunk.index + 1} succeeded via paragraph decomposition and persisted!`);
+                  break;
+                }
               }
             } catch (decompErr: any) {
               console.warn(`[Cloud Worker #${workerId}] Paragraph decomposition also failed:`, decompErr.message);
@@ -1784,11 +1853,33 @@ app.post("/api/cloud-job/pause", requireAuthMiddleware, (req, res) => {
 app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   const sessionId = getSessionId(req);
   const targetJob = getJobForSession(req);
-  if (targetJob) {
-    targetJob.status = "running";
-    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
-    startCloudWorkerLoop();
+  if (!targetJob) {
+    res.status(404).json({ success: false, error: "No active translation job found for this session." });
+    return;
   }
+
+  // Enforce server-side immutable lock: completed jobs cannot be resumed
+  const completedChunks = targetJob.chunks.filter(
+    (c) => c.status === "completed" && !!c.englishText?.trim()
+  ).length;
+  const isFullyCompleted = (completedChunks === targetJob.chunks.length && targetJob.chunks.length > 0) || targetJob.status === "completed";
+
+  if (isFullyCompleted) {
+    targetJob.status = "completed";
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+    res.status(400).json({
+      success: false,
+      error: "Job is already completed and locked.",
+      status: "completed",
+      completedChunks,
+      totalChunks: targetJob.chunks.length,
+    });
+    return;
+  }
+
+  targetJob.status = "running";
+  saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+  startCloudWorkerLoop();
   res.json({ success: true, status: "running" });
 });
 
@@ -1804,26 +1895,56 @@ app.post("/api/cloud-job/stop", requireAuthMiddleware, (req, res) => {
 });
 
 // Sync manual edit to a chunk or retry outcome
-app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, (req, res) => {
+app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, async (req, res) => {
   const sessionId = getSessionId(req);
   const targetJob = getJobForSession(req);
   const { chunkId, englishText, status } = req.body;
-  if (targetJob && chunkId) {
-    const chunk = targetJob.chunks.find((c) => c.id === chunkId);
-    if (chunk) {
-      if (englishText !== undefined) {
-        chunk.englishText = englishText;
-        chunk.edited = true;
-      }
-      if (status) {
-        chunk.status = status;
-      }
-      chunk.errorMessage = undefined;
-      targetJob.lastActiveAt = Date.now();
-      saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
-    }
+  if (!targetJob || !chunkId) {
+    res.status(400).json({ error: "Job or chunk ID not found." });
+    return;
   }
-  res.json({ success: true });
+
+  const chunk = targetJob.chunks.find((c) => c.id === chunkId);
+  if (!chunk) {
+    res.status(404).json({ error: `Chunk ${chunkId} not found in job.` });
+    return;
+  }
+
+  const prevEnglish = chunk.englishText;
+  const prevStatus = chunk.status;
+  const prevEdited = chunk.edited;
+
+  if (englishText !== undefined) {
+    chunk.englishText = englishText;
+    chunk.edited = true;
+  }
+  if (status) {
+    chunk.status = status;
+  }
+  chunk.errorMessage = undefined;
+  targetJob.lastActiveAt = Date.now();
+
+  try {
+    // Await authoritative persistence to Firestore before returning success
+    const saved = await saveChunkToFirestore(targetJob.id, chunk);
+    if (!saved) {
+      // Revert in-memory modification on persistence failure
+      chunk.englishText = prevEnglish;
+      chunk.status = prevStatus;
+      chunk.edited = prevEdited;
+      res.status(500).json({ error: "Failed to persist chunk edit to Firestore database." });
+      return;
+    }
+
+    await saveJobToFirestore(targetJob);
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+    res.json({ success: true });
+  } catch (err: any) {
+    chunk.englishText = prevEnglish;
+    chunk.status = prevStatus;
+    chunk.edited = prevEdited;
+    res.status(500).json({ error: `Failed to persist chunk edit: ${err.message}` });
+  }
 });
 
 // Update settings on the cloud job (e.g. style, instructions, glossary) while running or paused

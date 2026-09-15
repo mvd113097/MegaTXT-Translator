@@ -1,8 +1,50 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['id', 'sessionId', 'fileName', 'totalChunks', 'completedChunks', 'status'])
+        && data.id is string && data.id.size() <= 128
+        && data.sessionId is string && data.sessionId.size() <= 128
+        && data.fileName is string && data.fileName.size() <= 500
+        && data.totalChunks is number && data.totalChunks >= 0
+        && data.completedChunks is number && data.completedChunks >= 0
+        && data.status in ['idle', 'running', 'paused', 'completed'];
+    }
+
+    function isValidChunk(data) {
+      return data.keys().hasAll(['id', 'index', 'status'])
+        && data.id is string && data.id.size() <= 128
+        && data.index is number && data.index >= 0
+        && data.status in ['pending', 'processing', 'completed', 'error'];
+    }
+
+    // Default deny catch-all
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // Authoritative translation jobs
+    match /translation_jobs/{jobId} {
+      allow read: if isValidId(jobId);
+      allow create: if isValidId(jobId) && isValidJob(request.resource.data);
+      allow update: if isValidId(jobId) && isValidJob(request.resource.data)
+        // Terminal state lock: Completed jobs cannot be reverted to non-completed status
+        && !(resource.data.status == 'completed' && request.resource.data.status != 'completed');
+      // Deletions are forbidden from client/rules layer to protect translated books
+      allow delete: if false;
+
+      // Chunks subcollection
+      match /chunks/{chunkId} {
+        allow read: if isValidId(jobId);
+        allow create, update: if isValidId(jobId) && isValidId(chunkId) && isValidChunk(request.resource.data);
+        allow delete: if false;
+      }
     }
   }
 }
