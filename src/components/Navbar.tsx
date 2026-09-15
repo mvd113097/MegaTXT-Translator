@@ -7,7 +7,6 @@ import {
   X,
   Layers,
   Settings,
-  Lock,
   RefreshCw,
 } from "lucide-react";
 
@@ -25,8 +24,6 @@ interface NavbarProps {
   glossaryCount: number;
   theme: "light" | "dark";
   onToggleTheme: () => void;
-  userEmail?: string | null;
-  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -43,8 +40,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   glossaryCount,
   theme,
   onToggleTheme,
-  userEmail,
-  onLogout,
 }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
@@ -136,22 +131,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Settings className="h-4 w-4 text-purple-600" />
               <span>Telegram Progress Alerts</span>
             </button>
-
-            {/* Lock Workspace */}
-            {onLogout && (
-              <button
-                id="menu-lock-btn"
-                type="button"
-                onClick={() => {
-                  setIsMenuOpen(false);
-                  onLogout();
-                }}
-                className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-purple-50 dark:hover:bg-purple-950/40 transition cursor-pointer"
-              >
-                <Lock className="h-4 w-4 text-purple-600" />
-                <span>Lock Workspace</span>
-              </button>
-            )}
 
             {/* Reset / New Novel */}
             {hasFile && (

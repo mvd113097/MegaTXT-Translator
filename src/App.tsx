@@ -11,7 +11,6 @@ import { ProgressBar } from "./components/ProgressBar";
 import { TranslationQueueHub } from "./components/TranslationQueueHub";
 import { GlossaryModal } from "./components/GlossaryModal";
 import { ExportModal } from "./components/ExportModal";
-import { AuthGateModal } from "./components/AuthGateModal";
 import { TelegramSettingsModal } from "./components/TelegramSettingsModal";
 import { BottomNav } from "./components/BottomNav";
 import { HistoryModal } from "./components/HistoryModal";
@@ -28,7 +27,6 @@ import {
   GlossaryTerm,
   TranslationMetrics,
   TranslationSession,
-  AuthStatus,
 } from "./types";
 import {
   chunkChineseText,
@@ -90,59 +88,6 @@ export default function App() {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   };
 
-  // Authentication State
-  const [authToken, setAuthToken] = useState<string>(() => {
-    try {
-      return localStorage.getItem("megatext_auth_token") || "";
-    } catch {
-      return "";
-    }
-  });
-  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(true);
-
-  // Check auth status on boot
-  const checkAuthStatus = async (tokenToCheck?: string) => {
-    const activeTok = tokenToCheck !== undefined ? tokenToCheck : authToken;
-    try {
-      const res = await fetch("/api/auth/status", {
-        headers: activeTok ? { Authorization: `Bearer ${activeTok}` } : {},
-      });
-      const data = await res.json();
-      setAuthStatus(data);
-      if (data.authenticated && activeTok) {
-        setAuthToken(activeTok);
-      }
-    } catch (e) {
-      console.warn("Auth status check warning:", e);
-    } finally {
-      setIsAuthLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    checkAuthStatus();
-  }, [authToken]);
-
-  const handleLogout = async () => {
-    try {
-      if (authToken) {
-        await fetch("/api/auth/logout", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-      }
-    } catch {}
-    localStorage.removeItem("megatext_auth_token");
-    setAuthToken("");
-    setAuthStatus((prev) => (prev ? { ...prev, authenticated: false, googleVerified: false, passcodeVerified: false } : null));
-    setToastData({
-      message: "🔒 Logged out successfully. Master lockscreen engaged.",
-      type: "warning",
-    });
-    setTimeout(() => setToastData(null), 4000);
-  };
-
   // Generate or retrieve persistent unique client/device session ID
   const getClientSessionId = () => {
     try {
@@ -157,16 +102,12 @@ export default function App() {
     }
   };
 
-  // Helper to attach authorization and session isolation headers
+  // Helper to attach session isolation headers
   const getAuthHeaders = () => {
-    const headers: Record<string, string> = {
+    return {
       "Content-Type": "application/json",
       "x-session-id": getClientSessionId(),
     };
-    if (authToken) {
-      headers["Authorization"] = `Bearer ${authToken}`;
-    }
-    return headers;
   };
 
   // Translation Mode state: Option 1 (cloud) vs Option 2 (browser)
@@ -397,7 +338,7 @@ export default function App() {
       }
     }
     checkServerCloudJob();
-  }, [authToken]);
+  }, []);
 
   // Load existing server job explicitly if requested
   const handleLoadServerJob = () => {
@@ -517,7 +458,7 @@ export default function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [mode, authToken]);
+  }, [mode]);
 
   // Dynamic Browser Wake-Lock & Keep-Alive (Method 3)
   // When a translation is actively running, sends a tiny keep-alive pulse every 90 seconds
@@ -1205,34 +1146,7 @@ Export Timestamp: ${new Date().toLocaleString()}
         glossaryCount={glossary.length}
         theme={theme}
         onToggleTheme={toggleTheme}
-        userEmail={authStatus?.userEmail}
-        onLogout={handleLogout}
       />
-
-      {/* Full-screen Master Passcode Security Gate */}
-      {!isAuthLoading && authStatus && !authStatus.authenticated && (
-        <AuthGateModal
-          authStatus={authStatus}
-          onLoginSuccess={(token) => {
-            setAuthToken(token);
-            setAuthStatus((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    authenticated: true,
-                    passcodeVerified: true,
-                  }
-                : null
-            );
-            checkAuthStatus(token);
-            setToastData({
-              message: "🔓 Access granted. Workspace unlocked!",
-              type: "success",
-            });
-            setTimeout(() => setToastData(null), 4000);
-          }}
-        />
-      )}
 
       {/* Mobile-first Main Screen Canvas (Reference 3 Screens) */}
       <main className="flex-1 max-w-md w-full mx-auto px-4 pt-3 pb-24 relative z-10">

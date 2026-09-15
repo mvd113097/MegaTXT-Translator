@@ -1400,167 +1400,44 @@ setInterval(() => {
 }, 60 * 1000);
 
 // -------------------------------------------------------------
-// Security & Master Passcode Gate
+// Security & Access (Open workspace - no password required)
 // -------------------------------------------------------------
-const ACCESS_PASSCODE = (process.env.ACCESS_PASSCODE || "").trim();
-const AUTH_SECRET = process.env.AUTH_SECRET || crypto.randomBytes(32).toString("hex");
-
-// In-memory valid token store with expiration (30 days)
-interface SessionTokenData {
-  userEmail?: string;
-  passcodeVerified: boolean;
-  createdAt: number;
-  expiresAt: number;
-}
-
-const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
-const validSessions = new Map<string, SessionTokenData>();
-
-function saveSessions() {
-  try {
-    const data = JSON.stringify(Object.fromEntries(validSessions), null, 2);
-    fs.writeFileSync(SESSIONS_FILE, data, "utf-8");
-  } catch (err) {
-    console.error("[Auth] Failed to save sessions:", err);
-  }
-}
-
-function loadSessions() {
-  try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      const data = fs.readFileSync(SESSIONS_FILE, "utf-8");
-      const obj = JSON.parse(data);
-      const now = Date.now();
-      for (const [token, session] of Object.entries(obj)) {
-        if ((session as SessionTokenData).expiresAt > now) {
-          validSessions.set(token, session as SessionTokenData);
-        }
-      }
-      console.log(`[Auth] Loaded ${validSessions.size} active sessions from disk.`);
-    }
-  } catch (err) {
-    console.error("[Auth] Failed to load sessions:", err);
-  }
-}
-
-loadSessions();
-
-// Clean expired sessions periodically and save
-setInterval(() => {
-  const now = Date.now();
-  let changed = false;
-  for (const [token, data] of validSessions.entries()) {
-    if (data.expiresAt <= now) {
-      validSessions.delete(token);
-      changed = true;
-    }
-  }
-  if (changed) saveSessions();
-}, 60 * 60 * 1000);
-
-function createSessionToken(passcodeVerified: boolean): string {
-  const token = crypto.randomBytes(32).toString("hex");
-  const now = Date.now();
-  validSessions.set(token, {
-    passcodeVerified,
-    createdAt: now,
-    expiresAt: now + 30 * 24 * 60 * 60 * 1000, // 30 days
-  });
-  saveSessions();
-  return token;
-}
-
 function verifyAuthToken(req: express.Request): { isValid: boolean } {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return { isValid: false };
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  if (!token) return { isValid: false };
-
-  const session = validSessions.get(token);
-  if (!session) return { isValid: false };
-  if (session.expiresAt <= Date.now()) {
-    validSessions.delete(token);
-    return { isValid: false };
-  }
-
-  const passcodeRequired = !!ACCESS_PASSCODE;
-  if (passcodeRequired && !session.passcodeVerified) {
-    return { isValid: false };
-  }
-
+  // Passwords/passcodes disabled per user configuration: always valid
   return { isValid: true };
 }
 
-// Authentication status endpoint (public)
+// Authentication status endpoint (public - always fully authenticated)
 app.get("/api/auth/status", (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : "";
-  const session = token ? validSessions.get(token) : null;
-  const isSessionValid = !!(session && session.expiresAt > Date.now());
-
-  const requiresPasscode = !!ACCESS_PASSCODE;
-  const passcodeVerified = isSessionValid ? !!session?.passcodeVerified : !requiresPasscode;
-  const fullyAuthenticated = !requiresPasscode || passcodeVerified;
-
   res.json({
-    authenticated: fullyAuthenticated,
+    authenticated: true,
     requiresGoogle: false,
-    requiresPasscode,
+    requiresPasscode: false,
     googleVerified: true,
-    passcodeVerified,
-    hasPasscodeConfigured: !!ACCESS_PASSCODE,
+    passcodeVerified: true,
+    hasPasscodeConfigured: false,
   });
 });
 
-// Master Passcode Login Endpoint
+// Master Passcode Login Endpoint (Always succeeds - no password needed)
 app.post("/api/auth/login", (req, res) => {
-  try {
-    const { passcode = "" } = req.body;
-    const requiresPasscode = !!ACCESS_PASSCODE;
-
-    if (requiresPasscode) {
-      if (!passcode || passcode.trim() !== ACCESS_PASSCODE) {
-        res.status(401).json({ error: "Invalid master passcode. Access denied." });
-        return;
-      }
-    }
-
-    const newToken = createSessionToken(true);
-
-    res.json({
-      success: true,
-      authenticated: true,
-      token: newToken,
-      passcodeVerified: true,
-      requiresGoogle: false,
-      requiresPasscode,
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || "Authentication failed." });
-  }
+  res.json({
+    success: true,
+    authenticated: true,
+    token: "unrestricted_access",
+    passcodeVerified: true,
+    requiresGoogle: false,
+    requiresPasscode: false,
+  });
 });
 
 // Logout endpoint
 app.post("/api/auth/logout", (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : "";
-  if (token) {
-    validSessions.delete(token);
-    saveSessions();
-  }
   res.json({ success: true });
 });
 
-// Gatekeeper Middleware for protected Translation and Cloud Job endpoints
+// Gatekeeper Middleware for Translation and Cloud Job endpoints (Open access - never blocks)
 const requireAuthMiddleware: express.RequestHandler = (req, res, next) => {
-  const { isValid } = verifyAuthToken(req);
-  if (!isValid) {
-    res.status(401).json({
-      error: "Unauthorized: Please enter the master passcode to access the translation engine.",
-      requiresAuth: true,
-    });
-    return;
-  }
   next();
 };
 
