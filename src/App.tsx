@@ -12,6 +12,15 @@ import { TranslationQueueHub } from "./components/TranslationQueueHub";
 import { GlossaryModal } from "./components/GlossaryModal";
 import { ExportModal } from "./components/ExportModal";
 import { AuthGateModal } from "./components/AuthGateModal";
+import { TelegramSettingsModal } from "./components/TelegramSettingsModal";
+import { BottomNav } from "./components/BottomNav";
+import { HistoryModal } from "./components/HistoryModal";
+import { ActiveTranslationView } from "./components/ActiveTranslationView";
+import { TranslationCompleteView } from "./components/TranslationCompleteView";
+import {
+  PagodaHeaderIllustration,
+  SakuraFooterDecoration,
+} from "./components/illustrations/StorybookArtwork";
 import {
   TextChunk,
   TranslationStyle,
@@ -198,6 +207,7 @@ export default function App() {
   // Runner state
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
   const [concurrency, setConcurrency] = useState<number>(() => {
     try {
       const saved = localStorage.getItem("megatext_concurrency");
@@ -216,9 +226,21 @@ export default function App() {
     session?.glossary || SAMPLE_GLOSSARY
   );
 
-  // Modals
+  // Modals & Navigation
+  const [activeNavTab, setActiveNavTab] = useState<"home" | "history" | "settings">("home");
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isGlossaryOpen, setIsGlossaryOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isTelegramSettingsOpen, setIsTelegramSettingsOpen] = useState(false);
+
+  const handleBottomNavChange = (tab: "home" | "history" | "settings") => {
+    setActiveNavTab(tab);
+    if (tab === "history") {
+      setIsHistoryOpen(true);
+    } else if (tab === "settings") {
+      setIsTelegramSettingsOpen(true);
+    }
+  };
   const [toastData, setToastData] = useState<{
     message: string;
     downloadUrl?: string;
@@ -304,9 +326,7 @@ export default function App() {
           setServerCloudJob(sJob);
           const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
           setSession((prev) => {
-            const prevCompleted = prev?.chunks?.filter((c) => c.status === "completed").length || 0;
-            const serverCompleted = sJob.completedChunks || (sortedChunks.filter((c: any) => c.status === "completed").length);
-            if (!prev || prev.fileName === sJob.fileName || (serverCompleted > prevCompleted)) {
+            if (!prev || prev.fileName !== sJob.fileName) {
               return {
                 fileName: sJob.fileName,
                 fileSizeBytes: sJob.fileSizeBytes || 0,
@@ -323,7 +343,35 @@ export default function App() {
                 lastDownloadedAt: prev?.lastDownloadedAt,
               };
             }
-            return prev;
+
+            // Monotonic chapter merge: NEVER overwrite completed local chunks with uncompleted server chunks
+            const prevChunks = prev.chunks || [];
+            const merged = sortedChunks.map((sChunk: any) => {
+              const local = prevChunks.find((c) => c.id === sChunk.id || c.index === sChunk.index);
+              const localCompleted = local && local.status === "completed" && local.englishText && local.englishText.trim().length > 0;
+              const serverCompleted = sChunk.status === "completed" && sChunk.englishText && sChunk.englishText.trim().length > 0;
+
+              if (localCompleted && !serverCompleted) {
+                return { ...sChunk, ...local };
+              }
+              if (serverCompleted && !localCompleted) {
+                return { ...local, ...sChunk };
+              }
+              if (localCompleted && serverCompleted) {
+                return (sChunk.englishText?.length || 0) >= (local.englishText?.length || 0) ? { ...local, ...sChunk } : { ...sChunk, ...local };
+              }
+              return { ...local, ...sChunk };
+            }).sort((a: any, b: any) => a.index - b.index);
+
+            const allDone = merged.every((c: any) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0);
+            const finalStatus = (allDone || prev.status === "completed" || sJob.status === "completed") ? "completed" : sJob.status;
+
+            return {
+              ...prev,
+              chunks: merged,
+              status: finalStatus,
+              lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
+            };
           });
           chunksRef.current = sortedChunks;
           if (typeof sJob.concurrency === "number" && sJob.concurrency >= 1 && sJob.concurrency <= 5) {
@@ -398,24 +446,32 @@ export default function App() {
             const prevChunks = prev.chunks || [];
             const mergedChunks = sJob.chunks.map((incChunk: any) => {
               const existing = prevChunks.find((c) => c.id === incChunk.id || c.index === incChunk.index);
-              const hasEnglishLocally = existing && existing.englishText && existing.englishText.trim().length > 0;
+              const hasEnglishLocally = existing && existing.status === "completed" && existing.englishText && existing.englishText.trim().length > 0;
               if (incChunk.hasEnglish && !hasEnglishLocally) {
                 needsTextSync = true;
+              }
+              // Never downgrade an already completed local chapter
+              if (hasEnglishLocally && (!incChunk.englishText || incChunk.englishText.trim().length === 0)) {
+                return existing;
               }
               return {
                 ...existing,
                 ...incChunk,
                 chineseText: incChunk.chineseText !== undefined ? incChunk.chineseText : (existing?.chineseText || ""),
-                englishText: incChunk.englishText !== undefined ? incChunk.englishText : (existing?.englishText || ""),
+                englishText: incChunk.englishText !== undefined && incChunk.englishText.trim().length > 0 ? incChunk.englishText : (existing?.englishText || ""),
+                status: (hasEnglishLocally || incChunk.status === "completed") ? "completed" : incChunk.status,
               };
             }).sort((a: any, b: any) => a.index - b.index);
+
+            const allDone = mergedChunks.every((c: any) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0);
+            const finalStatus = (allDone || prev.status === "completed" || sJob.status === "completed") ? "completed" : sJob.status;
 
             chunksRef.current = mergedChunks;
             return {
               ...prev,
-              status: sJob.status,
+              status: finalStatus,
               chunks: mergedChunks,
-              lastUpdated: sJob.lastActiveAt,
+              lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
           });
 
@@ -504,8 +560,7 @@ export default function App() {
   // Start cloud translation on server
   const startCloudTranslation = async () => {
     if (!session) return;
-    setIsRunning(true);
-    setIsPaused(false);
+    setIsStarting(true);
 
     try {
       const res = await fetch("/api/cloud-job/start", {
@@ -528,6 +583,9 @@ export default function App() {
         throw new Error(data.error || "Failed to start cloud job on server");
       }
 
+      setIsRunning(true);
+      setIsPaused(false);
+
       setToastData({
         message: "☁️ Cloud Mode Activated: The server is translating your novel in the background. You can safely close your browser or turn off your screen anytime. Come back whenever you want to download your chapters!",
         type: "success",
@@ -540,6 +598,8 @@ export default function App() {
         type: "error",
       });
       setTimeout(() => setToastData(null), 7000);
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -1018,7 +1078,7 @@ Export Timestamp: ${new Date().toLocaleString()}
     session?.chunks
       .filter((c) => c.status === "completed")
       .reduce(
-        (acc, curr) => acc + (curr.wordCount || countEnglishWords(curr.englishText)),
+        (acc, curr) => acc + countEnglishWords(curr.englishText),
         0
       ) || 0;
 
@@ -1075,7 +1135,10 @@ Export Timestamp: ${new Date().toLocaleString()}
   };
 
   return (
-    <div className="min-h-screen w-full overflow-x-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
+    <div className="min-h-screen w-full overflow-x-hidden bg-[#FAF8FE] dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200 relative selection:bg-purple-200 selection:text-purple-900">
+      {/* Pagoda Landscape Header Backdrop (Illustrated Storybook Spec) */}
+      <PagodaHeaderIllustration />
+
       {/* Navigation header */}
       <Navbar
         hasFile={!!session}
@@ -1087,6 +1150,7 @@ Export Timestamp: ${new Date().toLocaleString()}
         totalChunks={totalChunks}
         onReset={handleReset}
         onOpenGlossary={() => setIsGlossaryOpen(true)}
+        onOpenTelegramSettings={() => setIsTelegramSettingsOpen(true)}
         glossaryCount={glossary.length}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -1119,168 +1183,98 @@ Export Timestamp: ${new Date().toLocaleString()}
         />
       )}
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      {/* Mobile-first Main Screen Canvas (Reference 3 Screens) */}
+      <main className="flex-1 max-w-md w-full mx-auto px-4 pt-3 pb-24 relative z-10">
         {!session ? (
-          /* Step 1: Upload or paste Chinese text */
+          /* Screen 1: Upload / Setup Screen (Reference Screen 1) */
           <UploadSection
             onLoadText={handleLoadText}
             serverJob={serverCloudJob}
             onLoadServerJob={handleLoadServerJob}
           />
+        ) : isCompleted ? (
+          /* Screen 3: Dedicated Translation Complete Screen (Reference Screen 3) */
+          <TranslationCompleteView
+            session={session}
+            metrics={metrics}
+            mode={mode}
+            style={style}
+            concurrency={concurrency}
+            onDownloadProgress={handleDownloadProgress}
+            onOpenExport={() => setIsExportOpen(true)}
+            onReset={handleReset}
+          />
         ) : (
-          /* Step 2: Main translation studio */
-          <div className="space-y-4">
-            {/* Dedicated High-Visibility "Completed" Banner */}
-            {isCompleted && (
-              <div
-                id="translation-completed-hero-banner"
-                className="rounded-2xl border-2 border-emerald-500/80 dark:border-emerald-600 bg-gradient-to-br from-emerald-500/10 via-teal-500/5 to-emerald-500/15 dark:from-emerald-950/60 dark:via-slate-900 dark:to-emerald-950/60 p-4 sm:p-6 shadow-xl shadow-emerald-500/10 transition animate-in fade-in duration-200 overflow-hidden"
-              >
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 sm:gap-5">
-                  <div className="flex items-start gap-3 sm:gap-4 min-w-0 flex-1">
-                    <div className="flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-md shadow-emerald-500/30 mt-0.5">
-                      <CheckCircle2 className="h-5 w-5 sm:h-7 sm:w-7" />
-                    </div>
-                    <div className="space-y-1.5 min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 text-white px-2.5 py-0.5 text-[11px] sm:text-xs font-black uppercase tracking-wider shadow-xs whitespace-nowrap">
-                          <CheckCircle2 className="h-3 w-3 sm:h-3.5 sm:w-3.5 shrink-0" />
-                          Translation Completed
-                        </span>
-                        <span className="rounded-full bg-emerald-100 dark:bg-emerald-900/60 px-2 py-0.5 text-[11px] sm:text-xs font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 whitespace-nowrap">
-                          100% Translated (0 Gaps)
-                        </span>
-                      </div>
-                      <h2 className="text-base sm:text-xl font-black text-slate-900 dark:text-white tracking-tight break-all sm:break-words leading-snug">
-                        {session.fileName} is 100% Finished!
-                      </h2>
-                      <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl break-words">
-                        All <strong className="text-slate-900 dark:text-white">{totalChunks} chapters</strong> ({completedChars.toLocaleString()} Chinese characters) were successfully translated into{" "}
-                        <strong className="text-emerald-700 dark:text-emerald-400 font-bold">~{completedEnglishWords.toLocaleString()} English words</strong>. Your novel is fully preserved and ready for offline reading in Moon+ Reader or Kindle.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Immediate 1-Click Action Buttons */}
-                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 shrink-0 pt-1 lg:pt-0 w-full lg:w-auto">
-                    <button
-                      id="completed-banner-download-epub-btn"
-                      type="button"
-                      onClick={() => handleDownloadProgress("epub")}
-                      className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 sm:px-5 py-2.5 sm:py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-emerald-600/30 hover:shadow-emerald-600/50 active:scale-95 transition cursor-pointer whitespace-nowrap"
-                      title="Download the full translated novel as an EPUB eBook"
-                    >
-                      <BookCheck className="h-4 w-4 sm:h-5 sm:w-5 shrink-0" />
-                      <span>Download EPUB</span>
-                    </button>
-
-                    <button
-                      id="completed-banner-download-txt-btn"
-                      type="button"
-                      onClick={() => handleDownloadProgress("txt")}
-                      className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-400/80 dark:border-emerald-700 bg-white dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-slate-750 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold text-emerald-800 dark:text-emerald-200 shadow-xs active:scale-95 transition cursor-pointer whitespace-nowrap"
-                      title="Download as standard UTF-8 text file"
-                    >
-                      <FileText className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                      <span>Download TXT</span>
-                    </button>
-
-                    <button
-                      id="completed-banner-export-modal-btn"
-                      type="button"
-                      onClick={() => setIsExportOpen(true)}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-3 py-2.5 sm:py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer whitespace-nowrap"
-                      title="Open full export options (bilingual, markdown, formatting)"
-                    >
-                      <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                      <span>Export</span>
-                    </button>
-
-                    <button
-                      id="completed-banner-new-book-btn"
-                      type="button"
-                      onClick={handleReset}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-300 px-3 py-2.5 sm:py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 shadow-xs active:scale-95 transition cursor-pointer"
-                      title="Translate a new novel"
-                    >
-                      <RefreshCw className="h-4 w-4 shrink-0" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Top Stats & Progress Bar */}
-            <ProgressBar
-              metrics={metrics}
-              fileName={session.fileName}
-              onQuickDownloadProgress={handleDownloadProgress}
-              isRunning={isRunning}
-              isCompleted={isCompleted}
-            />
-
-            {/* Translation Action Controls */}
-            <TranslationControls
-              mode={mode}
-              onChangeMode={handleModeChange}
-              style={style}
-              onChangeStyle={(s) => {
-                setStyle(s);
-                setSession((prev) => (prev ? { ...prev, style: s } : null));
-              }}
-              customInstructions={customInstructions}
-              onChangeCustomInstructions={(inst) => {
-                setCustomInstructions(inst);
-                setSession((prev) =>
-                  prev ? { ...prev, customInstructions: inst } : null
-                );
-              }}
-              concurrency={concurrency}
-              onChangeConcurrency={(newConc) => {
-                setConcurrency(newConc);
-                try {
-                  localStorage.setItem("megatext_concurrency", String(newConc));
-                } catch {}
-                if (mode === "cloud" && session) {
-                  fetch("/api/cloud-job/update-settings", {
-                    method: "POST",
-                    headers: getAuthHeaders(),
-                    body: JSON.stringify({ concurrency: newConc }),
-                  }).catch(() => {});
-                }
-              }}
-              isRunning={isRunning}
-              isPaused={isPaused}
-              onStart={handleStart}
-              onPause={handlePause}
-              onResume={handleResume}
-              onTranslateNext={handleTranslateNextSingle}
-              onRetryFailed={handleRetryFailed}
-              onOpenExport={() => setIsExportOpen(true)}
-              onDownloadProgress={handleDownloadProgress}
-              hasErrors={errorChunks > 0}
-              completedChunks={completedChunks}
-              totalChunks={totalChunks}
-              completedEnglishWords={completedEnglishWords}
-              lastDownloadedWords={lastDownloadedWordCount}
-              onReset={handleReset}
-            />
-
-            {/* Moon+ Reader Focused Batch Queue & Download Hub */}
-            <TranslationQueueHub
-              chunks={session.chunks}
-              fileName={session.fileName}
-              completedEnglishWords={completedEnglishWords}
-              lastDownloadedWords={lastDownloadedWordCount}
-              onDownloadProgress={handleDownloadProgress}
-              onOpenExport={() => setIsExportOpen(true)}
-              onTranslateChunk={handleTranslateSpecificChunk}
-              isRunning={isRunning}
-              mode={mode}
-            />
-          </div>
+          /* Screen 2: Active Translation Screen (Reference Screen 2) */
+          <ActiveTranslationView
+            session={session}
+            metrics={metrics}
+            mode={mode}
+            onChangeMode={handleModeChange}
+            style={style}
+            onChangeStyle={(s) => {
+              setStyle(s);
+              setSession((prev) => (prev ? { ...prev, style: s } : null));
+            }}
+            customInstructions={customInstructions}
+            onChangeCustomInstructions={(inst) => {
+              setCustomInstructions(inst);
+              setSession((prev) =>
+                prev ? { ...prev, customInstructions: inst } : null
+              );
+            }}
+            concurrency={concurrency}
+            onChangeConcurrency={(newConc) => {
+              setConcurrency(newConc);
+              try {
+                localStorage.setItem("megatext_concurrency", String(newConc));
+              } catch {}
+              if (mode === "cloud" && session) {
+                fetch("/api/cloud-job/update-settings", {
+                  method: "POST",
+                  headers: getAuthHeaders(),
+                  body: JSON.stringify({ concurrency: newConc }),
+                }).catch(() => {});
+              }
+            }}
+            isRunning={isRunning}
+            isPaused={isPaused}
+            isStarting={isStarting}
+            onStart={handleStart}
+            onPause={handlePause}
+            onResume={handleResume}
+            onTranslateNext={handleTranslateNextSingle}
+            onRetryFailed={handleRetryFailed}
+            onOpenExport={() => setIsExportOpen(true)}
+            onDownloadProgress={handleDownloadProgress}
+            onTranslateChunk={handleTranslateSpecificChunk}
+            onReset={handleReset}
+            completedEnglishWords={completedEnglishWords}
+            lastDownloadedWords={lastDownloadedWordCount}
+          />
         )}
       </main>
+
+      {/* Floating Sakura Petals Bottom Decoration */}
+      <SakuraFooterDecoration />
+
+      {/* Fixed Bottom Navigation (Reference Screen 1, 2, 3) */}
+      <BottomNav
+        activeTab={activeNavTab}
+        onChangeTab={handleBottomNavChange}
+      />
+
+      {/* History Drawer Modal */}
+      <HistoryModal
+        isOpen={isHistoryOpen}
+        onClose={() => {
+          setIsHistoryOpen(false);
+          setActiveNavTab("home");
+        }}
+        session={session}
+        onDownloadProgress={handleDownloadProgress}
+        onReset={handleReset}
+      />
 
       {/* Terminology & Glossary Modal */}
       <GlossaryModal
@@ -1306,40 +1300,49 @@ Export Timestamp: ${new Date().toLocaleString()}
         />
       )}
 
+      {/* Telegram Notifications Settings Modal */}
+      <TelegramSettingsModal
+        isOpen={isTelegramSettingsOpen}
+        onClose={() => {
+          setIsTelegramSettingsOpen(false);
+          setActiveNavTab("home");
+        }}
+      />
+
       {/* Floating Toast notification when user downloads progress or gets a status alert */}
       {toastData && (
-        <div className={`fixed bottom-6 right-6 z-50 flex max-w-md flex-col gap-2 rounded-xl border p-4 text-xs shadow-2xl backdrop-blur-xs animate-in fade-in slide-in-from-bottom-4 ${
+        <div className={`fixed bottom-5 left-4 right-4 sm:left-auto sm:right-6 z-50 flex max-w-md flex-col gap-2 rounded-2xl border p-4 text-xs shadow-2xl backdrop-blur-xs animate-in fade-in slide-in-from-bottom-4 ${
           toastData.type === "error"
-            ? "border-rose-400 bg-rose-950/95 text-rose-100"
+            ? "border-rose-300 bg-rose-900/95 text-rose-100"
             : toastData.type === "warning"
-            ? "border-amber-400 bg-amber-950/95 text-amber-100"
-            : "border-emerald-400 bg-emerald-950/95 text-emerald-100"
+            ? "border-amber-300 bg-amber-900/95 text-amber-100"
+            : "border-emerald-300 bg-emerald-900/95 text-emerald-100"
         }`}>
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-start gap-2">
               {toastData.type === "error" || toastData.type === "warning" ? (
-                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300 mt-0.5" />
               ) : (
-                <CheckCircle className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
+                <CheckCircle className="h-4 w-4 shrink-0 text-emerald-300 mt-0.5" />
               )}
-              <span className="leading-relaxed">{toastData.message}</span>
+              <span className="leading-relaxed font-medium">{toastData.message}</span>
             </div>
             <button
               onClick={() => setToastData(null)}
-              className="rounded p-0.5 text-slate-300 hover:bg-black/20 hover:text-white"
+              className="rounded-lg p-1 text-slate-300 hover:bg-black/20 hover:text-white cursor-pointer"
             >
               ✕
             </button>
           </div>
 
           {toastData.downloadUrl && (
-            <div className="mt-1 flex items-center gap-2 border-t border-white/10 pt-2">
+            <div className="mt-1 flex items-center gap-2 border-t border-white/15 pt-2">
               <a
                 href={toastData.downloadUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 download={toastData.filename}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-white/20 px-2.5 py-1 font-semibold text-white hover:bg-white/30 transition"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-white/20 px-3 py-1.5 font-bold text-white hover:bg-white/30 transition"
               >
                 <Download className="h-3.5 w-3.5" />
                 <span>Direct Download Link (New Tab)</span>

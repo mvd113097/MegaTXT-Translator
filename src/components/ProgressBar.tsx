@@ -43,111 +43,175 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
       ? Math.min(100, Math.round((metrics.completedChars / metrics.totalChars) * 100))
       : 0;
 
+  // SVG circular gauge calculations (radius 48, circumference ~301.6)
+  const radius = 48;
+  const strokeWidth = 8.5;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference - (percent / 100) * circumference;
+
   return (
-    <div className={`rounded-xl border p-3.5 sm:p-4 shadow-xs transition-colors duration-200 overflow-hidden ${
-      isFinished
-        ? "border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 shadow-emerald-500/5"
-        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
-    }`}>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0">
-        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
-          <FileText className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-          <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[170px] sm:max-w-md">
-            {fileName}
-          </span>
-          
-          {isFinished ? (
-            <span
-              id="progress-completed-badge"
-              className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800 whitespace-nowrap"
-            >
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span>{metrics.completedChunks}/{metrics.totalChunks} Chunks (100%)</span>
-            </span>
-          ) : (
-            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">
-              {metrics.completedChunks} / {metrics.totalChunks} Chunks ({percent}%)
-            </span>
-          )}
-
-          {/* Real-time English words translated indicator */}
-          {metrics.completedEnglishWords > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 text-[10px] sm:text-[11px] font-bold text-emerald-700 dark:text-emerald-300 whitespace-nowrap">
-              <BookOpen className="h-3 w-3 shrink-0" />
-              <span>{metrics.completedEnglishWords.toLocaleString()} English words</span>
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400 shrink-0">
-          {/* Speed */}
-          {!isFinished && metrics.charsPerSecond > 0 && (
-            <div className="flex items-center gap-1 whitespace-nowrap">
-              <Zap className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
-              <span>{Math.round(metrics.charsPerSecond)} chars/s</span>
+    <div className="space-y-3.5">
+      {/* Novel Header Card */}
+      <div className="rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-md shadow-purple-500/5 transition-colors">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 dark:from-indigo-950 dark:via-purple-900/60 dark:to-pink-950/60 text-purple-600 dark:text-purple-300 shadow-2xs">
+              <BookOpen className="h-5 w-5" />
             </div>
-          )}
-
-          {/* ETA */}
-          {!isFinished && metrics.estimatedRemainingSeconds > 0 && (
-            <div className="flex items-center gap-1 whitespace-nowrap">
-              <Clock className="h-3.5 w-3.5 text-indigo-500 dark:text-indigo-400 shrink-0" />
-              <span>ETA: {formatDuration(metrics.estimatedRemainingSeconds)}</span>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-extrabold text-slate-800 dark:text-slate-100 truncate" title={fileName}>
+                {fileName}
+              </h2>
+              <p className="text-xs text-purple-600 dark:text-purple-300 font-medium">
+                {metrics.completedChunks} of {metrics.totalChunks} Chunks
+                {metrics.estimatedRemainingSeconds > 0 && !isFinished
+                  ? ` · ~${formatDuration(metrics.estimatedRemainingSeconds)} remaining`
+                  : isFinished
+                  ? " · 100% Finished"
+                  : ""}
+              </p>
             </div>
-          )}
+          </div>
+
+          <div className="shrink-0">
+            {isFinished ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-3 py-1 text-xs font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                Completed
+              </span>
+            ) : isRunning ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-purple-100 dark:bg-purple-950/80 px-3 py-1 text-xs font-bold text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                <span className="h-2 w-2 rounded-full bg-purple-600 animate-ping" />
+                Translating...
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 dark:bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                Idle / Paused
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Visual Bar */}
-      <div className="mt-3 relative h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-        <div
-          className={`h-full rounded-full transition-all duration-300 ease-out ${
-            isFinished
-              ? "bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600"
-              : "bg-gradient-to-r from-indigo-500 to-indigo-600"
-          }`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
+      {/* Main Circular Progress Card */}
+      <div className={`rounded-3xl border p-5 sm:p-6 shadow-md transition-colors ${
+        isFinished
+          ? "border-emerald-200/90 dark:border-emerald-800/60 bg-gradient-to-br from-emerald-50/40 via-white to-teal-50/30 dark:from-slate-900 dark:to-emerald-950/20 shadow-emerald-500/5"
+          : "border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 shadow-purple-500/5"
+      }`}>
+        <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8">
+          {/* Circular Donut Gauge */}
+          <div className="relative flex shrink-0 items-center justify-center">
+            <svg className="h-34 w-34 sm:h-38 sm:w-38 -rotate-90 transform" viewBox="0 0 120 120">
+              {/* Background track */}
+              <circle
+                cx="60"
+                cy="60"
+                r={radius}
+                className="stroke-purple-100 dark:stroke-slate-800"
+                strokeWidth={strokeWidth}
+                fill="none"
+              />
+              {/* Gradient definition */}
+              <defs>
+                <linearGradient id="pastelProgressGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#818cf8" />
+                  <stop offset="50%" stopColor="#c084fc" />
+                  <stop offset="100%" stopColor="#f472b6" />
+                </linearGradient>
+                <linearGradient id="emeraldProgressGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#34d399" />
+                  <stop offset="100%" stopColor="#059669" />
+                </linearGradient>
+              </defs>
+              {/* Animated Progress Ring */}
+              <circle
+                cx="60"
+                cy="60"
+                r={radius}
+                stroke={isFinished ? "url(#emeraldProgressGrad)" : "url(#pastelProgressGrad)"}
+                strokeWidth={strokeWidth}
+                fill="none"
+                strokeDasharray={circumference}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                className="transition-all duration-500 ease-out"
+              />
+            </svg>
 
-      {/* Sub metrics */}
-      <div className="mt-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
-          <span>
-            Translated:{" "}
-            <strong className="text-slate-800 dark:text-slate-200 font-semibold">
-              {metrics.completedChars.toLocaleString()}
-            </strong>{" "}
-            / {metrics.totalChars.toLocaleString()} chars ({charPercent}%)
-          </span>
-          {metrics.completedEnglishWords > 0 && (
-            <span className="text-indigo-600 dark:text-indigo-400 font-medium">
-              (~{(metrics.completedEnglishWords / 1000).toFixed(1)}k English words)
-            </span>
-          )}
+            {/* Inner Percentage Display */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <span className="text-3xl sm:text-4xl font-black tracking-tight text-slate-800 dark:text-white">
+                {percent}%
+              </span>
+              <span className="text-[11px] font-bold text-purple-600 dark:text-purple-300 uppercase tracking-wider mt-0.5">
+                {isFinished ? "Completed" : "Progress"}
+              </span>
+            </div>
+          </div>
+
+          {/* Stats Stack */}
+          <div className="flex-1 w-full space-y-3">
+            <div className="flex items-center justify-between border-b border-purple-50 dark:border-slate-800 pb-2.5">
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                Chunks completed:
+              </span>
+              <span className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                <span className="text-purple-600 dark:text-purple-400">{metrics.completedChunks}</span> / {metrics.totalChunks}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between border-b border-purple-50 dark:border-slate-800 pb-2.5">
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                Chinese characters:
+              </span>
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                {metrics.completedChars.toLocaleString()} / {metrics.totalChars.toLocaleString()} ({charPercent}%)
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between border-b border-purple-50 dark:border-slate-800 pb-2.5">
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                English words ready:
+              </span>
+              <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                ~{metrics.completedEnglishWords.toLocaleString()} words
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between pt-0.5">
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                Estimated speed / ETA:
+              </span>
+              <div className="flex items-center gap-2 text-xs font-bold text-purple-700 dark:text-purple-300">
+                {metrics.charsPerSecond > 0 && !isFinished && (
+                  <span className="flex items-center gap-1">
+                    <Zap className="h-3 w-3 text-amber-500" />
+                    {Math.round(metrics.charsPerSecond)} chars/s
+                  </span>
+                )}
+                <span>
+                  {isFinished
+                    ? "Complete!"
+                    : metrics.estimatedRemainingSeconds > 0
+                    ? `~${formatDuration(metrics.estimatedRemainingSeconds)}`
+                    : "Calculating..."}
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {isFinished && (
-            <span
-              id="progress-status-completed-text"
-              className="text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1 text-[11px] sm:text-xs whitespace-nowrap"
-            >
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-              <span>Status: Completed (100%) — All Chapters Ready</span>
-            </span>
-          )}
-          {!isFinished && isRunning && (
-            <span className="text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-indigo-600 dark:bg-indigo-400 animate-pulse" />
-              Translating continuous in background...
-            </span>
-          )}
-          {metrics.errorChunks > 0 && (
-            <span className="text-rose-600 dark:text-rose-400 font-medium">
-              {metrics.errorChunks} chunk(s) error
-            </span>
-          )}
+        {/* Linear fallback bar for quick scanning */}
+        <div className="mt-4 relative h-2 w-full overflow-hidden rounded-full bg-purple-100/70 dark:bg-slate-800">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ease-out ${
+              isFinished
+                ? "bg-gradient-to-r from-emerald-400 to-teal-500"
+                : "bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500"
+            }`}
+            style={{ width: `${percent}%` }}
+          />
         </div>
       </div>
     </div>

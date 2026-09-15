@@ -51,18 +51,18 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
   return (
     <div
       id="continuity-modal-backdrop"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-purple-950/30 dark:bg-black/70 p-4 backdrop-blur-xs"
       onClick={onClose}
     >
       <div
         id="continuity-modal-card"
-        className="relative w-full max-w-xl rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl p-6 transition-all animate-in fade-in zoom-in-95 duration-150"
+        className="relative w-full max-w-xl rounded-3xl border border-purple-100 dark:border-purple-900/60 bg-white/98 dark:bg-slate-900/98 shadow-2xl shadow-purple-500/10 p-6 transition-all animate-in fade-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Close button */}
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-600 dark:hover:text-slate-200 transition cursor-pointer"
+          className="absolute right-4 top-4 rounded-xl p-1.5 text-slate-400 hover:bg-purple-50 dark:hover:bg-slate-800 hover:text-slate-600 dark:hover:text-slate-200 transition cursor-pointer"
           title="Close dialog"
         >
           <X className="h-5 w-5" />
@@ -70,11 +70,11 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
 
         {/* Header with warning icon */}
         <div className="flex items-start gap-3.5 mb-5">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400">
             <AlertTriangle className="h-6 w-6" />
           </div>
           <div>
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+            <h2 className="text-lg font-extrabold text-slate-900 dark:text-white">
               Chapter Gap Detected
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5">
@@ -84,7 +84,7 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
         </div>
 
         {/* Status card */}
-        <div className="rounded-xl border border-amber-200/80 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/20 p-3.5 mb-5 space-y-2">
+        <div className="rounded-2xl border border-amber-200/80 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/20 p-3.5 mb-5 space-y-2">
           <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-slate-700 dark:text-slate-300">
               Continuous Unbroken Read:
@@ -123,7 +123,7 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
             id="download-continuous-opt"
             onClick={() => onConfirmDownload("continuous")}
             disabled={continuousCount === 0}
-            className="w-full text-left rounded-xl border-2 border-emerald-500/80 dark:border-emerald-500/60 bg-emerald-50/50 dark:bg-emerald-950/30 p-3.5 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/50 transition cursor-pointer group"
+            className="w-full text-left rounded-2xl border-2 border-emerald-400 dark:border-emerald-600 bg-emerald-50/50 dark:bg-emerald-950/30 p-3.5 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/50 transition cursor-pointer group"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-bold text-xs sm:text-sm text-emerald-900 dark:text-emerald-200">
@@ -144,11 +144,11 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
           <button
             id="download-placeholders-opt"
             onClick={() => onConfirmDownload("with_placeholders")}
-            className="w-full text-left rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/60 p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 transition cursor-pointer group"
+            className="w-full text-left rounded-2xl border border-purple-100 dark:border-slate-800 bg-white dark:bg-slate-800/60 p-3.5 hover:bg-purple-50/50 dark:hover:bg-slate-800 transition cursor-pointer group"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-bold text-xs sm:text-sm text-slate-900 dark:text-white">
-                <Layers className="h-4 w-4 text-indigo-500 shrink-0" />
+                <Layers className="h-4 w-4 text-purple-500 shrink-0" />
                 <span>Download Chapters 1 to {highestChapterNum} with Placeholders</span>
               </div>
               <ArrowRight className="h-4 w-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
@@ -162,14 +162,14 @@ export const ContinuityModal: React.FC<ContinuityModalProps> = ({
           <button
             id="wait-for-chapters-btn"
             onClick={onClose}
-            className="w-full text-left rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/40 p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 transition cursor-pointer group"
+            className="w-full text-left rounded-2xl border border-purple-100 dark:border-slate-800 bg-white dark:bg-slate-800/40 p-3.5 hover:bg-purple-50/50 dark:hover:bg-slate-800 transition cursor-pointer group"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-semibold text-xs sm:text-sm text-slate-700 dark:text-slate-300">
                 <Clock className="h-4 w-4 text-amber-500 shrink-0" />
                 <span>Wait for Chapter {missingChapterLabels} to finish</span>
               </div>
-              <span className="text-xs text-slate-400 font-medium">Keep translating</span>
+              <span className="text-xs text-purple-600 dark:text-purple-300 font-medium">Keep translating</span>
             </div>
             <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 pl-6">
               Close this dialog and let the translator finish loading. Once they show Ready, you can download all chapters in order.

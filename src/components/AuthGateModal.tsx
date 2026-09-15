@@ -66,17 +66,17 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       id="security-gate-container"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 transition-all duration-300"
     >
-      <div className="relative w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/95 p-6 sm:p-8 text-slate-100 shadow-2xl shadow-indigo-950/60">
+      <div className="relative w-full max-w-md rounded-3xl border border-purple-900/60 bg-slate-900/98 p-6 sm:p-8 text-slate-100 shadow-2xl shadow-purple-950/60">
         {/* Header Icon & Title */}
         <div className="flex flex-col items-center text-center">
-          <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-indigo-600 to-sky-500 shadow-lg shadow-indigo-500/30 text-white">
+          <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/30 text-white">
             <Lock className="h-7 w-7" />
           </div>
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-0.5 text-xs font-semibold text-indigo-300 mb-2">
-            <Shield className="h-3.5 w-3.5 text-indigo-400" />
+          <div className="inline-flex items-center gap-1.5 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-0.5 text-xs font-semibold text-purple-300 mb-2">
+            <Shield className="h-3.5 w-3.5 text-purple-400" />
             <span>Master Key Access</span>
           </div>
-          <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
+          <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight text-white">
             MegaText Novel Engine
           </h2>
           <p className="mt-1 text-xs sm:text-sm text-slate-400">
@@ -86,7 +86,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
         {/* Status Error Alert */}
         {errorMessage && (
-          <div className="mt-5 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3.5 text-xs text-rose-300 flex items-start gap-2.5 animate-fadeIn">
+          <div className="mt-5 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3.5 text-xs text-rose-300 flex items-start gap-2.5 animate-fadeIn">
             <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
             <div className="flex-1 font-medium">{errorMessage}</div>
           </div>
@@ -109,7 +109,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 onChange={(e) => setPasscode(e.target.value)}
                 placeholder="Enter master passcode..."
                 autoFocus
-                className="w-full rounded-xl border border-slate-700 bg-slate-800/90 pl-10 pr-10 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/40"
+                className="w-full rounded-2xl border border-slate-700 bg-slate-800/90 pl-10 pr-10 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-purple-400 focus:outline-hidden focus:ring-2 focus:ring-purple-500/40"
               />
               <button
                 type="button"
@@ -130,7 +130,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             id="unlock-app-btn"
             type="submit"
             disabled={isLoading}
-            className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-700 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-900/40 transition hover:from-indigo-500 hover:to-indigo-600 disabled:opacity-50 cursor-pointer active:scale-[0.99]"
+            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-purple-900/40 transition hover:from-purple-600 hover:to-indigo-700 disabled:opacity-50 cursor-pointer active:scale-[0.99]"
           >
             {isLoading ? (
               <span className="inline-block animate-spin text-sm">⏳</span>

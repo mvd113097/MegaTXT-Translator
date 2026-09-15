@@ -8,7 +8,15 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
-import { sendTelegramNotification } from "./server/telegram";
+import { sendTelegramNotification as rawSendTelegramNotification } from "./server/telegram";
+import {
+  initFirestore,
+  saveJobToFirestore,
+  saveChunkToFirestore,
+  saveChunksBatchToFirestore,
+  loadAllJobsFromFirestore,
+  mergeMonotonicJob,
+} from "./server/firestoreStorage";
 
 dotenv.config();
 
@@ -595,6 +603,10 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
       if (sessionId === "legacy_default" || cloudJobs.size === 1) {
         fs.writeFileSync(CLOUD_JOB_FILE, JSON.stringify(job, null, 2), "utf-8");
       }
+      // Asynchronously mirror authoritative state and completed chunks to Firestore
+      saveJobToFirestore(job).catch((err) => {
+        console.warn(`[Storage] Firestore job sync note for ${job.id}:`, err.message);
+      });
     } else {
       if (fs.existsSync(jobFilePath)) {
         fs.unlinkSync(jobFilePath);
@@ -611,21 +623,37 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
 function setJobForSession(sessionId: string, job: CloudJob | null) {
   if (job) {
     job.sessionId = sessionId;
-    cloudJobs.set(sessionId, job);
-    saveJobToDisk(sessionId, job);
+    const existing = cloudJobs.get(sessionId);
+    const finalJob = existing && existing.fileName === job.fileName ? mergeMonotonicJob(existing, job) : job;
+    cloudJobs.set(sessionId, finalJob);
+    saveJobToDisk(sessionId, finalJob);
+    // Persist full chunk snapshot to cloud storage
+    saveChunksBatchToFirestore(finalJob.id, finalJob.chunks).catch((err) => {
+      console.warn(`[Storage] Firestore initial chunks batch sync note for ${finalJob.id}:`, err.message);
+    });
   } else {
     cloudJobs.delete(sessionId);
     saveJobToDisk(sessionId, null);
   }
 }
 
-// Load saved cloud jobs from disk on startup
-function loadCloudJobsFromDisk() {
+// Load saved cloud jobs on startup with priority given to persistent Firestore storage
+async function loadCloudJobsFromDisk() {
   try {
     if (!fs.existsSync(JOBS_DIR)) {
       fs.mkdirSync(JOBS_DIR, { recursive: true });
     }
 
+    // 1. Attempt to load authoritative state from cloud Firestore database
+    let firestoreJobs = new Map<string, CloudJob>();
+    try {
+      firestoreJobs = await loadAllJobsFromFirestore();
+    } catch (fsErr: any) {
+      console.warn("[Startup] Notice loading from cloud Firestore:", fsErr.message);
+    }
+
+    // 2. Read local disk files as local candidates
+    const diskJobs = new Map<string, CloudJob>();
     const jobFiles = fs.readdirSync(JOBS_DIR).filter((f) => f.startsWith("job_") && f.endsWith(".json"));
     for (const file of jobFiles) {
       try {
@@ -650,37 +678,72 @@ function loadCloudJobsFromDisk() {
             }
           }
         }
-        cloudJobs.set(sId, job);
-        console.log(`Loaded session job [${sId}]: "${job.fileName}" (${job.chunks.length} chunks)`);
+        diskJobs.set(sId, job);
       } catch (fileErr) {
         console.warn(`Could not load job file ${file}:`, fileErr);
       }
     }
 
     // Also check legacy single cloud_job.json
-    if (fs.existsSync(CLOUD_JOB_FILE) && !cloudJobs.has("legacy_default")) {
+    if (fs.existsSync(CLOUD_JOB_FILE) && !diskJobs.has("legacy_default")) {
       try {
         const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
         const legacyJob: CloudJob = JSON.parse(data);
         if (legacyJob && Array.isArray(legacyJob.chunks)) {
           legacyJob.sessionId = "legacy_default";
-          cloudJobs.set("legacy_default", legacyJob);
-          saveJobToDisk("legacy_default", legacyJob);
-          console.log(`Imported legacy cloud job: "${legacyJob.fileName}" (${legacyJob.chunks.length} chunks)`);
+          diskJobs.set("legacy_default", legacyJob);
         }
       } catch (legacyErr) {
         console.warn("Could not load legacy cloud job:", legacyErr);
       }
     }
 
-    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+    // 3. Monotonic reconciliation: merge persistent cloud state with local disk
+    const allSessionKeys = new Set([...firestoreJobs.keys(), ...diskJobs.keys()]);
+    for (const sId of allSessionKeys) {
+      const fsJob = firestoreJobs.get(sId);
+      const dJob = diskJobs.get(sId);
+
+      let merged: CloudJob;
+      if (fsJob && dJob) {
+        // Persistent cloud state takes precedence, merged monotonically with local disk
+        merged = mergeMonotonicJob(fsJob, dJob);
+      } else if (fsJob) {
+        merged = fsJob;
+      } else {
+        merged = dJob!;
+      }
+
+      // Check completed status: if all chunks have completed englishText, permanently lock as "completed"
+      const completedCount = merged.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      if (completedCount === merged.chunks.length && merged.chunks.length > 0) {
+        merged.status = "completed";
+      }
+
+      cloudJobs.set(sId, merged);
+      saveJobToDisk(sId, merged);
+      console.log(`[Startup] Authoritative job registered [${sId}]: "${merged.fileName}" (${completedCount}/${merged.chunks.length} completed, status: ${merged.status})`);
+    }
+
+    // 4. Auto-resume ONLY truly running, uncompleted jobs
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
+      if (j.status !== "running") return false;
+      const allDone = j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+      if (allDone) {
+        j.status = "completed";
+        saveJobToDisk(j.sessionId || "legacy_default", j);
+        return false;
+      }
+      return true;
+    });
+
     if (runningJobs.length > 0) {
       const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
       sendTelegramNotification(`⚡ <b>[Server Woken Up]</b>\nThe website is awake and has successfully resumed translating your book(s):\n${jobNames}`);
       startCloudWorkerLoop();
     }
   } catch (err) {
-    console.error("Failed to load cloud jobs from disk:", err);
+    console.error("Failed to load cloud jobs on startup:", err);
   }
 }
 
@@ -1138,55 +1201,124 @@ Translation Guidelines:
   }
 }
 
+// -------------------------------------------------------------
+// Telegram Settings Storage & Local Wrapper
+// -------------------------------------------------------------
+const TELEGRAM_SETTINGS_FILE = path.join(DATA_DIR, "telegram_settings.json");
+
+interface TelegramSettings {
+  botToken: string;
+  chatIds: string;
+  enabled: boolean;
+  statusIntervalMin: number;
+  statusEnabled: boolean;
+}
+
+let telegramSettings: TelegramSettings = {
+  botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+  chatIds: process.env.TELEGRAM_CHAT_IDS || "",
+  enabled: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_IDS),
+  statusIntervalMin: Number(process.env.TELEGRAM_STATUS_INTERVAL_MIN) || 5,
+  statusEnabled: true,
+};
+
+function loadTelegramSettings() {
+  try {
+    if (fs.existsSync(TELEGRAM_SETTINGS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TELEGRAM_SETTINGS_FILE, "utf-8"));
+      telegramSettings = {
+        botToken: typeof data.botToken === "string" ? data.botToken : (process.env.TELEGRAM_BOT_TOKEN || ""),
+        chatIds: typeof data.chatIds === "string" ? data.chatIds : (process.env.TELEGRAM_CHAT_IDS || ""),
+        enabled: typeof data.enabled === "boolean" ? data.enabled : !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_IDS),
+        statusIntervalMin: typeof data.statusIntervalMin === "number" ? data.statusIntervalMin : (Number(process.env.TELEGRAM_STATUS_INTERVAL_MIN) || 5),
+        statusEnabled: typeof data.statusEnabled === "boolean" ? data.statusEnabled : true,
+      };
+    }
+  } catch (err) {
+    console.error("Failed to load Telegram settings:", err);
+  }
+}
+
+function saveTelegramSettings() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(TELEGRAM_SETTINGS_FILE, JSON.stringify(telegramSettings, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to save Telegram settings:", err);
+  }
+}
+
+// Initial load of telegram settings
+loadTelegramSettings();
+
+// Safe send wrapper matching previous signature
+async function sendTelegramNotification(message: string): Promise<void> {
+  if (!telegramSettings.enabled) return;
+  await rawSendTelegramNotification(message, telegramSettings.botToken, telegramSettings.chatIds);
+}
+
 // Load any pending jobs on boot
 loadCloudJobsFromDisk();
 
-// Periodic Telegram status updates for running translation jobs
-const TELEGRAM_STATUS_INTERVAL_MIN = Number(process.env.TELEGRAM_STATUS_INTERVAL_MIN) || 5;
+// Light-weight ticker running every 60 seconds to support dynamic setting updates
+const lastStatusUpdateTimes = new Map<string, number>();
+
 setInterval(() => {
   try {
+    if (!telegramSettings.enabled || !telegramSettings.statusEnabled) return;
+
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
     if (runningJobs.length === 0) return;
 
+    const now = Date.now();
     for (const job of runningJobs) {
-      const totalChunks = job.chunks.length;
-      if (totalChunks === 0) continue;
+      const lastUpdate = lastStatusUpdateTimes.get(job.id) || job.startedAt;
+      const intervalMs = (telegramSettings.statusIntervalMin || 5) * 60 * 1000;
 
-      const completedChunks = job.chunks.filter((c) => c.status === "completed").length;
-      const processingChunks = job.chunks.filter((c) => c.status === "processing").length;
-      const errorChunks = job.chunks.filter((c) => c.status === "error").length;
-      const pendingChunks = job.chunks.filter((c) => c.status === "pending").length;
+      if (now - lastUpdate >= intervalMs) {
+        lastStatusUpdateTimes.set(job.id, now);
 
-      const percent = Math.round((completedChunks / totalChunks) * 100);
+        const totalChunks = job.chunks.length;
+        if (totalChunks === 0) continue;
 
-      // Estimate word count of completed english translation
-      let wordCount = 0;
-      for (const c of job.chunks) {
-        if (c.status === "completed" && c.englishText) {
-          wordCount += c.englishText.split(/\s+/).filter(Boolean).length;
+        const completedChunks = job.chunks.filter((c) => c.status === "completed").length;
+        const processingChunks = job.chunks.filter((c) => c.status === "processing").length;
+        const errorChunks = job.chunks.filter((c) => c.status === "error").length;
+        const pendingChunks = job.chunks.filter((c) => c.status === "pending").length;
+
+        const percent = Math.round((completedChunks / totalChunks) * 100);
+
+        // Estimate word count of completed english translation
+        let wordCount = 0;
+        for (const c of job.chunks) {
+          if (c.status === "completed" && c.englishText) {
+            wordCount += c.englishText.split(/\s+/).filter(Boolean).length;
+          }
         }
+
+        const elapsedMinutes = Math.round((now - job.startedAt) / 60000);
+
+        const message = `📈 <b>[Translation Progress Update]</b>\n\n` +
+          `📖 Novel: <b>${job.fileName}</b>\n` +
+          `🔄 Status: <b>${job.status.toUpperCase()}</b>\n` +
+          `⏱️ Active for: <b>${elapsedMinutes} minutes</b>\n\n` +
+          `✅ Progress: <b>${completedChunks} / ${totalChunks}</b> chunks (<b>${percent}%</b>)\n` +
+          `📝 Translated: <b>${wordCount.toLocaleString()}</b> English words\n\n` +
+          `⏳ Detail:\n` +
+          `• Completed: <b>${completedChunks}</b>\n` +
+          `• Processing: <b>${processingChunks}</b>\n` +
+          `• Error: <b>${errorChunks}</b>\n` +
+          `• Pending: <b>${pendingChunks}</b>`;
+
+        sendTelegramNotification(message);
       }
-
-      const elapsedMinutes = Math.round((Date.now() - job.startedAt) / 60000);
-
-      const message = `📈 <b>[Translation Progress Update]</b>\n\n` +
-        `📖 Novel: <b>${job.fileName}</b>\n` +
-        `🔄 Status: <b>${job.status.toUpperCase()}</b>\n` +
-        `⏱️ Active for: <b>${elapsedMinutes} minutes</b>\n\n` +
-        `✅ Progress: <b>${completedChunks} / ${totalChunks}</b> chunks (<b>${percent}%</b>)\n` +
-        `📝 Translated: <b>${wordCount.toLocaleString()}</b> English words\n\n` +
-        `⏳ Detail:\n` +
-        `• Completed: <b>${completedChunks}</b>\n` +
-        `• Processing: <b>${processingChunks}</b>\n` +
-        `• Error: <b>${errorChunks}</b>\n` +
-        `• Pending: <b>${pendingChunks}</b>`;
-
-      sendTelegramNotification(message);
     }
   } catch (err) {
-    console.error("[Telegram Status Interval] Error sending status update:", err);
+    console.error("[Telegram Status Ticker] Error:", err);
   }
-}, TELEGRAM_STATUS_INTERVAL_MIN * 60 * 1000);
+}, 60 * 1000);
 
 // -------------------------------------------------------------
 // Security & Master Passcode Gate
@@ -1381,6 +1513,29 @@ app.get("/api/projects/status", (req, res) => {
     summary: quotaScheduler.getActiveProjectSummary(),
     projects: quotaScheduler.getSanitizedStatus(),
   });
+});
+
+// Telegram Settings management endpoints
+app.get("/api/telegram-settings", (req, res) => {
+  res.json(telegramSettings);
+});
+
+app.post("/api/telegram-settings", express.json(), (req, res) => {
+  try {
+    const { botToken, chatIds, enabled, statusIntervalMin, statusEnabled } = req.body;
+    
+    if (typeof botToken === "string") telegramSettings.botToken = botToken.trim();
+    if (typeof chatIds === "string") telegramSettings.chatIds = chatIds.trim();
+    if (typeof enabled === "boolean") telegramSettings.enabled = enabled;
+    if (typeof statusIntervalMin === "number") telegramSettings.statusIntervalMin = statusIntervalMin;
+    if (typeof statusEnabled === "boolean") telegramSettings.statusEnabled = statusEnabled;
+    
+    saveTelegramSettings();
+    res.json({ success: true, settings: telegramSettings });
+  } catch (err) {
+    console.error("Failed to save Telegram settings:", err);
+    res.status(500).json({ success: false, error: String(err) });
+  }
 });
 
 // -------------------------------------------------------------

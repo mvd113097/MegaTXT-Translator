@@ -6,9 +6,13 @@ dotenv.config();
  * Sends a notification message to all configured Telegram chat IDs.
  * Resolves once all notifications have been dispatched to ensure logs & process exits complete reliably.
  */
-export async function sendTelegramNotification(message: string): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatIdsStr = process.env.TELEGRAM_CHAT_IDS;
+export async function sendTelegramNotification(
+  message: string,
+  customToken?: string,
+  customChatIds?: string
+): Promise<void> {
+  const token = customToken !== undefined ? customToken : process.env.TELEGRAM_BOT_TOKEN;
+  const chatIdsStr = customChatIds !== undefined ? customChatIds : process.env.TELEGRAM_CHAT_IDS;
 
   if (!token || !chatIdsStr) {
     // If not configured, silently skip

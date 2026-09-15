@@ -150,11 +150,11 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
       )}
 
       {/* Chapter Progress & Queue Monitor (Compact Table / List) */}
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs transition-colors duration-200 overflow-hidden">
+      <div className="rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 shadow-md shadow-purple-500/5 transition-colors overflow-hidden">
         {/* Table Header / Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 p-3 sm:px-4 bg-slate-50/60 dark:bg-slate-850/60">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-purple-100/70 dark:border-purple-900/40 p-4 sm:px-5 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
+            <h3 className="text-xs font-extrabold text-slate-800 dark:text-slate-100 uppercase tracking-wider">
               Translation Queue ({totalChunks} Chapters{totalChunks > 0 && completedChunks.length === totalChunks ? " — 100% Completed" : ""})
             </h3>
 
@@ -162,41 +162,41 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
             <div className="flex items-center gap-1 text-[11px]">
               <button
                 onClick={() => setStatusFilter("all")}
-                className={`rounded-md px-2 py-0.5 font-medium transition cursor-pointer ${
+                className={`rounded-full px-2.5 py-0.5 font-bold transition cursor-pointer ${
                   statusFilter === "all"
-                    ? "bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-white font-semibold"
-                    : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                    ? "bg-purple-600 text-white shadow-2xs"
+                    : "text-slate-500 hover:text-purple-700 dark:hover:text-purple-300"
                 }`}
               >
                 All ({totalChunks})
               </button>
               <button
                 onClick={() => setStatusFilter("completed")}
-                className={`rounded-md px-2 py-0.5 font-medium transition cursor-pointer ${
+                className={`rounded-full px-2.5 py-0.5 font-bold transition cursor-pointer ${
                   statusFilter === "completed"
-                    ? "bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 font-semibold"
-                    : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                    ? "bg-emerald-600 text-white shadow-2xs"
+                    : "text-slate-500 hover:text-emerald-700 dark:hover:text-emerald-300"
                 }`}
               >
-                Completed ({completedChunks.length})
+                Done ({completedChunks.length})
               </button>
               {processingChunks.length > 0 && (
                 <button
                   onClick={() => setStatusFilter("processing")}
-                  className={`rounded-md px-2 py-0.5 font-medium transition cursor-pointer ${
+                  className={`rounded-full px-2.5 py-0.5 font-bold transition cursor-pointer ${
                     statusFilter === "processing"
-                      ? "bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200 font-semibold"
-                      : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                      ? "bg-indigo-600 text-white shadow-2xs"
+                      : "text-slate-500 hover:text-indigo-700 dark:hover:text-indigo-300"
                   }`}
                 >
-                  Translating ({processingChunks.length})
+                  Active ({processingChunks.length})
                 </button>
               )}
               <button
                 onClick={() => setStatusFilter("pending")}
-                className={`rounded-md px-2 py-0.5 font-medium transition cursor-pointer ${
+                className={`rounded-full px-2.5 py-0.5 font-bold transition cursor-pointer ${
                   statusFilter === "pending"
-                    ? "bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-white font-semibold"
+                    ? "bg-slate-300 dark:bg-slate-700 text-slate-900 dark:text-white"
                     : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
                 }`}
               >
@@ -207,19 +207,19 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
 
           {/* Search bar */}
           <div className="relative w-full sm:w-56">
-            <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
+            <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-purple-400 dark:text-slate-500" />
             <input
               type="text"
               placeholder="Filter chapters..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 py-1.5 pl-8 pr-3 text-xs text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+              className="w-full rounded-2xl border border-purple-100 dark:border-purple-900/60 bg-white dark:bg-slate-800 py-1.5 pl-9 pr-3 text-xs text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:border-purple-400 focus:outline-none"
             />
           </div>
         </div>
 
         {/* Chapters Queue Table */}
-        <div className="max-h-[60vh] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80">
+        <div className="max-h-[60vh] overflow-y-auto divide-y divide-purple-50 dark:divide-slate-800/80">
           {filteredChunks.length === 0 ? (
             <div className="p-8 text-center text-xs text-slate-400 dark:text-slate-500">
               No chapters match the selected filter.
@@ -232,19 +232,19 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                 <div
                   key={chunk.id}
                   id={`queue-item-${chunk.index}`}
-                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 p-3 sm:px-4 text-xs transition ${
+                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 p-3.5 sm:px-5 text-xs transition ${
                     chunk.status === "processing"
-                      ? "bg-indigo-50/50 dark:bg-indigo-950/30 font-medium"
-                      : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40"
+                      ? "bg-purple-50/60 dark:bg-purple-950/30 font-medium"
+                      : "hover:bg-purple-50/30 dark:hover:bg-slate-800/40"
                   }`}
                 >
                   {/* Chapter Identifier & Title */}
                   <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-                    <span className="flex h-6 w-10 sm:w-12 shrink-0 items-center justify-center rounded-md bg-slate-100 dark:bg-slate-800 text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                    <span className="flex h-7 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-50 to-purple-100 dark:from-indigo-950 dark:to-purple-900/60 text-[11px] font-extrabold text-purple-700 dark:text-purple-300">
                       #{chunk.index + 1}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div className="font-semibold text-slate-900 dark:text-slate-100 truncate max-w-[200px] sm:max-w-md" title={chunk.chapterTitle || `Section ${chunk.index + 1}`}>
+                      <div className="font-bold text-slate-900 dark:text-slate-100 truncate max-w-[200px] sm:max-w-md" title={chunk.chapterTitle || `Section ${chunk.index + 1}`}>
                         {chunk.chapterTitle || `Section ${chunk.index + 1}`}
                       </div>
                       <div className="text-[11px] text-slate-400 dark:text-slate-500">
@@ -254,10 +254,10 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                   </div>
 
                   {/* Status, Words Count, and Actions */}
-                  <div className="flex items-center justify-between sm:justify-end gap-2.5 sm:gap-3 shrink-0 pt-1 sm:pt-0 border-t border-slate-100/60 dark:border-slate-800/40 sm:border-t-0">
+                  <div className="flex items-center justify-between sm:justify-end gap-2.5 sm:gap-3 shrink-0 pt-1 sm:pt-0 border-t border-purple-50/80 dark:border-slate-800/40 sm:border-t-0">
                     {/* English words count */}
                     {words > 0 ? (
-                      <span className="font-mono text-[11px] sm:text-xs font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                      <span className="font-mono text-[11px] sm:text-xs font-semibold text-purple-700 dark:text-purple-300 whitespace-nowrap">
                         {words.toLocaleString()} words
                       </span>
                     ) : (
@@ -269,25 +269,25 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                     <div className="flex items-center gap-2">
                       {/* Status Badge */}
                       {chunk.status === "completed" && words > 0 && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 whitespace-nowrap">
-                          <CheckCircle2 className="h-3 w-3 shrink-0" />
-                          <span>Completed</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap">
+                          <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-600" />
+                          <span>Ready</span>
                         </span>
                       )}
 
                       {chunk.status === "completed" && words === 0 && (
                         <span
-                          className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300 whitespace-nowrap"
+                          className="inline-flex items-center gap-1 rounded-full bg-amber-100 dark:bg-amber-950/80 px-2.5 py-0.5 text-[11px] font-bold text-amber-800 dark:text-amber-300 whitespace-nowrap"
                           title="Empty translation response detected. Click the reload icon to re-translate."
                         >
-                          <AlertCircle className="h-3 w-3 shrink-0" />
+                          <AlertCircle className="h-3 w-3 shrink-0 text-amber-600" />
                           <span>Empty (Retry)</span>
                         </span>
                       )}
 
                       {chunk.status === "processing" && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 dark:bg-indigo-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 animate-pulse whitespace-nowrap">
-                          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 dark:bg-purple-950/80 px-2.5 py-0.5 text-[11px] font-bold text-purple-700 dark:text-purple-300 animate-pulse whitespace-nowrap">
+                          <Loader2 className="h-3 w-3 animate-spin shrink-0 text-purple-600" />
                           <span>Translating...</span>
                         </span>
                       )}
@@ -305,7 +305,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                             const msg = chunk.errorMessage || "Temporary rate limit or empty response from model. Auto-retry is active.";
                             alert(`Chapter #${chunk.index + 1} Error Details:\n\n${msg}\n\nClick the circular reload button or the top Orange button to re-run immediately.`);
                           }}
-                          className="inline-flex items-center gap-1 rounded-full bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700 dark:text-rose-300 cursor-pointer transition whitespace-nowrap"
+                          className="inline-flex items-center gap-1 rounded-full bg-rose-100 dark:bg-rose-950/80 hover:bg-rose-200 dark:hover:bg-rose-900/80 px-2.5 py-0.5 text-[11px] font-bold text-rose-700 dark:text-rose-300 cursor-pointer transition whitespace-nowrap"
                           title="Click to view exact error details"
                         >
                           <AlertCircle className="h-3 w-3 shrink-0" />
@@ -317,7 +317,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                       <button
                         onClick={() => onTranslateChunk(chunk.id)}
                         disabled={chunk.status === "processing"}
-                        className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-40 cursor-pointer transition shrink-0"
+                        className="rounded-xl p-1.5 text-purple-400 hover:bg-purple-100/70 dark:hover:bg-slate-800 hover:text-purple-700 dark:hover:text-purple-300 disabled:opacity-40 cursor-pointer transition shrink-0"
                         title={chunk.status === "completed" ? "Re-translate this chapter" : "Translate this chapter now"}
                       >
                         <RotateCw className="h-3.5 w-3.5" />

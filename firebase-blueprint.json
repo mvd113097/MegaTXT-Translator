@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "TranslationJob": {
+      "title": "TranslationJob",
+      "description": "Authoritative metadata for a novel translation job",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileSizeBytes": { "type": "number" },
+        "totalChineseChars": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "completedChunks": { "type": "number" },
+        "style": { "type": "string" },
+        "customInstructions": { "type": "string" },
+        "concurrency": { "type": "number" },
+        "status": { "type": "string", "enum": ["running", "paused", "completed"] },
+        "startedAt": { "type": "number" },
+        "lastActiveAt": { "type": "number" }
+      },
+      "required": ["id", "sessionId", "fileName", "status", "totalChunks"]
+    },
+    "TranslationChunk": {
+      "title": "TranslationChunk",
+      "description": "Authoritative translated chunk content and state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "jobId": { "type": "string" },
+        "index": { "type": "number" },
+        "chapterTitle": { "type": "string" },
+        "chineseText": { "type": "string" },
+        "englishText": { "type": "string" },
+        "charCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "processing", "completed", "error"] },
+        "attempts": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "index", "status"]
+    }
+  },
+  "firestore": {
+    "/translation_jobs/{jobId}": {
+      "schema": "TranslationJob",
+      "description": "Collection of translation jobs"
+    },
+    "/translation_jobs/{jobId}/chunks/{chunkId}": {
+      "schema": "TranslationChunk",
+      "description": "Chunks subcollection for a translation job"
+    }
+  }
+}
