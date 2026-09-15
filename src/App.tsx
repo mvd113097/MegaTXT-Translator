@@ -498,6 +498,36 @@ export default function App() {
     return () => clearInterval(interval);
   }, [mode, authToken]);
 
+  // Dynamic Browser Wake-Lock & Keep-Alive (Method 3)
+  // When a translation is actively running, sends a tiny keep-alive pulse every 90 seconds
+  // Automatically stops immediately when translation completes or is paused so the server can sleep.
+  useEffect(() => {
+    if (!isRunning || isPaused) return;
+
+    // Optional browser screen wake-lock (keeps phone screen / device active if supported)
+    let wakeLockSentinel: any = null;
+    if ("wakeLock" in navigator && (navigator as any).wakeLock?.request) {
+      (navigator as any).wakeLock.request("screen").then((sentinel: any) => {
+        wakeLockSentinel = sentinel;
+      }).catch(() => {
+        // Wake-lock denied or unsupported; HTTP heartbeat handles container keep-alive
+      });
+    }
+
+    const keepAliveInterval = setInterval(() => {
+      fetch("/api/heartbeat").catch(() => {
+        // Silent catch for background heartbeat
+      });
+    }, 90000); // 90 seconds (well before Cloud Run's 10-15 minute idle timeout)
+
+    return () => {
+      clearInterval(keepAliveInterval);
+      if (wakeLockSentinel && wakeLockSentinel.release) {
+        wakeLockSentinel.release().catch(() => {});
+      }
+    };
+  }, [isRunning, isPaused]);
+
   // Handle file or text load
   const handleLoadText = (
     text: string,

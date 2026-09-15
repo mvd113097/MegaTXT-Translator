@@ -1505,6 +1505,31 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// Smart Dynamic Keep-Alive & Heartbeat Endpoint (Method 3)
+// - When a translation is actively running: Confirms active work and keeps Cloud Run awake.
+// - When completed, paused, or idle: Signals that sleep is safe, letting the container scale to 0.
+app.all("/api/heartbeat", (req, res) => {
+  const allJobs = Array.from(cloudJobs.values());
+  const runningJobs = allJobs.filter((j) => {
+    if (j.status !== "running") return false;
+    const allDone = j.chunks.length > 0 && j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+    return !allDone;
+  });
+
+  const isAnyJobRunning = runningJobs.length > 0;
+  const activeCount = runningJobs.length;
+
+  res.json({
+    status: "ok",
+    shouldKeepAlive: isAnyJobRunning,
+    activeRunningJobs: activeCount,
+    message: isAnyJobRunning
+      ? `Active translation in progress (${activeCount} running job${activeCount > 1 ? "s" : ""}). Keeping server awake.`
+      : "No active translations running. Server is safe to sleep.",
+    timestamp: Date.now(),
+  });
+});
+
 // Dedicated project availability & quota monitoring endpoint
 app.get("/api/projects/status", (req, res) => {
   res.json({
