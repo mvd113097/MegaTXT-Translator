@@ -2154,8 +2154,21 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    // Cache static immutable assets (JS, CSS, images, fonts) for 1 year to save cellular data on return visits
+    app.use(
+      express.static(distPath, {
+        maxAge: "1y",
+        immutable: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith("index.html")) {
+            // HTML file is checked fresh so updates are immediate, but lightweight
+            res.setHeader("Cache-Control", "no-cache");
+          }
+        },
+      })
+    );
     app.get("*", (req, res) => {
+      res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
