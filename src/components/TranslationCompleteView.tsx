@@ -148,7 +148,7 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
             id="complete-screen-preview-btn"
             type="button"
             onClick={onOpenExport}
-            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-750 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
+            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
           >
             <ExternalLink className="h-3.5 w-3.5" />
             <span>Preview & Export</span>
@@ -158,7 +158,7 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
             id="complete-screen-download-txt-btn"
             type="button"
             onClick={() => onDownloadProgress("txt")}
-            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-750 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
+            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
           >
             <FileText className="h-3.5 w-3.5" />
             <span>Plain TXT</span>

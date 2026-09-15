@@ -137,7 +137,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-purple-950/30 dark:bg-black/70 p-4 backdrop-blur-xs">
       <div className="flex max-h-[90vh] w-full max-w-3xl flex-col rounded-3xl border border-purple-100 dark:border-purple-900/60 bg-white/98 dark:bg-slate-900/98 shadow-2xl shadow-purple-500/10 transition-colors duration-200 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
+        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-900">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-300">
               <BookOpen className="h-5 w-5" />
@@ -173,7 +173,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             </button>
             <button
               onClick={handleLoadSamplePreset}
-              className="inline-flex items-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 transition hover:bg-purple-50 dark:hover:bg-slate-750 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 transition hover:bg-purple-50 dark:hover:bg-slate-700 cursor-pointer"
             >
               Load Novel Preset
             </button>
@@ -283,7 +283,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end border-t border-purple-100/60 dark:border-purple-900/40 px-6 py-3 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
+        <div className="flex justify-end border-t border-purple-100/60 dark:border-purple-900/40 px-6 py-3 bg-[#FAF8FE]/80 dark:bg-slate-900">
           <button
             onClick={onClose}
             className="rounded-2xl bg-gradient-to-r from-purple-500 to-indigo-500 hover:from-purple-600 hover:to-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-md shadow-purple-500/20 active:scale-95 transition cursor-pointer"

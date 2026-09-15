@@ -640,6 +640,16 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
   }
 }
 
+function reconcileAuthoritativeJob(fsJob: CloudJob, dJob?: CloudJob): CloudJob {
+  if (!dJob) return fsJob;
+  // Firestore is authoritative for job status, mode, and progress.
+  // Local disk cache cannot promote status or override authoritative Firestore state.
+  return {
+    ...fsJob,
+    chunks: fsJob.chunks && fsJob.chunks.length > 0 ? fsJob.chunks : dJob.chunks || [],
+  };
+}
+
 // Load saved cloud jobs on startup with priority given to persistent Firestore storage
 async function loadCloudJobsFromDisk() {
   try {

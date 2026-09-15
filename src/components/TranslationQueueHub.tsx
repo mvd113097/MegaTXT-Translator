@@ -138,7 +138,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
               <button
                 id="gap-resolve-options-btn"
                 onClick={() => onDownloadProgress("epub", "auto")}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-800 px-3.5 py-2.5 text-xs font-semibold text-amber-900 dark:text-amber-200 hover:bg-amber-50 dark:hover:bg-slate-750 transition cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-800 px-3.5 py-2.5 text-xs font-semibold text-amber-900 dark:text-amber-200 hover:bg-amber-50 dark:hover:bg-slate-700 transition cursor-pointer"
                 title="View all gap options"
               >
                 <span>Options</span>
@@ -152,7 +152,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
       {/* Chapter Progress & Queue Monitor (Compact Table / List) */}
       <div className="rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 shadow-md shadow-purple-500/5 transition-colors overflow-hidden">
         {/* Table Header / Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-purple-100/70 dark:border-purple-900/40 p-4 sm:px-5 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-purple-100/70 dark:border-purple-900/40 p-4 sm:px-5 bg-[#FAF8FE]/80 dark:bg-slate-900/90">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-xs font-extrabold text-slate-800 dark:text-slate-100 uppercase tracking-wider">
               Translation Queue ({totalChunks} Chapters{totalChunks > 0 && completedChunks.length === totalChunks ? " — 100% Completed" : ""})

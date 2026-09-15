@@ -191,7 +191,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-purple-950/30 dark:bg-black/70 p-4 backdrop-blur-xs">
       <div className="flex w-full max-w-xl max-h-[90vh] flex-col rounded-3xl border border-purple-100 dark:border-purple-900/60 bg-white/98 dark:bg-slate-900/98 shadow-2xl shadow-purple-500/10 transition-colors duration-200 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
+        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-900">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-300">
               <Download className="h-5 w-5" />

@@ -60,7 +60,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
         {/* Content */}
         {session ? (
           <div className="space-y-3">
-            <div className="rounded-2xl border border-purple-100 dark:border-purple-900/50 bg-purple-50/30 dark:bg-slate-850 p-4 space-y-3">
+            <div className="rounded-2xl border border-purple-100 dark:border-purple-900/50 bg-purple-50/30 dark:bg-slate-800/80 p-4 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <BookOpen className="h-4 w-4 text-purple-600 shrink-0" />

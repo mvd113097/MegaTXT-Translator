@@ -146,7 +146,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-purple-950/30 dark:bg-black/70 p-4 backdrop-blur-xs">
       <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-3xl border border-purple-100 dark:border-purple-900/60 bg-white/98 dark:bg-slate-900/98 shadow-2xl shadow-purple-500/10 transition-colors duration-200 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-850/80">
+        <div className="flex items-center justify-between border-b border-purple-100/70 dark:border-purple-900/40 px-6 py-4 bg-[#FAF8FE]/80 dark:bg-slate-900">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-300">
               <Bell className="h-5 w-5" />
@@ -178,7 +178,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         ) : (
           <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-5">
             {/* Global toggle */}
-            <div className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 p-4 transition">
+            <div className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/60 p-4 transition">
               <div className="space-y-0.5">
                 <label className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-slate-100">
                   Enable Telegram Notifications
@@ -216,7 +216,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       value={settings.botToken}
                       onChange={(e) => setSettings({ ...settings, botToken: e.target.value })}
                       placeholder="e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 py-2 pl-3 pr-10 text-xs text-slate-850 dark:text-slate-100 focus:border-indigo-500 focus:outline-none transition"
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-2 pl-3 pr-10 text-xs text-slate-900 dark:text-slate-100 focus:border-indigo-500 focus:outline-none transition"
                       required={settings.enabled}
                     />
                     <button
@@ -242,13 +242,13 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                     value={settings.chatIds}
                     onChange={(e) => setSettings({ ...settings, chatIds: e.target.value })}
                     placeholder="e.g. 987654321, -10012345678"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 px-3 py-2 text-xs text-slate-850 dark:text-slate-100 focus:border-indigo-500 focus:outline-none transition"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:border-indigo-500 focus:outline-none transition"
                     required={settings.enabled}
                   />
                 </div>
 
                 {/* Periodic Progress Updates Toggle */}
-                <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/20 p-4 space-y-3.5">
+                <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/20 dark:bg-slate-800/30 p-4 space-y-3.5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Clock className="h-4 w-4 text-indigo-500" />
@@ -284,7 +284,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       <select
                         value={settings.statusIntervalMin}
                         onChange={(e) => setSettings({ ...settings, statusIntervalMin: Number(e.target.value) })}
-                        className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 px-3 py-1 text-xs text-slate-750 dark:text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                        className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1 text-xs text-slate-800 dark:text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
                       >
                         <option value={1}>Every 1 minute (For testing)</option>
                         <option value={5}>Every 5 minutes (Recommended)</option>

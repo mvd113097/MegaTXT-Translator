@@ -222,7 +222,7 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
         <button
           id="open-export-modal-btn"
           onClick={onOpenExport}
-          className="inline-flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-750 px-3.5 py-2.5 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer shadow-2xs"
+          className="inline-flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 px-3.5 py-2.5 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer shadow-2xs"
           title="Open export modal (Bilingual, Markdown, TXT)"
         >
           <BookOpen className="h-4 w-4" />
@@ -269,7 +269,7 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
       </div>
 
       {/* Mode & Style Selection Accordion/Section */}
-      <div className="rounded-2xl border border-purple-100/70 dark:border-purple-900/40 bg-[#FAF8FE]/50 dark:bg-slate-850/50 p-3 space-y-3">
+      <div className="rounded-2xl border border-purple-100/70 dark:border-purple-900/40 bg-[#FAF8FE]/50 dark:bg-slate-800/50 p-3 space-y-3">
         {/* Mode Switch Pills */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <span className="text-xs font-bold text-purple-700 dark:text-purple-300">

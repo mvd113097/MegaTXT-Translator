@@ -242,7 +242,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                     ? "border-purple-400 bg-purple-100/40 dark:bg-purple-950/40"
                     : fileContent
                     ? "border-emerald-300 dark:border-emerald-700 bg-emerald-50/40 dark:bg-emerald-950/20 hover:border-emerald-400"
-                    : "border-purple-200 dark:border-purple-900/60 hover:border-purple-400 dark:hover:border-purple-600 bg-[#FCFAFF] dark:bg-slate-850/50 hover:bg-purple-50/50"
+                    : "border-purple-200 dark:border-purple-900/60 hover:border-purple-400 dark:hover:border-purple-600 bg-[#FCFAFF] dark:bg-slate-900/80 hover:bg-purple-50/50"
                 }`}
               >
                 <input
