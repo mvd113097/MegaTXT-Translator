@@ -31,7 +31,8 @@ service cloud.firestore {
 
     // Authoritative translation jobs
     match /translation_jobs/{jobId} {
-      allow read: if isValidId(jobId);
+      allow get: if isValidId(jobId);
+      allow list: if true;
       allow create: if isValidId(jobId) && isValidJob(request.resource.data);
       allow update: if isValidId(jobId) && isValidJob(request.resource.data)
         // Terminal state lock: Completed jobs cannot be reverted to non-completed status
@@ -41,7 +42,8 @@ service cloud.firestore {
 
       // Chunks subcollection
       match /chunks/{chunkId} {
-        allow read: if isValidId(jobId);
+        allow get: if isValidId(jobId) && isValidId(chunkId);
+        allow list: if isValidId(jobId);
         allow create, update: if isValidId(jobId) && isValidId(chunkId) && isValidChunk(request.resource.data);
         allow delete: if false;
       }
