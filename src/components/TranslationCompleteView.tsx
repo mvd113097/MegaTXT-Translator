@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   CheckCircle2,
   BookOpen,
@@ -12,6 +12,7 @@ import {
   BookCheck,
   RefreshCw,
   ExternalLink,
+  Loader2,
 } from "lucide-react";
 import { TranslationSession, TranslationMetrics, TranslationStyle, TranslationMode } from "../types";
 import { StoryVignetteIllustration } from "./illustrations/StorybookArtwork";
@@ -22,7 +23,7 @@ interface TranslationCompleteViewProps {
   mode: TranslationMode;
   style: TranslationStyle;
   concurrency: number;
-  onDownloadProgress: (format?: "epub" | "txt") => void;
+  onDownloadProgress: (format?: "epub" | "txt") => void | Promise<void>;
   onOpenExport: () => void;
   onReset: () => void;
 }
@@ -49,6 +50,18 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
   onOpenExport,
   onReset,
 }) => {
+  const [downloadingFormat, setDownloadingFormat] = useState<"epub" | "txt" | null>(null);
+
+  const handleDownload = async (format: "epub" | "txt") => {
+    if (downloadingFormat) return;
+    setDownloadingFormat(format);
+    try {
+      await onDownloadProgress(format);
+    } finally {
+      setDownloadingFormat(null);
+    }
+  };
+
   const totalChunks = session.chunks.length;
   const completedWords = metrics.completedEnglishWords;
   const totalChars = metrics.completedChars || session.totalChineseChars || 0;
@@ -132,11 +145,21 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
         <button
           id="complete-screen-download-epub-btn"
           type="button"
-          onClick={() => onDownloadProgress("epub")}
-          className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer"
+          disabled={downloadingFormat !== null}
+          onClick={() => handleDownload("epub")}
+          className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer disabled:opacity-75 disabled:cursor-wait"
         >
-          <Download className="h-4.5 w-4.5" />
-          <span>Download EPUB</span>
+          {downloadingFormat === "epub" ? (
+            <>
+              <Loader2 className="h-4.5 w-4.5 animate-spin" />
+              <span>Packaging EPUB eBook...</span>
+            </>
+          ) : (
+            <>
+              <Download className="h-4.5 w-4.5" />
+              <span>Download EPUB</span>
+            </>
+          )}
         </button>
         <p className="text-center text-[11px] text-purple-600 dark:text-purple-300 font-medium">
           Your translated novel is ready!
@@ -157,11 +180,21 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
           <button
             id="complete-screen-download-txt-btn"
             type="button"
-            onClick={() => onDownloadProgress("txt")}
-            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
+            disabled={downloadingFormat !== null}
+            onClick={() => handleDownload("txt")}
+            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
           >
-            <FileText className="h-3.5 w-3.5" />
-            <span>Plain TXT</span>
+            {downloadingFormat === "txt" ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>Exporting...</span>
+              </>
+            ) : (
+              <>
+                <FileText className="h-3.5 w-3.5" />
+                <span>Plain TXT</span>
+              </>
+            )}
           </button>
         </div>
       </div>
