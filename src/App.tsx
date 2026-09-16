@@ -219,8 +219,20 @@ export default function App() {
   }, [session]);
 
   // On-demand sync of full translated chapter texts for completed chunks
-  const syncCompletedTexts = async () => {
+  const syncCompletedTexts = async (force: boolean = false) => {
     if (mode !== "cloud") return;
+
+    // Data-saving optimization: If not forced, check if all completed chunks already have English text in memory
+    if (!force && chunksRef.current.length > 0) {
+      const missingCompletedText = chunksRef.current.some(
+        (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
+      );
+      if (!missingCompletedText) {
+        // All completed chunks are already populated in memory — 0 KB network data used!
+        return;
+      }
+    }
+
     try {
       const res = await fetch("/api/cloud-job/sync-texts?completedOnly=true", {
         headers: getAuthHeaders(),
