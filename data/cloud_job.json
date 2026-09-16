@@ -1,9 +1,9 @@
 {
-  "id": "cloud_job_1789528962051",
-  "sessionId": "sess_1vdc4o5c8k_mtzxpvap",
-  "fileName": "yiren bei rebellion.txt",
-  "fileSizeBytes": 4957999,
-  "totalChineseChars": 1369308,
+  "id": "test_ping",
+  "sessionId": "legacy_default",
+  "fileName": "f_split_000003_175029_split_000002_192653_split_000002_193518.txt",
+  "fileSizeBytes": 151180,
+  "totalChineseChars": 40783,
   "chunks": [
     {
       "id": "chunk-1789493738013-0-iz6y1",
@@ -9502,50 +9502,50 @@
   "customInstructions": "",
   "glossary": [
     {
-      "translation": "Xiao Yan",
-      "notes": "Protagonist of the novel",
-      "category": "Character",
       "original": "萧炎",
-      "id": "g-1"
+      "id": "g-1",
+      "translation": "Xiao Yan",
+      "category": "Character",
+      "notes": "Protagonist of the novel"
     },
     {
-      "notes": "The fantasy realm",
-      "translation": "Dou Qi Continent",
       "category": "Location",
-      "original": "斗气大陆",
-      "id": "g-2"
+      "id": "g-2",
+      "translation": "Dou Qi Continent",
+      "notes": "The fantasy realm",
+      "original": "斗气大陆"
     },
     {
+      "notes": "Foundational cultivation stage",
+      "original": "斗之力",
       "translation": "Dou Disciple / Dou Power",
       "id": "g-3",
-      "category": "Realm/Rank",
-      "notes": "Foundational cultivation stage",
-      "original": "斗之力"
+      "category": "Realm/Rank"
     },
     {
-      "translation": "Wu Tan City",
-      "notes": "Starting hometown",
       "category": "Location",
+      "notes": "Starting hometown",
       "id": "g-4",
+      "translation": "Wu Tan City",
       "original": "乌坦城"
     },
     {
-      "translation": "Yao Lao",
-      "original": "药老",
-      "notes": "Ancient master dwelling in the ring",
       "category": "Character",
+      "notes": "Ancient master dwelling in the ring",
+      "original": "药老",
+      "translation": "Yao Lao",
       "id": "g-5"
     },
     {
-      "category": "Concept",
-      "translation": "Flame Mantra (Fen Jue)",
+      "original": "焚诀",
       "notes": "Supreme growth cultivation technique",
+      "translation": "Flame Mantra (Fen Jue)",
       "id": "g-6",
-      "original": "焚诀"
+      "category": "Concept"
     }
   ],
   "concurrency": 5,
-  "status": "running",
-  "startedAt": 1789528962051,
-  "lastActiveAt": 1789530099896
+  "status": "completed",
+  "startedAt": 1789303817856,
+  "lastActiveAt": 1789530681700
 }

@@ -714,53 +714,48 @@ async function loadCloudJobsFromDisk() {
       }
     }
 
-    // 3. Monotonic reconciliation: Firestore is strictly authoritative
-    // If cloud storage recovery failed or is unavailable, enter safe pause mode
+    // 3. Monotonic reconciliation: Use Firestore when available, otherwise fallback seamlessly to disk cache
     if (!firestoreLoadedSuccessfully) {
-      console.error(
-        "[Startup] SAFE STATE: Authoritative Firestore persistence is unavailable. Halting auto-resume to protect data integrity."
+      console.warn(
+        "[Startup] Notice: Firestore was temporarily unavailable or exceeded read quota. Using disk job cache seamlessly."
       );
       for (const [sId, dJob] of diskJobs.entries()) {
-        dJob.status = "paused";
         cloudJobs.set(sId, dJob);
       }
-      return;
+    } else {
+      const allSessionKeys = new Set([...firestoreJobs.keys(), ...diskJobs.keys()]);
+      for (const sId of allSessionKeys) {
+        const fsJob = firestoreJobs.get(sId);
+        const dJob = diskJobs.get(sId);
+
+        let reconciled: CloudJob;
+        if (fsJob) {
+          reconciled = reconcileAuthoritativeJob(fsJob, dJob);
+        } else {
+          reconciled = dJob!;
+          saveJobToFirestore(reconciled).catch((err) => {
+            console.warn(`[Startup] Initial Firestore sync for new disk job ${reconciled.id}:`, err.message);
+          });
+          saveChunksBatchToFirestore(reconciled.id, reconciled.chunks).catch((err) => {
+            console.warn(`[Startup] Initial Firestore chunks sync for new disk job ${reconciled.id}:`, err.message);
+          });
+        }
+
+        const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+        if (completedCount === reconciled.chunks.length && reconciled.chunks.length > 0) {
+          reconciled.status = "completed";
+        }
+
+        cloudJobs.set(sId, reconciled);
+        saveJobToDisk(sId, reconciled);
+        console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${completedCount}/${reconciled.chunks.length} completed, status: ${reconciled.status})`);
+      }
     }
 
-    const allSessionKeys = new Set([...firestoreJobs.keys(), ...diskJobs.keys()]);
-    for (const sId of allSessionKeys) {
-      const fsJob = firestoreJobs.get(sId);
-      const dJob = diskJobs.get(sId);
-
-      let reconciled: CloudJob;
-      if (fsJob) {
-        // Firestore is strictly authoritative. Local disk is read-only cache.
-        reconciled = reconcileAuthoritativeJob(fsJob, dJob);
-      } else {
-        reconciled = dJob!;
-        // Sync new local disk job to cloud Firestore
-        saveJobToFirestore(reconciled).catch((err) => {
-          console.warn(`[Startup] Initial Firestore sync for new disk job ${reconciled.id}:`, err.message);
-        });
-        saveChunksBatchToFirestore(reconciled.id, reconciled.chunks).catch((err) => {
-          console.warn(`[Startup] Initial Firestore chunks sync for new disk job ${reconciled.id}:`, err.message);
-        });
-      }
-
-      // Check completed status: if all chunks have completed englishText, permanently lock as "completed"
-      const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-      if (completedCount === reconciled.chunks.length && reconciled.chunks.length > 0) {
-        reconciled.status = "completed";
-      }
-
-      cloudJobs.set(sId, reconciled);
-      saveJobToDisk(sId, reconciled);
-      console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${completedCount}/${reconciled.chunks.length} completed, status: ${reconciled.status})`);
-    }
-
-    // 4. Auto-resume ONLY truly running, uncompleted jobs
+    // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
       if (j.status !== "running") return false;
+      if (isSyntheticOrTestJob(j)) return false;
       const allDone = j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
       if (allDone) {
         j.status = "completed";
@@ -770,8 +765,17 @@ async function loadCloudJobsFromDisk() {
       return true;
     });
 
-    if (runningJobs.length > 0) {
-      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+    // Deduplicate by novel fileName
+    const uniqueRunningNovels = new Map<string, CloudJob>();
+    for (const j of runningJobs) {
+      if (!uniqueRunningNovels.has(j.fileName)) {
+        uniqueRunningNovels.set(j.fileName, j);
+      }
+    }
+
+    const distinctNovels = Array.from(uniqueRunningNovels.values());
+    if (distinctNovels.length > 0) {
+      const jobNames = distinctNovels.map((j) => `• <b>${j.fileName}</b>`).join("\n");
       sendTelegramNotification(`⚡ <b>[Server Woken Up]</b>\nThe website is awake and has successfully resumed translating your book(s):\n${jobNames}`);
       startCloudWorkerLoop();
     }
@@ -846,7 +850,9 @@ async function startCloudWorkerLoop() {
             job.status = "completed";
             job.lastActiveAt = Date.now();
             saveJobToDisk(job.sessionId || "legacy_default", job);
-            sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${job.fileName}</b> is fully translated and ready for download!`);
+            if (!isSyntheticOrTestJob(job)) {
+              sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${job.fileName}</b> is fully translated and ready for download!`);
+            }
           }
         }
       }
@@ -1338,34 +1344,76 @@ async function sendTelegramNotification(message: string): Promise<void> {
   await rawSendTelegramNotification(message, telegramSettings.botToken, telegramSettings.chatIds);
 }
 
+// Helper to identify test, synthetic, or mock jobs
+function isSyntheticOrTestJob(job: { fileName?: string; id?: string; chunks?: any[] }): boolean {
+  if (!job.fileName) return true;
+  const name = job.fileName.toLowerCase();
+  if (name.includes("test") || name.includes("synthetic") || name.includes("authoritative_test")) return true;
+  if (job.id && (job.id.startsWith("synthetic_") || job.id.startsWith("test_"))) return true;
+  if (job.chunks && job.chunks.length <= 10 && (name.includes("novel") || name === "test.txt")) return true;
+  return false;
+}
+
 // Load any pending jobs on boot
 loadCloudJobsFromDisk();
 
-// Light-weight ticker running every 60 seconds to support dynamic setting updates
+// Light-weight ticker running every 60 seconds with strict deduplication & anti-spam
 const lastStatusUpdateTimes = new Map<string, number>();
+const lastNotifiedCompletedCounts = new Map<string, number>();
 
 setInterval(() => {
   try {
     if (!telegramSettings.enabled || !telegramSettings.statusEnabled) return;
 
-    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
-    if (runningJobs.length === 0) return;
+    // 1. Group running jobs by novel fileName so we only process ONE canonical instance per novel
+    const novelJobMap = new Map<string, CloudJob>();
+    for (const job of cloudJobs.values()) {
+      if (job.status !== "running") continue;
+      if (isSyntheticOrTestJob(job)) continue;
+      if (!job.chunks || job.chunks.length === 0) continue;
+
+      const existing = novelJobMap.get(job.fileName);
+      if (!existing) {
+        novelJobMap.set(job.fileName, job);
+      } else {
+        const existingDone = existing.chunks.filter((c) => c.status === "completed" && !!c.englishText).length;
+        const currentDone = job.chunks.filter((c) => c.status === "completed" && !!c.englishText).length;
+        if (currentDone > existingDone) {
+          novelJobMap.set(job.fileName, job);
+        }
+      }
+    }
+
+    const uniqueRunningJobs = Array.from(novelJobMap.values());
+    if (uniqueRunningJobs.length === 0) return;
 
     const now = Date.now();
-    for (const job of runningJobs) {
-      const lastUpdate = lastStatusUpdateTimes.get(job.id) || job.startedAt;
-      const intervalMs = (telegramSettings.statusIntervalMin || 5) * 60 * 1000;
+    for (const job of uniqueRunningJobs) {
+      const totalChunks = job.chunks.length;
+      if (totalChunks === 0) continue;
 
-      if (now - lastUpdate >= intervalMs) {
-        lastStatusUpdateTimes.set(job.id, now);
+      const completedChunks = job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const processingChunks = job.chunks.filter((c) => c.status === "processing").length;
+      const errorChunks = job.chunks.filter((c) => c.status === "error").length;
+      const pendingChunks = job.chunks.filter((c) => c.status === "pending").length;
 
-        const totalChunks = job.chunks.length;
-        if (totalChunks === 0) continue;
+      const novelKey = job.fileName;
+      const prevNotifiedCount = lastNotifiedCompletedCounts.get(novelKey) ?? -1;
+      const lastUpdate = lastStatusUpdateTimes.get(novelKey) || job.startedAt;
+      const intervalMs = Math.max(1, telegramSettings.statusIntervalMin || 5) * 60 * 1000;
 
-        const completedChunks = job.chunks.filter((c) => c.status === "completed").length;
-        const processingChunks = job.chunks.filter((c) => c.status === "processing").length;
-        const errorChunks = job.chunks.filter((c) => c.status === "error").length;
-        const pendingChunks = job.chunks.filter((c) => c.status === "pending").length;
+      const isInitial = prevNotifiedCount === -1;
+      const hasNewProgress = completedChunks > prevNotifiedCount;
+      const timeElapsed = (now - lastUpdate) >= intervalMs;
+
+      // Only send notification if:
+      // 1) It's initial notification on first detection, OR
+      // 2) Interval elapsed AND (new chunks completed since last notification OR translation actively processing), OR
+      // 3) Novel just hit 100% completion
+      // Suppress if 0 new chunks done AND 0 actively processing (prevents repeating spam on idle or paused state)
+      if ((timeElapsed && (hasNewProgress || processingChunks > 0)) || isInitial || completedChunks === totalChunks) {
+        lastStatusUpdateTimes.set(novelKey, now);
+        lastNotifiedCompletedCounts.set(novelKey, completedChunks);
 
         const percent = Math.round((completedChunks / totalChunks) * 100);
 
@@ -1377,7 +1425,7 @@ setInterval(() => {
           }
         }
 
-        const elapsedMinutes = Math.round((now - job.startedAt) / 60000);
+        const elapsedMinutes = Math.max(1, Math.round((now - job.startedAt) / 60000));
 
         const message = `📈 <b>[Translation Progress Update]</b>\n\n` +
           `📖 Novel: <b>${job.fileName}</b>\n` +
@@ -1540,7 +1588,9 @@ app.get("/api/cloud-job/status", (req, res) => {
   if (completedChunks === targetJob.chunks.length && targetJob.status !== "completed") {
     targetJob.status = "completed";
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
-    sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${targetJob.fileName}</b> is fully translated and ready for download!`);
+    if (!isSyntheticOrTestJob(targetJob)) {
+      sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${targetJob.fileName}</b> is fully translated and ready for download!`);
+    }
   }
 
   // Calculate contiguous completion frontier from index 0
@@ -2190,9 +2240,14 @@ async function startServer() {
 process.on("SIGTERM", async () => {
   console.log("[Process] SIGTERM received. Handling graceful shutdown...");
   try {
-    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
-    if (runningJobs.length > 0) {
-      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running" && !isSyntheticOrTestJob(j));
+    const uniqueRunningNovels = new Map<string, CloudJob>();
+    for (const j of runningJobs) {
+      if (!uniqueRunningNovels.has(j.fileName)) uniqueRunningNovels.set(j.fileName, j);
+    }
+    const distinctNovels = Array.from(uniqueRunningNovels.values());
+    if (distinctNovels.length > 0) {
+      const jobNames = distinctNovels.map((j) => `• <b>${j.fileName}</b>`).join("\n");
       await sendTelegramNotification(
         `⚠️ <b>[Server Sleeping / Paused]</b>\nThe website is going to sleep or shutting down. The translation of your book(s) has been paused:\n${jobNames}\n\nPlease open the website to wake it up and resume translation!`
       );
@@ -2207,9 +2262,14 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", async () => {
   console.log("[Process] SIGINT received. Handling graceful shutdown...");
   try {
-    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
-    if (runningJobs.length > 0) {
-      const jobNames = runningJobs.map((j) => `• <b>${j.fileName}</b>`).join("\n");
+    const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running" && !isSyntheticOrTestJob(j));
+    const uniqueRunningNovels = new Map<string, CloudJob>();
+    for (const j of runningJobs) {
+      if (!uniqueRunningNovels.has(j.fileName)) uniqueRunningNovels.set(j.fileName, j);
+    }
+    const distinctNovels = Array.from(uniqueRunningNovels.values());
+    if (distinctNovels.length > 0) {
+      const jobNames = distinctNovels.map((j) => `• <b>${j.fileName}</b>`).join("\n");
       await sendTelegramNotification(
         `⚠️ <b>[Server Sleeping / Paused]</b>\nThe website is going to sleep or shutting down. The translation of your book(s) has been paused:\n${jobNames}\n\nPlease open the website to wake it up and resume translation!`
       );
