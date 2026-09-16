@@ -45,15 +45,52 @@ export interface CloudJob {
 
 let dbInstance: Firestore | null = null;
 let isFirestoreAvailable = false;
-let lastFirestoreCheckTime = 0;
+let isFirestoreQuotaExhausted = false;
+let quotaExhaustedUntil = 0;
+
+function handleFirestoreError(context: string, err: any): void {
+  const errMsg = err?.message || String(err);
+  const errCode = err?.code;
+  if (
+    errCode === "resource-exhausted" ||
+    errCode === 8 ||
+    errCode === "permission-denied" ||
+    errCode === 7 ||
+    /RESOURCE_EXHAUSTED|quota|permission_denied/i.test(errMsg)
+  ) {
+    if (!isFirestoreQuotaExhausted) {
+      console.warn(
+        `[FirestoreStorage] Circuit breaker activated (${context}): Cloud Firestore quota reached or writes throttled. Switching seamlessly to local disk cache persistence for 1 hour.`
+      );
+    }
+    isFirestoreQuotaExhausted = true;
+    quotaExhaustedUntil = Date.now() + 60 * 60 * 1000; // 1 hour backoff
+    isFirestoreAvailable = false;
+  } else {
+    console.warn(`[FirestoreStorage] Warning (${context}):`, errMsg);
+  }
+}
+
+export function isCloudStorageAvailable(): boolean {
+  if (isFirestoreQuotaExhausted) {
+    if (Date.now() > quotaExhaustedUntil) {
+      isFirestoreQuotaExhausted = false;
+    } else {
+      return false;
+    }
+  }
+  return isFirestoreAvailable && !!dbInstance;
+}
 
 export function initFirestore(): Firestore | null {
+  if (isFirestoreQuotaExhausted && Date.now() < quotaExhaustedUntil) {
+    return null;
+  }
   if (dbInstance) return dbInstance;
 
   try {
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
     if (!fs.existsSync(configPath)) {
-      console.warn("[FirestoreStorage] No firebase-applet-config.json found, skipping cloud DB init.");
       return null;
     }
 
@@ -66,17 +103,17 @@ export function initFirestore(): Firestore | null {
     console.log(`[FirestoreStorage] Initialized Firestore client for project ${config.projectId} (${config.firestoreDatabaseId})`);
     return db;
   } catch (err: any) {
-    console.error("[FirestoreStorage] Failed to initialize Firestore client:", err.message);
-    isFirestoreAvailable = false;
+    handleFirestoreError("initFirestore", err);
     return null;
   }
 }
 
 export function isCloudStorageConnected(): boolean {
-  return isFirestoreAvailable && !!dbInstance;
+  return isCloudStorageAvailable();
 }
 
 export async function testFirestoreHealth(): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
   const db = initFirestore();
   if (!db) return false;
   try {
@@ -85,49 +122,66 @@ export async function testFirestoreHealth(): Promise<boolean> {
     isFirestoreAvailable = true;
     return true;
   } catch (err: any) {
-    console.error("[FirestoreStorage] Health check failed:", err.message);
-    isFirestoreAvailable = false;
+    handleFirestoreError("testFirestoreHealth", err);
     return false;
   }
 }
 
 /**
- * Authoritative Firestore Reconciliation:
- * Firestore is the sole authoritative source of truth for job progress and completed translations.
- * Local disk (/data/jobs) is treated strictly as an unauthoritative read/cache layer.
+ * Monotonic Job & Chunk Reconciliation:
+ * Takes the union / maximum progress across Firestore and Local Disk cache.
  * 
  * Rules:
- * 1. For an existing job in Firestore, Firestore state is 100% authoritative.
- * 2. Local disk CANNOT promote any chunk or progress above what Firestore has durably recorded.
- * 3. If Firestore = 165/283 and Local disk = 283/283, the recovered job MUST be exactly 165/283.
- * 4. If Firestore = 165/283 and Local disk = 150/283, the recovered job MUST be exactly 165/283.
- * 5. For completed chunks, the actual English text MUST come directly from Firestore.
- * 6. Local disk only supplies non-contradictory auxiliary info (like source chineseText if missing in Firestore).
+ * 1. Progress is strictly monotonic: A chunk marked 'completed' on either Firestore or local disk MUST NEVER be demoted back to pending.
+ * 2. If a chunk is completed on disk (e.g. while cloud quota was exceeded), its English text is retained and protected.
+ * 3. In-flight 'processing' chunks are safely reset to 'pending' on restart so they are cleanly translated without stalling.
  */
 export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | null): CloudJob {
   if (!diskJob) return fsJob;
   if (!fsJob) return diskJob;
 
-  const fsChunks = fsJob.chunks || [];
-  const diskChunks = diskJob.chunks || [];
-  const diskChunkMap = new Map(diskChunks.map((c) => [c.index, c]));
+  const baseJob = fsJob.chunks && fsJob.chunks.length > 0 ? fsJob : diskJob;
+  const otherJob = baseJob === fsJob ? diskJob : fsJob;
 
-  const reconciledChunks: ServerTextChunk[] = fsChunks.map((fsChunk) => {
-    const dChunk = diskChunkMap.get(fsChunk.index);
-    const isFsCompleted = fsChunk.status === "completed" && !!fsChunk.englishText?.trim();
+  const otherChunkMap = new Map((otherJob.chunks || []).map((c) => [c.index, c]));
+
+  const reconciledChunks: ServerTextChunk[] = (baseJob.chunks || []).map((bChunk) => {
+    const oChunk = otherChunkMap.get(bChunk.index);
+    const bCompleted = bChunk.status === "completed" && !!bChunk.englishText?.trim();
+    const oCompleted = oChunk?.status === "completed" && !!oChunk?.englishText?.trim();
+
+    let finalStatus: "pending" | "processing" | "completed" | "error" = "pending";
+    let finalEnglish = "";
+
+    if (bCompleted && oCompleted) {
+      finalStatus = "completed";
+      finalEnglish = (bChunk.englishText!.length >= (oChunk?.englishText?.length || 0))
+        ? bChunk.englishText!
+        : oChunk!.englishText!;
+    } else if (bCompleted) {
+      finalStatus = "completed";
+      finalEnglish = bChunk.englishText!;
+    } else if (oCompleted) {
+      finalStatus = "completed";
+      finalEnglish = oChunk!.englishText!;
+    } else if (bChunk.status === "processing" || oChunk?.status === "processing") {
+      finalStatus = "pending";
+    } else if (bChunk.status === "error" || oChunk?.status === "error") {
+      finalStatus = "error";
+    } else {
+      finalStatus = "pending";
+    }
 
     return {
-      ...fsChunk,
-      // Status & English text are STRICTLY authoritative from Firestore
-      status: isFsCompleted ? "completed" : (fsChunk.status === "processing" ? "pending" : (fsChunk.status || "pending")),
-      englishText: isFsCompleted ? fsChunk.englishText : "",
-      // Non-contradictory auxiliary fields fallback to disk cache only if missing in Firestore
-      chineseText: fsChunk.chineseText || (dChunk ? dChunk.chineseText : ""),
-      chapterTitle: fsChunk.chapterTitle || (dChunk ? dChunk.chapterTitle : ""),
-      charCount: fsChunk.charCount || (dChunk ? dChunk.charCount : 0),
-      attempts: fsChunk.attempts || (dChunk ? dChunk.attempts : 0),
-      edited: isFsCompleted ? !!fsChunk.edited : false,
-      errorMessage: isFsCompleted ? undefined : fsChunk.errorMessage,
+      ...bChunk,
+      status: finalStatus,
+      englishText: finalStatus === "completed" ? finalEnglish : "",
+      chineseText: bChunk.chineseText || (oChunk ? oChunk.chineseText : ""),
+      chapterTitle: bChunk.chapterTitle || (oChunk ? oChunk.chapterTitle : ""),
+      charCount: bChunk.charCount || (oChunk ? oChunk.charCount : 0),
+      attempts: Math.max(bChunk.attempts || 0, oChunk?.attempts || 0),
+      edited: finalStatus === "completed" ? !!(bChunk.edited || oChunk?.edited) : false,
+      errorMessage: finalStatus === "completed" ? undefined : (bChunk.errorMessage || oChunk?.errorMessage),
     };
   });
 
@@ -135,21 +189,21 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
   const totalCount = reconciledChunks.length;
   const isAllDone = completedCount === totalCount && totalCount > 0;
 
-  let finalStatus: CloudJob["status"] = fsJob.status;
-  if (isAllDone || fsJob.status === "completed") {
+  let finalStatus: CloudJob["status"] = "running";
+  if (isAllDone) {
     finalStatus = "completed";
-  } else if (fsJob.status === "running") {
-    finalStatus = "running";
-  } else {
+  } else if (fsJob.status === "paused" && diskJob.status === "paused") {
     finalStatus = "paused";
+  } else {
+    finalStatus = "running";
   }
 
   return {
-    ...fsJob,
+    ...baseJob,
     sessionId: fsJob.sessionId || diskJob.sessionId || "legacy_default",
     fileName: fsJob.fileName || diskJob.fileName,
-    fileSizeBytes: fsJob.fileSizeBytes || diskJob.fileSizeBytes || 0,
-    totalChineseChars: fsJob.totalChineseChars || diskJob.totalChineseChars || 0,
+    fileSizeBytes: Math.max(fsJob.fileSizeBytes || 0, diskJob.fileSizeBytes || 0),
+    totalChineseChars: Math.max(fsJob.totalChineseChars || 0, diskJob.totalChineseChars || 0),
     chunks: reconciledChunks,
     style: fsJob.style || diskJob.style || "xianxia",
     customInstructions: fsJob.customInstructions !== undefined ? fsJob.customInstructions : (diskJob.customInstructions || ""),
@@ -169,9 +223,9 @@ export function mergeMonotonicJob(authoritative: CloudJob, candidate: CloudJob):
  * Persist job metadata to Firestore
  */
 export async function saveJobToFirestore(job: CloudJob): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
   const db = initFirestore();
   if (!db || !job.id) {
-    console.warn(`[FirestoreStorage] Cannot save job: DB not initialized or missing ID (job: ${job?.id})`);
     return false;
   }
 
@@ -200,19 +254,18 @@ export async function saveJobToFirestore(job: CloudJob): Promise<boolean> {
     await setDoc(jobRef, payload, { merge: true });
     return true;
   } catch (err: any) {
-    console.error(`[FirestoreStorage] CRITICAL: Failed to save job ${job.id} metadata to Firestore:`, err.message);
+    handleFirestoreError(`saveJobToFirestore(${job.id})`, err);
     return false;
   }
 }
 
 /**
  * Persist translated chunk to Firestore
- * MUST be called and succeed before chunk is marked permanently completed.
  */
 export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
   const db = initFirestore();
   if (!db || !jobId) {
-    console.error(`[FirestoreStorage] Cannot save chunk: DB not initialized or missing jobId (jobId: ${jobId})`);
     return false;
   }
 
@@ -240,7 +293,7 @@ export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk
     await setDoc(chunkRef, chunkPayload, { merge: true });
     return true;
   } catch (err: any) {
-    console.error(`[FirestoreStorage] CRITICAL: Failed to save chunk ${chunk.index} for job ${jobId} to Firestore:`, err.message);
+    handleFirestoreError(`saveChunkToFirestore(${jobId}, chunk_${chunk.index})`, err);
     return false;
   }
 }
@@ -249,6 +302,7 @@ export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk
  * Batch save chunks to Firestore
  */
 export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTextChunk[]): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
   const db = initFirestore();
   if (!db || !jobId || chunks.length === 0) return false;
 
@@ -282,7 +336,7 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
     }
     return true;
   } catch (err: any) {
-    console.error(`[FirestoreStorage] Failed to batch save chunks for job ${jobId}:`, err.message);
+    handleFirestoreError(`saveChunksBatchToFirestore(${jobId})`, err);
     return false;
   }
 }
@@ -291,6 +345,7 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
  * Load authoritative job and all chunks from Firestore
  */
 export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | null> {
+  if (!isCloudStorageAvailable()) return null;
   const db = initFirestore();
   if (!db || !jobId) return null;
 
@@ -346,8 +401,8 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       lastActiveAt: data.lastActiveAt || Date.now(),
     };
   } catch (err: any) {
-    console.error(`[FirestoreStorage] Failed to load job ${jobId} from Firestore:`, err.message);
-    throw err;
+    handleFirestoreError(`loadJobFromFirestore(${jobId})`, err);
+    return null;
   }
 }
 
@@ -356,28 +411,32 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
  */
 export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>> {
   const result = new Map<string, CloudJob>();
+  if (!isCloudStorageAvailable()) return result;
   const db = initFirestore();
   if (!db) {
-    throw new Error("Firestore client not initialized.");
+    return result;
   }
 
-  const jobsRef = collection(db, "translation_jobs");
-  const snapshot = await getDocs(jobsRef);
+  try {
+    const jobsRef = collection(db, "translation_jobs");
+    const snapshot = await getDocs(jobsRef);
 
-  for (const docSnap of snapshot.docs) {
-    const jId = docSnap.id;
-    if (jId.startsWith("_")) continue; // Skip internal health docs
-    try {
-      const job = await loadJobFromFirestore(jId);
-      if (job) {
-        const sKey = job.sessionId || "legacy_default";
-        result.set(sKey, job);
+    for (const docSnap of snapshot.docs) {
+      const jId = docSnap.id;
+      if (jId.startsWith("_")) continue; // Skip internal health docs
+      try {
+        const job = await loadJobFromFirestore(jId);
+        if (job) {
+          const sKey = job.sessionId || "legacy_default";
+          result.set(sKey, job);
+        }
+      } catch (jobErr: any) {
+        handleFirestoreError(`loadAllJobsFromFirestore(${jId})`, jobErr);
       }
-    } catch (jobErr: any) {
-      console.error(`[FirestoreStorage] Failed to load job details for ${jId}:`, jobErr.message);
     }
+  } catch (err: any) {
+    handleFirestoreError("loadAllJobsFromFirestore", err);
   }
 
-  console.log(`[FirestoreStorage] Authoritative load complete: ${result.size} job(s) from Firestore.`);
   return result;
 }

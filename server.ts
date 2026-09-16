@@ -1056,19 +1056,12 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               single.durationMs = Date.now() - startBatchTime;
               single.errorMessage = undefined;
               single.lastErrorAt = undefined;
-
-              // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
               single.status = "completed";
-              const persisted = await saveChunkToFirestore(targetJob.id, single);
-              if (persisted) {
-                inFlightChunkIds.delete(single.id);
-                validCount = 1;
-              } else {
-                single.status = "error";
-                single.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
-                single.lastErrorAt = Date.now();
-                invalidCount = 1;
-              }
+              inFlightChunkIds.delete(single.id);
+              validCount = 1;
+
+              // Opportunistic cloud backup
+              saveChunkToFirestore(targetJob.id, single).catch(() => {});
             } else {
               const decomp = await translateWithDecomposition(
                 single.chineseText,
@@ -1081,19 +1074,12 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 single.durationMs = Date.now() - startBatchTime;
                 single.errorMessage = undefined;
                 single.lastErrorAt = undefined;
-
-                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
                 single.status = "completed";
-                const persisted = await saveChunkToFirestore(targetJob.id, single);
-                if (persisted) {
-                  inFlightChunkIds.delete(single.id);
-                  validCount = 1;
-                } else {
-                  single.status = "error";
-                  single.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
-                  single.lastErrorAt = Date.now();
-                  invalidCount = 1;
-                }
+                inFlightChunkIds.delete(single.id);
+                validCount = 1;
+
+                // Opportunistic cloud backup
+                saveChunkToFirestore(targetJob.id, single).catch(() => {});
               } else {
                 single.status = "error";
                 single.errorMessage = "Empty translation response received.";
@@ -1118,19 +1104,12 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 chunk.durationMs = Date.now() - startBatchTime;
                 chunk.errorMessage = undefined;
                 chunk.lastErrorAt = undefined;
-
-                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
                 chunk.status = "completed";
-                const persisted = await saveChunkToFirestore(targetJob.id, chunk);
-                if (persisted) {
-                  inFlightChunkIds.delete(chunk.id);
-                  validCount++;
-                } else {
-                  chunk.status = "error";
-                  chunk.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
-                  chunk.lastErrorAt = Date.now();
-                  invalidCount++;
-                }
+                inFlightChunkIds.delete(chunk.id);
+                validCount++;
+
+                // Opportunistic cloud backup
+                saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
               } else {
                 console.log(`[Cloud Worker #${workerId}] Batch parsing fallback: translating chunk #${chunk.index + 1} individually...`);
                 try {
@@ -1164,21 +1143,13 @@ Translation Guidelines:
                     chunk.durationMs = Date.now() - startBatchTime;
                     chunk.errorMessage = undefined;
                     chunk.lastErrorAt = undefined;
-
-                    // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
                     chunk.status = "completed";
-                    const persisted = await saveChunkToFirestore(targetJob.id, chunk);
-                    if (persisted) {
-                      inFlightChunkIds.delete(chunk.id);
-                      validCount++;
-                      continue;
-                    } else {
-                      chunk.status = "error";
-                      chunk.errorMessage = "Failed to persist translated text to cloud database. Auto-retrying...";
-                      chunk.lastErrorAt = Date.now();
-                      invalidCount++;
-                      continue;
-                    }
+                    inFlightChunkIds.delete(chunk.id);
+                    validCount++;
+
+                    // Opportunistic cloud backup
+                    saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                    continue;
                   }
                 } catch (singleErr: any) {
                   console.warn(`[Cloud Worker #${workerId}] Individual translation fallback failed for chunk #${chunk.index + 1}:`, singleErr.message);
@@ -1224,18 +1195,15 @@ Translation Guidelines:
                 firstChunk.errorMessage = undefined;
                 firstChunk.lastErrorAt = undefined;
 
-                // PERSIST TO FIRESTORE FIRST BEFORE MARKING COMPLETED
                 firstChunk.status = "completed";
-                const persisted = await saveChunkToFirestore(targetJob.id, firstChunk);
-                if (persisted) {
-                  inFlightChunkIds.delete(firstChunk.id);
-                  success = true;
-                  batchChunks = [];
-                  targetJob.lastActiveAt = Date.now();
-                  saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
-                  console.log(`[Cloud Worker #${workerId}] Chunk ${firstChunk.index + 1} succeeded via paragraph decomposition and persisted!`);
-                  break;
-                }
+                inFlightChunkIds.delete(firstChunk.id);
+                success = true;
+                batchChunks = [];
+                targetJob.lastActiveAt = Date.now();
+                saveJobToDisk(targetJob.sessionId || "legacy_default", targetJob);
+                saveChunkToFirestore(targetJob.id, firstChunk).catch(() => {});
+                console.log(`[Cloud Worker #${workerId}] Chunk ${firstChunk.index + 1} succeeded via paragraph decomposition and saved!`);
+                break;
               }
             } catch (decompErr: any) {
               console.warn(`[Cloud Worker #${workerId}] Paragraph decomposition also failed:`, decompErr.message);
@@ -1581,7 +1549,7 @@ app.get("/api/cloud-job/status", (req, res) => {
 
   const includeFullText = req.query.full === "true";
 
-  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed").length;
+  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
   const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
 
