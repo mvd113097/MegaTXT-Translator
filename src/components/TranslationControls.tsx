@@ -139,14 +139,14 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
             <Pause className="h-4 w-4" />
             <span>Pause Translation</span>
           </button>
-        ) : isPaused ? (
+        ) : isPaused || (completedChunks > 0 && completedChunks < totalChunks) ? (
           <button
             id="resume-translation-btn"
-            onClick={onResume}
+            onClick={isPaused ? onResume : onStart}
             className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer"
           >
             <Play className="h-4 w-4 fill-white" />
-            <span>Resume Translation</span>
+            <span>{mode === "cloud" ? "Resume Cloud Translation ☁️" : "Resume Translation ⚡"}</span>
           </button>
         ) : (
           <button

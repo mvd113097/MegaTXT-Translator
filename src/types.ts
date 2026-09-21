@@ -24,6 +24,9 @@ export interface TextChunk {
   chineseText: string;
   englishText: string;
   charCount: number;
+  wordCount?: number;
+  hasEnglish?: boolean;
+  hasChinese?: boolean;
   status: ChunkStatus;
   attempts?: number;
   errorMessage?: string;
@@ -43,6 +46,8 @@ export interface TranslationSession {
   status?: "idle" | "running" | "paused" | "completed";
   createdAt: number;
   lastUpdated: number;
+  completedEnglishWords?: number;
+  completedChars?: number;
   lastDownloadedWordCount?: number;
   lastDownloadedAt?: number;
 }
@@ -72,4 +77,26 @@ export interface AuthStatus {
   userEmail?: string | null;
   authorizedEmail?: string;
   hasPasscodeConfigured: boolean;
+}
+
+export interface LibraryBook {
+  id: string;
+  title: string;
+  author?: string;
+  coverUrl?: string;
+  novelUrl?: string;
+  siteId?: string;
+  siteName?: string;
+  summary?: string;
+  currentChapterIndex: number;
+  totalChapters: number;
+  lastReadChapterTitle?: string;
+  lastReadAt: number;
+  addedAt: number;
+  allChapters?: Array<{ title: string; url: string; index?: number }>;
+  tags?: string[];
+  status?: string;
+  rating?: number;
+  points?: number;
+  likes?: number;
 }

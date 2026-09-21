@@ -21,6 +21,7 @@ interface NavbarProps {
   onReset: () => void;
   onOpenGlossary: () => void;
   onOpenTelegramSettings: () => void;
+  onOpenSettings?: () => void;
   glossaryCount: number;
   theme: "light" | "dark";
   onToggleTheme: () => void;
@@ -37,6 +38,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onReset,
   onOpenGlossary,
   onOpenTelegramSettings,
+  onOpenSettings,
   glossaryCount,
   theme,
   onToggleTheme,
@@ -61,7 +63,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Right Action Icons (Matching reference: Sun/Moon + Menu hamburger) */}
+        {/* Right Action Icons (Sun/Moon + Menu hamburger) */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Theme Toggle */}
           <button
@@ -97,6 +99,21 @@ export const Navbar: React.FC<NavbarProps> = ({
       {isMenuOpen && (
         <div className="absolute top-full left-0 right-0 z-50 border-b border-purple-100 dark:border-purple-900/60 bg-white/98 dark:bg-slate-900/98 backdrop-blur-md p-3 shadow-xl transition animate-in fade-in slide-in-from-top-2">
           <div className="mx-auto max-w-md space-y-1.5">
+            {/* Application & Translation Settings (Moved from bottom bar as requested) */}
+            <button
+              id="menu-settings-btn"
+              type="button"
+              onClick={() => {
+                setIsMenuOpen(false);
+                if (onOpenSettings) onOpenSettings();
+                else onOpenTelegramSettings();
+              }}
+              className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-purple-50 dark:hover:bg-purple-950/40 transition cursor-pointer"
+            >
+              <Settings className="h-4 w-4 text-purple-600" />
+              <span>Settings & Configuration</span>
+            </button>
+
             {/* Glossary */}
             <button
               id="menu-glossary-btn"
@@ -128,7 +145,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               }}
               className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-purple-50 dark:hover:bg-purple-950/40 transition cursor-pointer"
             >
-              <Settings className="h-4 w-4 text-purple-600" />
+              <Settings className="h-4 w-4 text-indigo-500" />
               <span>Telegram Progress Alerts</span>
             </button>
 

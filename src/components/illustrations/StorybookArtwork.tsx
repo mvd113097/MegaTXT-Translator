@@ -81,9 +81,9 @@ export const SparkleStar: React.FC<{ className?: string; size?: number }> = ({
  * Illustrated watercolor Chinese/Japanese pagoda on rolling misty hills with blooming sakura branches
  * Optimized specifically for 360-430px mobile viewports so pagoda and sakura are clearly visible behind the navbar
  */
-export const PagodaHeaderIllustration: React.FC = () => {
+export const PagodaHeaderIllustration: React.FC<{ className?: string }> = ({ className = "" }) => {
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-0 h-64 sm:h-72 overflow-hidden select-none z-0">
+    <div className={`pointer-events-none absolute inset-x-0 top-0 h-64 sm:h-72 overflow-hidden select-none z-0 ${className}`}>
       <img
         src={pagodaHeaderImg}
         alt="Pagoda Header Landscape"

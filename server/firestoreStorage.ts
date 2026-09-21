@@ -1,9 +1,12 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
+  initializeFirestore,
   getFirestore,
+  setLogLevel,
   doc,
   setDoc,
   getDoc,
+  deleteDoc,
   collection,
   getDocs,
   writeBatch,
@@ -11,6 +14,13 @@ import {
 } from "firebase/firestore";
 import fs from "fs";
 import path from "path";
+
+// Silence internal Firestore SDK debug/idle stream logs to prevent benign gRPC stream recycling warnings
+try {
+  setLogLevel("silent");
+} catch {
+  // ignore if not supported
+}
 
 export interface ServerTextChunk {
   id: string;
@@ -79,6 +89,9 @@ export function isCloudStorageAvailable(): boolean {
       return false;
     }
   }
+  if (!dbInstance) {
+    initFirestore();
+  }
   return isFirestoreAvailable && !!dbInstance;
 }
 
@@ -96,7 +109,19 @@ export function initFirestore(): Firestore | null {
 
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     const app = getApps().length === 0 ? initializeApp(config) : getApp();
-    const db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+    let db: Firestore;
+    try {
+      db = initializeFirestore(
+        app,
+        {
+          experimentalForceLongPolling: true,
+          ignoreUndefinedProperties: true,
+        },
+        config.firestoreDatabaseId || undefined
+      );
+    } catch {
+      db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+    }
 
     dbInstance = db;
     isFirestoreAvailable = true;
@@ -189,13 +214,15 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
   const totalCount = reconciledChunks.length;
   const isAllDone = completedCount === totalCount && totalCount > 0;
 
-  let finalStatus: CloudJob["status"] = "running";
+  let finalStatus: CloudJob["status"] = "idle";
   if (isAllDone) {
     finalStatus = "completed";
-  } else if (fsJob.status === "paused" && diskJob.status === "paused") {
+  } else if (fsJob.status === "running" || diskJob?.status === "running") {
+    finalStatus = "running";
+  } else if (fsJob.status === "paused" || diskJob?.status === "paused") {
     finalStatus = "paused";
   } else {
-    finalStatus = "running";
+    finalStatus = fsJob.status || diskJob?.status || "idle";
   }
 
   return {
@@ -440,3 +467,91 @@ export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>>
 
   return result;
 }
+
+/**
+ * Permanently delete a job and all its chunks from Firestore
+ */
+export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
+  const db = initFirestore();
+  if (!db || !jobId) return false;
+
+  try {
+    const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
+    const chunksSnap = await getDocs(chunksRef);
+    if (!chunksSnap.empty) {
+      const BATCH_SIZE = 100;
+      const docs = chunksSnap.docs;
+      for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+        const slice = docs.slice(i, i + BATCH_SIZE);
+        const batch = writeBatch(db);
+        for (const d of slice) {
+          batch.delete(d.ref);
+        }
+        await batch.commit();
+      }
+    }
+
+    const jobRef = doc(db, "translation_jobs", jobId);
+    await deleteDoc(jobRef);
+    console.log(`[FirestoreStorage] Deleted job ${jobId} and its chunk subcollection from Firestore`);
+    return true;
+  } catch (err: any) {
+    handleFirestoreError(`deleteJobFromFirestore(${jobId})`, err);
+    return false;
+  }
+}
+
+/**
+ * Permanently delete all jobs and their chunks matching a novel filename from Firestore
+ */
+export async function deleteJobByFileNameFromFirestore(fileName: string): Promise<number> {
+  if (!isCloudStorageAvailable()) return 0;
+  const db = initFirestore();
+  if (!db || !fileName) return 0;
+
+  const targetName = fileName.trim().toLowerCase();
+  let deletedCount = 0;
+
+  try {
+    const jobsRef = collection(db, "translation_jobs");
+    const snapshot = await getDocs(jobsRef);
+    for (const docSnap of snapshot.docs) {
+      const data = docSnap.data();
+      const docFileName = (data.fileName || "").trim().toLowerCase();
+      if (docFileName === targetName) {
+        await deleteJobFromFirestore(docSnap.id);
+        deletedCount++;
+      }
+    }
+  } catch (err: any) {
+    handleFirestoreError(`deleteJobByFileNameFromFirestore(${fileName})`, err);
+  }
+
+  return deletedCount;
+}
+
+/**
+ * Permanently delete ALL jobs from Firestore
+ */
+export async function deleteAllJobsFromFirestore(): Promise<number> {
+  if (!isCloudStorageAvailable()) return 0;
+  const db = initFirestore();
+  if (!db) return 0;
+
+  let deletedCount = 0;
+  try {
+    const jobsRef = collection(db, "translation_jobs");
+    const snapshot = await getDocs(jobsRef);
+    for (const docSnap of snapshot.docs) {
+      if (docSnap.id.startsWith("_")) continue; // preserve health ping
+      await deleteJobFromFirestore(docSnap.id);
+      deletedCount++;
+    }
+  } catch (err: any) {
+    handleFirestoreError("deleteAllJobsFromFirestore", err);
+  }
+
+  return deletedCount;
+}
+

@@ -1,5 +1,5 @@
 import React from "react";
-import { Clock, Zap, FileText, BookOpen, CheckCircle2 } from "lucide-react";
+import { Clock, Zap, FileText, BookOpen, CheckCircle2, RefreshCw } from "lucide-react";
 import { TranslationMetrics } from "../types";
 
 interface ProgressBarProps {
@@ -8,6 +8,8 @@ interface ProgressBarProps {
   onQuickDownloadProgress?: (format?: "epub" | "txt") => void;
   isRunning: boolean;
   isCompleted?: boolean;
+  onSyncProgress?: () => void;
+  isSyncing?: boolean;
 }
 
 function formatDuration(seconds: number): string {
@@ -27,6 +29,8 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   fileName,
   isRunning,
   isCompleted: propIsCompleted,
+  onSyncProgress,
+  isSyncing = false,
 }) => {
   const isFinished =
     propIsCompleted !== undefined
@@ -73,7 +77,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
             </div>
           </div>
 
-          <div className="shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {isFinished ? (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-3 py-1 text-xs font-bold text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
@@ -94,11 +98,25 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
       </div>
 
       {/* Main Circular Progress Card */}
-      <div className={`rounded-3xl border p-5 sm:p-6 shadow-md transition-colors ${
+      <div className={`relative rounded-3xl border p-5 sm:p-6 shadow-md transition-colors ${
         isFinished
           ? "border-emerald-200/90 dark:border-emerald-800/60 bg-gradient-to-br from-emerald-50/40 via-white to-teal-50/30 dark:from-slate-900 dark:to-emerald-950/20 shadow-emerald-500/5"
           : "border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 shadow-purple-500/5"
       }`}>
+        {/* Top-Right Sync / Reload Button */}
+        {onSyncProgress && (
+          <button
+            type="button"
+            onClick={onSyncProgress}
+            disabled={isSyncing}
+            className="absolute top-3.5 right-3.5 sm:top-4 sm:right-4 z-10 flex h-8 w-8 items-center justify-center rounded-xl bg-purple-50/90 hover:bg-purple-100 dark:bg-purple-950/80 dark:hover:bg-purple-900/90 border border-purple-200/80 dark:border-purple-800/80 text-purple-600 dark:text-purple-300 shadow-2xs transition hover:scale-105 active:scale-95 disabled:opacity-60 cursor-pointer"
+            title="Reload progress (~2 KB)"
+            aria-label="Reload progress"
+          >
+            <RefreshCw className={`h-4 w-4 ${isSyncing ? "animate-spin text-purple-600 dark:text-purple-400" : ""}`} />
+          </button>
+        )}
+
         <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8">
           {/* Circular Donut Gauge */}
           <div className="relative flex shrink-0 items-center justify-center">

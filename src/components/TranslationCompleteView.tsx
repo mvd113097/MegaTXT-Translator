@@ -26,6 +26,9 @@ interface TranslationCompleteViewProps {
   onDownloadProgress: (format?: "epub" | "txt") => void | Promise<void>;
   onOpenExport: () => void;
   onReset: () => void;
+  onSyncProgress?: () => void;
+  isSyncing?: boolean;
+  onOpenReader?: () => void;
 }
 
 function formatDuration(seconds: number): string {
@@ -49,6 +52,9 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
   onDownloadProgress,
   onOpenExport,
   onReset,
+  onSyncProgress,
+  isSyncing = false,
+  onOpenReader,
 }) => {
   const [downloadingFormat, setDownloadingFormat] = useState<"epub" | "txt" | null>(null);
 
@@ -83,17 +89,19 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
 
       {/* 2. Novel Summary Card */}
       <div className="rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-md shadow-purple-500/5 transition-colors space-y-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 dark:from-indigo-950 dark:via-purple-900/60 dark:to-pink-950/60 text-purple-600 dark:text-purple-300">
-            <BookOpen className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-sm sm:text-base font-extrabold text-slate-800 dark:text-slate-100 truncate" title={session.fileName}>
-              {session.fileName}
-            </h3>
-            <p className="text-xs text-purple-600 dark:text-purple-300 font-medium">
-              Chapter 1 — {totalChunks} · {completedWords.toLocaleString()} words
-            </p>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 dark:from-indigo-950 dark:via-purple-900/60 dark:to-pink-950/60 text-purple-600 dark:text-purple-300">
+              <BookOpen className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm sm:text-base font-extrabold text-slate-800 dark:text-slate-100 truncate" title={session.fileName}>
+                {session.fileName}
+              </h3>
+              <p className="text-xs text-purple-600 dark:text-purple-300 font-medium">
+                Chapter 1 — {totalChunks} · {completedWords.toLocaleString()} words
+              </p>
+            </div>
           </div>
         </div>
 
@@ -138,8 +146,19 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
       {/* 3. Download Your Translation Card (Reference Screen 3) */}
       <div className="rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-md shadow-purple-500/5 transition-colors space-y-3">
         <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-800 dark:text-slate-200">
-          Download Your Translation
+          Read or Download Translation
         </h4>
+
+        {onOpenReader && (
+          <button
+            type="button"
+            onClick={onOpenReader}
+            className="w-full flex items-center justify-center gap-2 rounded-2xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-950/60 hover:bg-purple-100 dark:hover:bg-purple-900/60 py-3 px-4 text-sm font-extrabold text-purple-700 dark:text-purple-300 shadow-2xs transition active:scale-98 cursor-pointer"
+          >
+            <BookOpen className="h-4.5 w-4.5 text-purple-600 dark:text-purple-400" />
+            <span>Read in Reader Mode (QuickNovel TTS)</span>
+          </button>
+        )}
 
         {/* Primary Download EPUB Button */}
         <button

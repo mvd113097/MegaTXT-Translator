@@ -9,12 +9,18 @@ import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 import { sendTelegramNotification as rawSendTelegramNotification } from "./server/telegram";
+import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems } from "./server/storeScraper";
+import { translateExploreItemsInPlace, translateWithGoogle, translateChapterWithGoogle, hasChineseCharacters } from "./server/googleTranslate";
+import { autoGenerateNovelGlossary } from "./server/glossaryExtractor";
 import {
   initFirestore,
   saveJobToFirestore,
   saveChunkToFirestore,
   saveChunksBatchToFirestore,
   loadAllJobsFromFirestore,
+  deleteJobFromFirestore,
+  deleteJobByFileNameFromFirestore,
+  deleteAllJobsFromFirestore,
   mergeMonotonicJob,
 } from "./server/firestoreStorage";
 
@@ -56,13 +62,11 @@ function getGeminiClient(): GoogleGenAI {
 // High reliability free-tier translation engine with multi-project quota pooling,
 // exponential backoff, and content-filter resilience.
 // Supported modern models per Google GenAI SDK guidelines:
+// gemini-3.8-flash and gemini-3.1-flash-lite deliver high throughput, fast translation, and excellent output quality.
 const FREE_TIER_MODELS = [
   "gemini-3.8-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-3.1-flash-lite"
+  "gemini-3.1-flash-lite",
+  "gemini-flash-latest"
 ];
 
 // In-memory tracking of model availability and quota cooldowns
@@ -254,7 +258,7 @@ async function generateWithQuotaScheduler(
   quotaScheduler.acquireProject(project.id);
 
   try {
-    const response = await project.client.models.generateContent({
+    const generatePromise = project.client.models.generateContent({
       model: modelName,
       contents: userPrompt,
       config: {
@@ -269,6 +273,17 @@ async function generateWithQuotaScheduler(
           { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" },
         ] as any,
       },
+    });
+
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`API request to ${modelName} timed out after 35 seconds.`));
+      }, 35000);
+    });
+
+    const response = await Promise.race([generatePromise, timeoutPromise]).finally(() => {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     });
 
     let resultText = response.text || "";
@@ -371,13 +386,23 @@ async function generateWithQuotaScheduler(
     const isTemporary =
       err.status === 503 ||
       err.status === 500 ||
+      err.status === 504 ||
       err.statusCode === 503 ||
       err.statusCode === 500 ||
+      err.statusCode === 504 ||
+      err.code === 504 ||
+      err.status === "DEADLINE_EXCEEDED" ||
+      errStr.includes("504") ||
+      errStr.includes("deadline") ||
+      errStr.includes("deadline_exceeded") ||
       errStr.includes("503") ||
       errStr.includes("500") ||
       errStr.includes("unavailable") ||
       errStr.includes("high demand") ||
       errStr.includes("overloaded") ||
+      errStr.includes("timed out") ||
+      errStr.includes("timeout") ||
+      errStr.includes("fetch failed") ||
       errStr.includes("transient error");
 
     const isFilterOrBlock =
@@ -527,6 +552,9 @@ interface ServerTextChunk {
   chineseText: string;
   englishText: string;
   charCount: number;
+  wordCount?: number;
+  hasEnglish?: boolean;
+  hasChinese?: boolean;
   status: "pending" | "processing" | "completed" | "error";
   attempts: number;
   errorMessage?: string;
@@ -549,6 +577,8 @@ interface CloudJob {
   status: "idle" | "running" | "paused" | "completed";
   startedAt: number;
   lastActiveAt: number;
+  completedEnglishWords?: number;
+  completedChars?: number;
 }
 
 const JOBS_DIR = path.join(DATA_DIR, "jobs");
@@ -585,11 +615,64 @@ function getJobForSession(req: express.Request): CloudJob | null {
   if (cloudJobs.has(sId)) {
     return cloudJobs.get(sId)!;
   }
-  // If request has NO explicit device session header (legacy client without headers), check legacy_default
-  const hasCustomSessionHeader = !!(req.headers["x-session-id"] || req.headers["x-device-session-id"] || req.query.sessionId || req.query.deviceId);
-  if (!hasCustomSessionHeader && cloudJobs.has("legacy_default")) {
-    return cloudJobs.get("legacy_default")!;
+
+  // Match by novel name if passed in query or header
+  const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+  const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+  let targetNovelName = "";
+  if (rawNovelHeader && typeof rawNovelHeader === "string") {
+    try {
+      targetNovelName = decodeURIComponent(rawNovelHeader).trim().toLowerCase();
+    } catch {
+      targetNovelName = rawNovelHeader.trim().toLowerCase();
+    }
+  } else if (novelQuery && typeof novelQuery === "string") {
+    try {
+      targetNovelName = decodeURIComponent(novelQuery).trim().toLowerCase();
+    } catch {
+      targetNovelName = novelQuery.trim().toLowerCase();
+    }
   }
+
+  if (targetNovelName) {
+    for (const job of cloudJobs.values()) {
+      if (job.fileName && job.fileName.trim().toLowerCase() === targetNovelName) {
+        return job;
+      }
+    }
+  }
+
+  // Match by explicit job id
+  const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
+  if (jobId && typeof jobId === "string") {
+    for (const job of cloudJobs.values()) {
+      if (job.id === jobId.trim()) return job;
+    }
+  }
+
+  // Fallbacks: Only allowed if allowFallback is not false and only for actively RUNNING jobs
+  const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
+  if (!allowFallback) {
+    return null;
+  }
+
+  // Fallback 1: check legacy_default ONLY if running
+  if (cloudJobs.has("legacy_default")) {
+    const leg = cloudJobs.get("legacy_default")!;
+    if (leg.status === "running" && !isSyntheticOrTestJob(leg)) {
+      return leg;
+    }
+  }
+
+  // Fallback 2: Check for any actively running non-test job
+  const activeRunning = Array.from(cloudJobs.values()).filter(
+    (j) => j.status === "running" && !isSyntheticOrTestJob(j)
+  );
+  if (activeRunning.length > 0) {
+    activeRunning.sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+    return activeRunning[0];
+  }
+
   return null;
 }
 
@@ -599,6 +682,14 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
     const jobFilePath = path.join(JOBS_DIR, `job_${safeKey}.json`);
     if (job) {
       fs.writeFileSync(jobFilePath, JSON.stringify(job, null, 2), "utf-8");
+
+      // Permanently archive completed novels so they are never lost or overwritten
+      if (job.status === "completed" || (job.chunks && job.chunks.every((c) => c.status === "completed"))) {
+        const safeNovel = sanitizeSessionKey(job.fileName || "novel");
+        const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
+        fs.writeFileSync(archivePath, JSON.stringify(job, null, 2), "utf-8");
+      }
+
       // Keep legacy root file synced if this is the legacy or default job
       if (sessionId === "legacy_default" || cloudJobs.size === 1) {
         fs.writeFileSync(CLOUD_JOB_FILE, JSON.stringify(job, null, 2), "utf-8");
@@ -620,34 +711,295 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
   }
 }
 
+function mergeMonotonicCloudJobs(jobA: CloudJob, jobB: CloudJob): CloudJob {
+  if (!jobA) return jobB;
+  if (!jobB) return jobA;
+
+  const baseChunks = (jobA.chunks && jobA.chunks.length >= (jobB.chunks?.length || 0)) ? jobA.chunks : (jobB.chunks || []);
+  const otherChunks = baseChunks === jobA.chunks ? (jobB.chunks || []) : (jobA.chunks || []);
+  const otherChunkMap = new Map(otherChunks.map((c) => [c.index, c]));
+
+  const mergedChunks: ServerTextChunk[] = baseChunks.map((cA) => {
+    const cB = otherChunkMap.get(cA.index);
+    const aComp = cA.status === "completed" && !!cA.englishText?.trim();
+    const bComp = cB?.status === "completed" && !!cB?.englishText?.trim();
+
+    if (aComp && bComp) {
+      const bestText = (cA.englishText?.length || 0) >= (cB?.englishText?.length || 0) ? cA.englishText : cB!.englishText;
+      return {
+        ...cA,
+        status: "completed",
+        englishText: bestText,
+        attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
+        edited: !!(cA.edited || cB?.edited),
+      };
+    }
+    if (aComp) {
+      return {
+        ...cA,
+        status: "completed",
+        englishText: cA.englishText,
+      };
+    }
+    if (bComp) {
+      return {
+        ...cA,
+        status: "completed",
+        englishText: cB!.englishText,
+        attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
+        edited: !!cB?.edited,
+      };
+    }
+
+    const isProcessing = cA.status === "processing" || cB?.status === "processing";
+    const isError = cA.status === "error" || cB?.status === "error";
+    return {
+      ...cA,
+      status: isProcessing ? "processing" : isError ? "error" : "pending",
+      englishText: cA.englishText || cB?.englishText || "",
+      errorMessage: cA.errorMessage || cB?.errorMessage,
+      attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
+    };
+  });
+
+  const completedCount = mergedChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+  const isFullyCompleted = completedCount === mergedChunks.length && mergedChunks.length > 0;
+
+  let finalStatus: CloudJob["status"] = "idle";
+  if (isFullyCompleted) {
+    finalStatus = "completed";
+  } else if (jobA.status === "running" || jobB.status === "running") {
+    finalStatus = "running";
+  } else if (jobA.status === "paused" || jobB.status === "paused") {
+    finalStatus = "paused";
+  } else {
+    finalStatus = jobA.status || jobB.status || "idle";
+  }
+
+  return {
+    id: jobA.id || jobB.id,
+    sessionId: jobA.sessionId || jobB.sessionId || "legacy_default",
+    fileName: jobA.fileName || jobB.fileName,
+    fileSizeBytes: Math.max(jobA.fileSizeBytes || 0, jobB.fileSizeBytes || 0),
+    totalChineseChars: Math.max(jobA.totalChineseChars || 0, jobB.totalChineseChars || 0),
+    chunks: mergedChunks,
+    style: jobA.style || jobB.style || "xianxia",
+    customInstructions: jobA.customInstructions || jobB.customInstructions || "",
+    glossary: (jobA.glossary && jobA.glossary.length > 0) ? jobA.glossary : (jobB.glossary || []),
+    concurrency: Math.max(jobA.concurrency || 1, jobB.concurrency || 1),
+    status: finalStatus,
+    startedAt: Math.min(jobA.startedAt || Date.now(), jobB.startedAt || Date.now()),
+    lastActiveAt: Math.max(jobA.lastActiveAt || 0, jobB.lastActiveAt || 0, Date.now()),
+  };
+}
+
+async function deleteJobCompletely(
+  jobToDelete: CloudJob | null,
+  sessionId?: string,
+  explicitFileName?: string,
+  explicitJobId?: string,
+  clearAll: boolean = false
+) {
+  if (clearAll) {
+    console.log("[Storage] Authoritative clearAll requested: obliterating all cloud jobs and archives.");
+    for (const j of cloudJobs.values()) {
+      j.status = "idle";
+    }
+    cloudJobs.clear();
+    try {
+      if (fs.existsSync(CLOUD_JOB_FILE)) fs.unlinkSync(CLOUD_JOB_FILE);
+    } catch {}
+    try {
+      if (fs.existsSync(JOBS_DIR)) {
+        const files = fs.readdirSync(JOBS_DIR);
+        for (const f of files) {
+          if (f.endsWith(".json")) {
+            try { fs.unlinkSync(path.join(JOBS_DIR, f)); } catch {}
+          }
+        }
+      }
+    } catch {}
+    await deleteAllJobsFromFirestore().catch(() => {});
+    return;
+  }
+
+  const targetIds = new Set<string>();
+  const targetFileNames = new Set<string>();
+
+  if (jobToDelete?.id) targetIds.add(jobToDelete.id.trim());
+  if (explicitJobId && typeof explicitJobId === "string" && explicitJobId.trim()) targetIds.add(explicitJobId.trim());
+
+  if (jobToDelete?.fileName) targetFileNames.add(jobToDelete.fileName.trim().toLowerCase());
+  if (explicitFileName && typeof explicitFileName === "string" && explicitFileName.trim()) {
+    targetFileNames.add(explicitFileName.trim().toLowerCase());
+  }
+
+  // Also check if sessionId in cloudJobs has a job
+  if (sessionId && cloudJobs.has(sessionId)) {
+    const sj = cloudJobs.get(sessionId)!;
+    if (sj.id) targetIds.add(sj.id.trim());
+    if (sj.fileName) targetFileNames.add(sj.fileName.trim().toLowerCase());
+  }
+
+  console.log(`[Storage] Deleting job completely. Target IDs: [${Array.from(targetIds).join(", ")}], FileNames: [${Array.from(targetFileNames).join(", ")}], SessionId: ${sessionId || "none"}`);
+
+  // 1. In-memory: Abort and remove matching jobs from cloudJobs
+  for (const [sKey, j] of Array.from(cloudJobs.entries())) {
+    const jName = (j.fileName || "").trim().toLowerCase();
+    const isIdMatch = targetIds.has(j.id);
+    const isNameMatch = targetFileNames.has(jName);
+    const isSessionMatch = sessionId && sKey === sessionId;
+
+    if (isIdMatch || isNameMatch || isSessionMatch) {
+      j.status = "idle";
+      cloudJobs.delete(sKey);
+      saveJobToDisk(sKey, null);
+    }
+  }
+
+  if (sessionId) {
+    cloudJobs.delete(sessionId);
+    saveJobToDisk(sessionId, null);
+  }
+
+  // 2. Clear legacy_default if it matches
+  if (cloudJobs.has("legacy_default")) {
+    const leg = cloudJobs.get("legacy_default")!;
+    const legName = (leg.fileName || "").trim().toLowerCase();
+    if (targetIds.has(leg.id) || targetFileNames.has(legName)) {
+      leg.status = "idle";
+      cloudJobs.delete("legacy_default");
+      saveJobToDisk("legacy_default", null);
+    }
+  }
+
+  // 3. Delete root CLOUD_JOB_FILE if present and matches
+  if (fs.existsSync(CLOUD_JOB_FILE)) {
+    try {
+      const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
+      const parsed = JSON.parse(data);
+      const pName = (parsed?.fileName || "").trim().toLowerCase();
+      if (!parsed || (parsed.id && targetIds.has(parsed.id)) || (pName && targetFileNames.has(pName))) {
+        fs.unlinkSync(CLOUD_JOB_FILE);
+      }
+    } catch {
+      try { fs.unlinkSync(CLOUD_JOB_FILE); } catch {}
+    }
+  }
+
+  // 4. Delete disk files in JOBS_DIR matching any targetId or targetFileName
+  try {
+    if (fs.existsSync(JOBS_DIR)) {
+      const files = fs.readdirSync(JOBS_DIR);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        const fullPath = path.join(JOBS_DIR, f);
+
+        // Check archive files matching target novel
+        let matchedArchive = false;
+        for (const tName of targetFileNames) {
+          const safeNovel = sanitizeSessionKey(tName);
+          if (f === `archive_${safeNovel}.json`) {
+            try { fs.unlinkSync(fullPath); } catch {}
+            matchedArchive = true;
+            console.log(`[Storage] Unlinked archive file: ${f}`);
+            break;
+          }
+        }
+        if (matchedArchive) continue;
+
+        try {
+          const content = fs.readFileSync(fullPath, "utf-8");
+          let shouldDelete = false;
+
+          for (const tid of targetIds) {
+            if (content.includes(tid)) {
+              shouldDelete = true;
+              break;
+            }
+          }
+          if (!shouldDelete) {
+            const lower = content.toLowerCase();
+            for (const tName of targetFileNames) {
+              if (lower.includes(tName)) {
+                shouldDelete = true;
+                break;
+              }
+            }
+          }
+
+          if (shouldDelete) {
+            fs.unlinkSync(fullPath);
+            console.log(`[Storage] Unlinked job file: ${f}`);
+          }
+        } catch {}
+      }
+    }
+  } catch (err) {
+    console.warn("Error deleting job files from disk:", err);
+  }
+
+  // 5. Delete matching jobs from Firestore
+  for (const tid of targetIds) {
+    try {
+      await deleteJobFromFirestore(tid);
+    } catch (err: any) {
+      console.warn(`[Storage] Firestore delete error for job ID ${tid}:`, err?.message);
+    }
+  }
+
+  for (const tName of targetFileNames) {
+    try {
+      await deleteJobByFileNameFromFirestore(tName);
+    } catch (err: any) {
+      console.warn(`[Storage] Firestore delete error for fileName ${tName}:`, err?.message);
+    }
+  }
+}
+
 function setJobForSession(sessionId: string, job: CloudJob | null) {
   if (job) {
     job.sessionId = sessionId;
-    const existing = cloudJobs.get(sessionId);
-    const finalJob = existing && existing.fileName === job.fileName ? mergeMonotonicJob(existing, job) : job;
+    let existing: CloudJob | null = cloudJobs.get(sessionId) || null;
+    if (!existing && job.fileName) {
+      const targetName = job.fileName.trim().toLowerCase();
+      for (const j of cloudJobs.values()) {
+        if (j.fileName && j.fileName.trim().toLowerCase() === targetName) {
+          existing = j;
+          break;
+        }
+      }
+    }
+
+    const finalJob = existing ? mergeMonotonicCloudJobs(existing, job) : job;
     cloudJobs.set(sessionId, finalJob);
+
+    if (existing && existing.sessionId && existing.sessionId !== sessionId) {
+      cloudJobs.set(existing.sessionId, finalJob);
+      saveJobToDisk(existing.sessionId, finalJob);
+    }
+    cloudJobs.set("legacy_default", finalJob);
+    saveJobToDisk("legacy_default", finalJob);
+
     saveJobToDisk(sessionId, finalJob);
-    // Persist full metadata and initial chunk snapshot to cloud storage
+
     saveJobToFirestore(finalJob).catch((err) => {
-      console.warn(`[Storage] Firestore initial job sync note for ${finalJob.id}:`, err.message);
+      console.warn(`[Storage] Firestore job sync note for ${finalJob.id}:`, err.message);
     });
     saveChunksBatchToFirestore(finalJob.id, finalJob.chunks).catch((err) => {
       console.warn(`[Storage] Firestore initial chunks batch sync note for ${finalJob.id}:`, err.message);
     });
   } else {
-    cloudJobs.delete(sessionId);
-    saveJobToDisk(sessionId, null);
+    const existing = cloudJobs.get(sessionId) || null;
+    deleteJobCompletely(existing, sessionId).catch((err) => {
+      console.warn("Error deleting job in setJobForSession:", err);
+    });
   }
 }
 
 function reconcileAuthoritativeJob(fsJob: CloudJob, dJob?: CloudJob): CloudJob {
   if (!dJob) return fsJob;
-  // Firestore is authoritative for job status, mode, and progress.
-  // Local disk cache cannot promote status or override authoritative Firestore state.
-  return {
-    ...fsJob,
-    chunks: fsJob.chunks && fsJob.chunks.length > 0 ? fsJob.chunks : dJob.chunks || [],
-  };
+  return mergeMonotonicCloudJobs(fsJob, dJob);
 }
 
 // Load saved cloud jobs on startup with priority given to persistent Firestore storage
@@ -752,6 +1104,28 @@ async function loadCloudJobsFromDisk() {
       }
     }
 
+    // Merge all jobs by novel name so different sessions for the same novel share maximum progress
+    const novelMap = new Map<string, CloudJob>();
+    for (const job of cloudJobs.values()) {
+      const key = (job.fileName || "novel.txt").trim().toLowerCase();
+      if (!novelMap.has(key)) {
+        novelMap.set(key, job);
+      } else {
+        const merged = mergeMonotonicCloudJobs(novelMap.get(key)!, job);
+        novelMap.set(key, merged);
+      }
+    }
+
+    for (const [sId, job] of cloudJobs.entries()) {
+      const key = (job.fileName || "novel.txt").trim().toLowerCase();
+      if (novelMap.has(key)) {
+        const canonical = novelMap.get(key)!;
+        const finalJob = { ...canonical, sessionId: sId };
+        cloudJobs.set(sId, finalJob);
+        saveJobToDisk(sId, finalJob);
+      }
+    }
+
     // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
       if (j.status !== "running") return false;
@@ -851,7 +1225,7 @@ async function startCloudWorkerLoop() {
             job.lastActiveAt = Date.now();
             saveJobToDisk(job.sessionId || "legacy_default", job);
             if (!isSyntheticOrTestJob(job)) {
-              sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${job.fileName}</b> is fully translated and ready for download!`);
+              sendTelegramNotification(formatCompletionTelegramMessage(job));
             }
           }
         }
@@ -1212,7 +1586,8 @@ Translation Guidelines:
 
           for (const chunk of batchChunks) {
             chunk.status = "error";
-            chunk.errorMessage = `Attempt ${attemptCount}: ${cleanErr}. Auto-retrying...`;
+            chunk.attempts = (chunk.attempts || 0) + 1;
+            chunk.errorMessage = `Attempt ${chunk.attempts}: ${cleanErr}. Auto-retrying...`;
             chunk.durationMs = Date.now() - startBatchTime;
             chunk.lastErrorAt = Date.now();
           }
@@ -1305,6 +1680,43 @@ function saveTelegramSettings() {
 
 // Initial load of telegram settings
 loadTelegramSettings();
+
+// Helper to format rich completion Telegram notifications with chunks and English wordcount
+function formatCompletionTelegramMessage(job: CloudJob): string {
+  const totalChunks = job.chunks ? job.chunks.length : 0;
+  const completedChunks = job.chunks
+    ? job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length
+    : 0;
+  let wordCount = 0;
+  let totalChars = job.totalChineseChars || 0;
+  if (job.chunks) {
+    for (const c of job.chunks) {
+      if (c.status === "completed" && c.englishText) {
+        wordCount += c.englishText.split(/\s+/).filter(Boolean).length;
+      }
+      if (!totalChars && c.charCount) {
+        totalChars += c.charCount;
+      }
+    }
+  }
+  const now = Date.now();
+  const startedAt = job.startedAt || now;
+  const elapsedMinutes = Math.max(1, Math.round((now - startedAt) / 60000));
+  const durationStr =
+    elapsedMinutes >= 60
+      ? `${Math.floor(elapsedMinutes / 60)}h ${elapsedMinutes % 60}m`
+      : `${elapsedMinutes}m`;
+
+  return (
+    `🎉 <b>[Translation Completed]</b>\n\n` +
+    `📖 Novel: <b>${job.fileName}</b>\n` +
+    `✅ Chunks Completed: <b>${completedChunks} / ${totalChunks}</b> (100%)\n` +
+    `📝 Translated Words: <b>${wordCount.toLocaleString()}</b> English words\n` +
+    (totalChars > 0 ? `🇨🇳 Total Characters: <b>${totalChars.toLocaleString()}</b> Chinese characters\n` : "") +
+    (elapsedMinutes > 0 ? `⏱️ Total Duration: <b>${durationStr}</b>\n` : "") +
+    `\n✨ Your novel is fully translated and ready for download in EPUB or TXT format!`
+  );
+}
 
 // Safe send wrapper matching previous signature
 async function sendTelegramNotification(message: string): Promise<void> {
@@ -1416,43 +1828,100 @@ setInterval(() => {
 }, 60 * 1000);
 
 // -------------------------------------------------------------
-// Security & Access (Open workspace - no password required)
+// Security & Access (Passcode Gate for UI - Translation open)
 // -------------------------------------------------------------
+let MASTER_PASSCODE = (process.env.MASTER_PASSCODE || "").trim();
+const activeAuthTokens = new Set<string>();
+
 function verifyAuthToken(req: express.Request): { isValid: boolean } {
-  // Passwords/passcodes disabled per user configuration: always valid
-  return { isValid: true };
+  if (!MASTER_PASSCODE) {
+    return { isValid: true };
+  }
+  const token =
+    (req.headers["x-auth-token"] as string) ||
+    (req.headers.authorization ? req.headers.authorization.replace(/^Bearer\s+/i, "") : "") ||
+    "";
+
+  if (token && (activeAuthTokens.has(token) || token === MASTER_PASSCODE)) {
+    return { isValid: true };
+  }
+  return { isValid: false };
 }
 
-// Authentication status endpoint (public - always fully authenticated)
+// Authentication status endpoint (Checks passcode for UI gate)
 app.get("/api/auth/status", (req, res) => {
+  const hasPasscode = !!MASTER_PASSCODE;
+  const authCheck = verifyAuthToken(req);
+  const isVerified = !hasPasscode || authCheck.isValid;
+
   res.json({
-    authenticated: true,
+    authenticated: isVerified,
     requiresGoogle: false,
-    requiresPasscode: false,
+    requiresPasscode: hasPasscode,
     googleVerified: true,
-    passcodeVerified: true,
-    hasPasscodeConfigured: false,
+    passcodeVerified: isVerified,
+    hasPasscodeConfigured: hasPasscode,
   });
 });
 
-// Master Passcode Login Endpoint (Always succeeds - no password needed)
+// Master Passcode Login Endpoint
 app.post("/api/auth/login", (req, res) => {
+  const { passcode } = req.body || {};
+  const supplied = typeof passcode === "string" ? passcode.trim() : "";
+
+  if (!MASTER_PASSCODE || supplied === MASTER_PASSCODE) {
+    const sessionToken = `passcode_ok_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    activeAuthTokens.add(sessionToken);
+
+    res.json({
+      success: true,
+      authenticated: true,
+      token: sessionToken,
+      passcodeVerified: true,
+      requiresGoogle: false,
+      requiresPasscode: !!MASTER_PASSCODE,
+    });
+  } else {
+    res.status(401).json({
+      success: false,
+      error: "Incorrect passcode. Please try again.",
+      authenticated: false,
+      passcodeVerified: false,
+    });
+  }
+});
+
+// Set / Update passcode dynamically
+app.post("/api/auth/set-passcode", (req, res) => {
+  const { passcode, currentPasscode } = req.body || {};
+  if (MASTER_PASSCODE) {
+    const authCheck = verifyAuthToken(req);
+    if (!authCheck.isValid && currentPasscode !== MASTER_PASSCODE) {
+      return res.status(403).json({ success: false, error: "Incorrect current passcode." });
+    }
+  }
+  MASTER_PASSCODE = typeof passcode === "string" ? passcode.trim() : "";
   res.json({
     success: true,
-    authenticated: true,
-    token: "unrestricted_access",
-    passcodeVerified: true,
-    requiresGoogle: false,
-    requiresPasscode: false,
+    requiresPasscode: !!MASTER_PASSCODE,
+    hasPasscodeConfigured: !!MASTER_PASSCODE,
+    message: MASTER_PASSCODE ? "Passcode set successfully." : "Passcode protection removed.",
   });
 });
 
 // Logout endpoint
 app.post("/api/auth/logout", (req, res) => {
+  const token =
+    (req.headers["x-auth-token"] as string) ||
+    (req.headers.authorization ? req.headers.authorization.replace(/^Bearer\s+/i, "") : "") ||
+    "";
+  if (token) {
+    activeAuthTokens.delete(token);
+  }
   res.json({ success: true });
 });
 
-// Gatekeeper Middleware for Translation and Cloud Job endpoints (Open access - never blocks)
+// Gatekeeper Middleware for Translation and Cloud Job endpoints (Open access - starting translation never needs password)
 const requireAuthMiddleware: express.RequestHandler = (req, res, next) => {
   next();
 };
@@ -1471,7 +1940,7 @@ app.get("/api/health", (req, res) => {
     projectsSummary: summary,
     projects: projectsStatus,
     models: available,
-    primaryModel: available[0] || "gemini-3.5-flash",
+    primaryModel: available[0] || "gemini-3.8-flash",
     hasActiveCloudJob: !!getJobForSession(req),
     cloudJobStatus: getJobForSession(req)?.status || "idle",
   });
@@ -1549,7 +2018,7 @@ app.get("/api/cloud-job/status", (req, res) => {
 
   const includeFullText = req.query.full === "true";
 
-  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))).length;
   const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
 
@@ -1557,7 +2026,7 @@ app.get("/api/cloud-job/status", (req, res) => {
     targetJob.status = "completed";
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
     if (!isSyntheticOrTestJob(targetJob)) {
-      sendTelegramNotification(`🎉 <b>[Translation Completed]</b>\nYour novel <b>${targetJob.fileName}</b> is fully translated and ready for download!`);
+      sendTelegramNotification(formatCompletionTelegramMessage(targetJob));
     }
   }
 
@@ -1566,7 +2035,7 @@ app.get("/api/cloud-job/status", (req, res) => {
   let contiguousCount = 0;
   for (let i = 0; i < targetJob.chunks.length; i++) {
     const c = targetJob.chunks[i];
-    if (c && c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+    if (c && c.status === "completed" && ((c.englishText && c.englishText.trim().length > 0) || (c.wordCount && c.wordCount > 0))) {
       contiguousFrontierIndex = i;
       contiguousCount++;
     } else {
@@ -1575,12 +2044,20 @@ app.get("/api/cloud-job/status", (req, res) => {
   }
 
   const aheadCompletedCount = targetJob.chunks.filter(
-    (c) => c.status === "completed" && !!c.englishText?.trim() && c.index > contiguousFrontierIndex
+    (c) => c.status === "completed" && ((c.englishText && c.englishText.trim().length > 0) || (c.wordCount && c.wordCount > 0)) && c.index > contiguousFrontierIndex
   ).length;
+
+  const completedEnglishWords = targetJob.chunks
+    .filter((c) => c.status === "completed")
+    .reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+
+  const completedChars = targetJob.chunks
+    .filter((c) => c.status === "completed")
+    .reduce((acc, c) => acc + (c.charCount || 0), 0);
 
   // Render chunks (lightweight metadata by default to save 99%+ mobile data)
   const chunksData = targetJob.chunks.map((c) => {
-    const wordCount = c.englishText ? countEnglishWords(c.englishText) : 0;
+    const wordCount = c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0);
     if (includeFullText) {
       return { ...c, wordCount };
     }
@@ -1588,14 +2065,14 @@ app.get("/api/cloud-job/status", (req, res) => {
       id: c.id,
       index: c.index,
       chapterTitle: c.chapterTitle,
-      charCount: c.charCount,
+      charCount: c.charCount || 0,
       wordCount,
       status: c.status,
       attempts: c.attempts,
       lastErrorAt: c.lastErrorAt,
       errorMessage: c.errorMessage,
-      hasEnglish: !!(c.englishText && c.englishText.trim().length > 0),
-      hasChinese: !!(c.chineseText && c.chineseText.trim().length > 0),
+      hasEnglish: !!((c.englishText && c.englishText.trim().length > 0) || wordCount > 0),
+      hasChinese: !!((c.chineseText && c.chineseText.trim().length > 0) || (c.charCount && c.charCount > 0)),
     };
   });
 
@@ -1620,6 +2097,8 @@ app.get("/api/cloud-job/status", (req, res) => {
       contiguousCount,
       contiguousFrontierIndex,
       aheadCompletedCount,
+      completedEnglishWords,
+      completedChars,
       projectsSummary: quotaScheduler.getActiveProjectSummary(),
       chunks: chunksData,
     },
@@ -1788,15 +2267,107 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   res.json({ success: true, status: "running" });
 });
 
-// Stop and clear cloud job
-app.post("/api/cloud-job/stop", requireAuthMiddleware, (req, res) => {
+// Stop and clear cloud job permanently
+app.post("/api/cloud-job/stop", requireAuthMiddleware, async (req, res) => {
   const sessionId = getSessionId(req);
+  const body = req.body || {};
+  const explicitFileName = body.fileName || (req.headers["x-novel-filename"] ? decodeURIComponent(req.headers["x-novel-filename"] as string) : "");
+  const explicitJobId = body.jobId;
+  const clearAll = body.clearAll === true;
+
   const targetJob = getJobForSession(req);
   if (targetJob) {
     targetJob.status = "idle";
-    setJobForSession(targetJob.sessionId || sessionId, null);
   }
-  res.json({ success: true, message: "Cloud job removed." });
+  await deleteJobCompletely(targetJob, sessionId, explicitFileName, explicitJobId, clearAll);
+  res.json({
+    success: true,
+    message: clearAll ? "All cloud jobs and archives removed." : "Cloud job removed permanently.",
+  });
+});
+
+// Explicit permanent deletion endpoint
+app.post("/api/cloud-job/delete", requireAuthMiddleware, async (req, res) => {
+  const sessionId = getSessionId(req);
+  const body = req.body || {};
+  const explicitFileName = body.fileName || (req.headers["x-novel-filename"] ? decodeURIComponent(req.headers["x-novel-filename"] as string) : "");
+  const explicitJobId = body.jobId;
+  const clearAll = body.clearAll === true;
+
+  const targetJob = getJobForSession(req);
+  if (targetJob) {
+    targetJob.status = "idle";
+  }
+  await deleteJobCompletely(targetJob, sessionId, explicitFileName, explicitJobId, clearAll);
+  res.json({
+    success: true,
+    message: clearAll ? "All translation records removed." : "Novel translation deleted permanently.",
+  });
+});
+
+// List all distinct novels currently saved or translating on the server
+app.get("/api/cloud-job/list", requireAuthMiddleware, (req, res) => {
+  const novelMap = new Map<string, any>();
+
+  // 1. Gather from in-memory cloudJobs
+  for (const job of cloudJobs.values()) {
+    if (isSyntheticOrTestJob(job)) continue;
+    const name = job.fileName || "novel.txt";
+    const key = name.trim().toLowerCase();
+    const completed = (job.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+    const total = (job.chunks || []).length;
+    const wordCount = (job.chunks || []).reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+
+    if (!novelMap.has(key) || (job.lastActiveAt || 0) > (novelMap.get(key).lastActiveAt || 0)) {
+      novelMap.set(key, {
+        id: job.id,
+        sessionId: job.sessionId,
+        fileName: job.fileName,
+        status: job.status,
+        completedChunks: completed,
+        totalChunks: total,
+        wordCount,
+        lastActiveAt: job.lastActiveAt || job.startedAt || Date.now(),
+        startedAt: job.startedAt || Date.now(),
+      });
+    }
+  }
+
+  // 2. Also inspect disk JOBS_DIR for archived or other completed novel records
+  try {
+    if (fs.existsSync(JOBS_DIR)) {
+      const files = fs.readdirSync(JOBS_DIR);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        try {
+          const content = fs.readFileSync(path.join(JOBS_DIR, f), "utf-8");
+          const parsed = JSON.parse(content);
+          if (parsed && parsed.fileName && !isSyntheticOrTestJob(parsed)) {
+            const key = parsed.fileName.trim().toLowerCase();
+            if (!novelMap.has(key)) {
+              const completed = (parsed.chunks || []).filter((c: any) => c.status === "completed" && !!c.englishText?.trim()).length;
+              const total = parsed.chunks ? parsed.chunks.length : 0;
+              const wordCount = (parsed.chunks || []).reduce((acc: number, c: any) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+              novelMap.set(key, {
+                id: parsed.id || f.replace(".json", ""),
+                sessionId: parsed.sessionId || "disk",
+                fileName: parsed.fileName,
+                status: parsed.status || (completed === total && total > 0 ? "completed" : "idle"),
+                completedChunks: completed,
+                totalChunks: total,
+                wordCount,
+                lastActiveAt: parsed.lastActiveAt || parsed.startedAt || Date.now(),
+                startedAt: parsed.startedAt || Date.now(),
+              });
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  const novels = Array.from(novelMap.values()).sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+  res.json({ success: true, novels });
 });
 
 // Sync manual edit to a chunk or retry outcome
@@ -1997,62 +2568,551 @@ Translate the above Chinese text directly into English:`;
 // Auto-extract terminology and character names from a text sample
 app.post("/api/extract-glossary", requireAuthMiddleware, async (req, res) => {
   try {
-    const { text } = req.body;
+    const { text, novelTitle } = req.body;
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Missing or invalid 'text' field." });
       return;
     }
 
-    // Use up to the first 12,000 characters for glossary extraction
-    const sampleText = text.slice(0, 12000);
-
-    const prompt = `Analyze this Chinese text sample and extract key proper nouns, character names, locations, factions/organizations, or specialized recurring terms. For each term, provide its accurate English translation or official Romanization (Pinyin with capitalization).
-
-Return a valid JSON array of objects with keys: "original", "translation", "category", and "notes".
-Categories can be: "Character", "Location", "Faction", "Realm/Rank", or "Concept".
-
-Example response format:
-[
-  {"original": "萧炎", "translation": "Xiao Yan", "category": "Character", "notes": "Main protagonist"},
-  {"original": "斗气大陆", "translation": "Dou Qi Continent", "category": "Location", "notes": "Setting world"}
-]
-
-Chinese text sample:
-"""
-${sampleText}
-"""`;
-
-    const { text: responseText } = await generateWithQuotaScheduler(
-      prompt,
-      "You are a terminology extraction assistant. Return valid JSON only.",
-      0,
-      4,
-      3000
-    );
-
-    let terms = [];
-    try {
-      terms = JSON.parse(responseText || "[]");
-    } catch {
-      // If response had markdown codeblocks ```json ... ```
-      const match = responseText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (match && match[1]) {
-        try {
-          terms = JSON.parse(match[1]);
-        } catch {
-          terms = [];
-        }
-      } else {
-        terms = [];
-      }
-    }
-
+    const terms = await autoGenerateNovelGlossary(text, novelTitle);
     res.json({ success: true, terms });
   } catch (err: any) {
     console.error("Extract Glossary Error:", err);
     res.status(500).json({
       error: err.message || "Failed to extract glossary terms.",
     });
+  }
+});
+
+// Dedicated Novel Glossary Auto-Scanner for reader and explore
+app.post("/api/novel-glossary/auto-scan", async (req, res) => {
+  try {
+    const { text, novelTitle, author } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'text' field." });
+      return;
+    }
+
+    const terms = await autoGenerateNovelGlossary(text, novelTitle || undefined);
+    res.json({ success: true, terms });
+  } catch (err: any) {
+    console.error("Auto scan glossary error:", err);
+    res.status(500).json({
+      error: err.message || "Failed to auto-scan novel glossary.",
+    });
+  }
+});
+
+// ------------------------------------------------------------------
+// STORE & NOVEL SCRAPER ENDPOINTS
+// ------------------------------------------------------------------
+
+// In-memory cache for store search (15 min TTL) to make searches and store comparisons instantaneous
+interface StoreSearchCacheEntry {
+  results: any[];
+  timestamp: number;
+}
+const storeSearchCache = new Map<string, StoreSearchCacheEntry>();
+const STORE_SEARCH_CACHE_TTL_MS = 15 * 60 * 1000;
+
+// Universal Store Search Endpoint
+app.get("/api/store/search", requireAuthMiddleware, async (req, res) => {
+  try {
+    const query = (req.query.q as string) || "";
+    const site = (req.query.site as string) || "all";
+
+    if (!query.trim()) {
+      res.json({ results: [] });
+      return;
+    }
+
+    const cacheKey = `search:${site}:${query.toLowerCase().trim()}`;
+    const cached = storeSearchCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && (now - cached.timestamp) < STORE_SEARCH_CACHE_TTL_MS) {
+      res.json({ results: cached.results, cached: true });
+      return;
+    }
+
+    const results = await searchStoreNovels(query, site);
+    // Translate top search results to English automatically (0 Gemini quota used)
+    await translateExploreItemsInPlace(results.slice(0, 30));
+
+    storeSearchCache.set(cacheKey, { results, timestamp: now });
+    if (storeSearchCache.size > 200) {
+      const oldestKey = storeSearchCache.keys().next().value;
+      if (oldestKey) storeSearchCache.delete(oldestKey);
+    }
+
+    res.json({ results, cached: false });
+  } catch (err: any) {
+    console.error("Store Search Error:", err);
+    res.status(500).json({ error: err.message || "Store search failed." });
+  }
+});
+
+// In-memory cache for explore feed (20 min TTL) for instant tab/filter switching
+interface ExploreCacheEntry {
+  data: any[];
+  timestamp: number;
+}
+const exploreCache = new Map<string, ExploreCacheEntry>();
+const EXPLORE_CACHE_TTL_MS = 20 * 60 * 1000;
+
+// Explorer & Discovery Leaderboards Endpoint (Filter by Year, Pairing, Trope, Keywords & Sort by Points/Likes)
+app.get("/api/store/explore", requireAuthMiddleware, async (req, res) => {
+  try {
+    const site = (req.query.site as string) || "all";
+    const year = (req.query.year as string) || "all";
+    const orientation = (req.query.orientation as string) || "all";
+    const rawTagParam = (req.query.tags as string) || (req.query.tag as string) || "all";
+    const tags = rawTagParam === "all" ? [] : rawTagParam.split(",").map((t) => t.trim()).filter(Boolean);
+    const tag = tags[0] || "all";
+    const query = (req.query.q as string) || "";
+    const sort = (req.query.sort as "points" | "likes" | "aiquLikes" | "recent" | "chapters") || "points";
+    const page = parseInt((req.query.page as string) || "1", 10);
+    const forceRefresh = req.query.refresh === "true" || req.query.fresh === "true";
+
+    const collectionKey = `explore_col_v3:${site}:${year}:${orientation}:${tags.slice().sort().join(",")}:${tag}:${query.toLowerCase().trim()}:${sort}`;
+    const cached = exploreCache.get(collectionKey);
+    const now = Date.now();
+    let allItems: any[];
+
+    if (!forceRefresh && cached && (now - cached.timestamp) < EXPLORE_CACHE_TTL_MS) {
+      allItems = cached.data;
+    } else {
+      allItems = await scrapeExploreNovels({
+        site,
+        year,
+        orientation,
+        tag,
+        tags,
+        query,
+        sort: sort as any,
+        page,
+      });
+
+      // Strictly sanitize any legacy aberrant aiquLikes (> 10000)
+      for (const it of allItems) {
+        if (it.aiquLikes !== undefined && (it.aiquLikes <= 0 || it.aiquLikes > 10000)) {
+          delete it.aiquLikes;
+        }
+      }
+
+      exploreCache.set(collectionKey, { data: allItems, timestamp: now });
+      if (exploreCache.size > 150) {
+        const oldestKey = exploreCache.keys().next().value;
+        if (oldestKey) exploreCache.delete(oldestKey);
+      }
+    }
+
+    const requestedPageSize = parseInt((req.query.pageSize as string) || "20", 10);
+    const PAGE_SIZE = isNaN(requestedPageSize) || requestedPageSize < 1 ? 20 : Math.min(100, requestedPageSize);
+    const pageNum = Math.max(1, page);
+    const startIndex = (pageNum - 1) * PAGE_SIZE;
+    const pageItems = allItems.slice(startIndex, startIndex + PAGE_SIZE);
+
+    // Auto-translate card details (title, author, summary) into English via Google Translate (0 Gemini quota)
+    await translateExploreItemsInPlace(pageItems);
+
+    // Non-blocking background enrichment so the response is returned immediately to the client!
+    enrichAiquNovelItems(pageItems).catch(() => {});
+
+    res.json({
+      success: true,
+      total: allItems.length,
+      page: pageNum,
+      pageSize: PAGE_SIZE,
+      hasMore: startIndex + PAGE_SIZE < allItems.length,
+      items: pageItems,
+      cached: Boolean(cached),
+    });
+  } catch (err: any) {
+    console.error("Store Explore Error:", err);
+    res.status(500).json({ error: err.message || "Failed to explore novel collections." });
+  }
+});
+
+// Dedicated Google Translate helper endpoint (0 Gemini quota consumed)
+app.post("/api/store/translate-text", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { text, from = "zh-CN", to = "en" } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Missing text to translate." });
+      return;
+    }
+    const translated = await translateWithGoogle(text, from, to);
+    res.json({ success: true, original: text, translated });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed to translate text." });
+  }
+});
+
+// Quick Chapter Peek Endpoint for reading preview drawer
+app.post("/api/store/peek-chapter", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { novelUrl, siteId, title, author, intro, coverUrl, fileSize, targetIndex, targetChapterUrl } = req.body;
+    if (!novelUrl && !title) {
+      res.status(400).json({ error: "Missing 'novelUrl' or 'title' parameter." });
+      return;
+    }
+
+    let detail = await fetchNovelTOC(novelUrl || "", siteId || "general", title, author, intro, coverUrl, fileSize);
+    if ((!detail.chapters || detail.chapters.length === 0) && siteId === "jjwxc") {
+      const mirrors = await findNovelMirrors(title || "", author || "");
+      if (mirrors.length > 0) {
+        detail = await fetchNovelTOC(mirrors[0].novelUrl, mirrors[0].siteId, title, author, intro, coverUrl, fileSize);
+      }
+    }
+
+    if (!detail.chapters || detail.chapters.length === 0) {
+      res.status(404).json({ error: "No readable chapters found for this title." });
+      return;
+    }
+
+    let targetChapter = detail.chapters[0];
+    if (typeof targetIndex === "number" && targetIndex >= 1 && targetIndex <= detail.chapters.length) {
+      targetChapter = detail.chapters[targetIndex - 1];
+    } else if (targetChapterUrl) {
+      const found = detail.chapters.find((c) => c.url === targetChapterUrl);
+      if (found) targetChapter = found;
+    }
+
+    const chapterBody = await fetchChapterText(targetChapter.url);
+
+    // Auto-translate chapter content and title with Google Translate (0 Gemini quota, 0 client mobile data)
+    let englishContent = "";
+    const rawChapterTitle = targetChapter.title || `Chapter ${targetChapter.index}`;
+    let chapterTitleEn = rawChapterTitle;
+
+    try {
+      const [translatedBody, translatedTitle] = await Promise.allSettled([
+        translateChapterWithGoogle(chapterBody),
+        hasChineseCharacters(rawChapterTitle)
+          ? translateWithGoogle(rawChapterTitle, "zh-CN", "en", 3000)
+          : Promise.resolve(rawChapterTitle),
+      ]);
+      if (translatedBody.status === "fulfilled" && translatedBody.value) {
+        englishContent = translatedBody.value;
+      }
+      if (translatedTitle.status === "fulfilled" && translatedTitle.value) {
+        chapterTitleEn = translatedTitle.value;
+      }
+    } catch (translateErr) {
+      console.warn("Peek chapter auto-translate non-fatal error:", translateErr);
+    }
+
+    res.json({
+      success: true,
+      title: detail.title || title,
+      author: detail.author || author,
+      chapterTitle: chapterTitleEn || rawChapterTitle,
+      chapterTitleZh: rawChapterTitle,
+      chapterTitleEn,
+      chapterIndex: targetChapter.index,
+      totalChapters: detail.chapters.length,
+      content: chapterBody,
+      englishContent,
+      novelUrl: detail.novelUrl || novelUrl,
+      siteId: detail.siteId || siteId,
+      allChapters: detail.chapters,
+    });
+  } catch (err: any) {
+    console.error("Peek chapter error:", err);
+    res.status(500).json({ error: err.message || "Failed to peek novel chapter." });
+  }
+});
+
+// Dedicated Chapter Fetch Endpoint for rapid chapter navigation
+app.post("/api/store/fetch-chapter", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { chapterUrl, chapterTitle } = req.body;
+    if (!chapterUrl) {
+      res.status(400).json({ error: "Missing 'chapterUrl' parameter." });
+      return;
+    }
+
+    const content = await fetchChapterText(chapterUrl);
+    const rawChapterTitle = chapterTitle || "Chapter";
+    let englishContent = "";
+    let chapterTitleEn = rawChapterTitle;
+
+    try {
+      const [translatedBody, translatedTitle] = await Promise.allSettled([
+        translateChapterWithGoogle(content),
+        hasChineseCharacters(rawChapterTitle)
+          ? translateWithGoogle(rawChapterTitle, "zh-CN", "en", 3000)
+          : Promise.resolve(rawChapterTitle),
+      ]);
+      if (translatedBody.status === "fulfilled" && translatedBody.value) {
+        englishContent = translatedBody.value;
+      }
+      if (translatedTitle.status === "fulfilled" && translatedTitle.value) {
+        chapterTitleEn = translatedTitle.value;
+      }
+    } catch (translateErr) {
+      console.warn("Fetch chapter auto-translate non-fatal error:", translateErr);
+    }
+
+    res.json({
+      success: true,
+      chapterTitle: chapterTitleEn || rawChapterTitle,
+      chapterTitleZh: rawChapterTitle,
+      chapterTitleEn,
+      content,
+      englishContent,
+    });
+  } catch (err: any) {
+    console.error("Fetch chapter error:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch chapter text." });
+  }
+});
+
+// On-demand instant translation for a single chapter directly in Reader mode
+app.post("/api/store/translate-single-chapter", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { content, chapterTitle, novelTitle, glossary } = req.body;
+    if (!content || !content.trim()) {
+      res.status(400).json({ error: "Missing 'content' parameter to translate." });
+      return;
+    }
+
+    let glossaryBlock = "";
+    if (Array.isArray(glossary) && glossary.length > 0) {
+      const formattedTerms = glossary
+        .filter((t: any) => t && t.original && t.translation)
+        .map((t: any) => `- "${t.original}" -> "${t.translation}"${t.category ? ` (${t.category})` : ""}`)
+        .join("\n");
+      if (formattedTerms) {
+        glossaryBlock = `\n\nYou MUST strictly adhere to the following glossary mappings for character names, locations, and terminology across all chapters:\n${formattedTerms}\n`;
+      }
+    }
+
+    const cleanContent = content.trim();
+    const systemPrompt = `You are an elite literary Chinese-to-English web novel translator. Translate faithfully into fluent, captivating English prose without conversational commentary. Preserve names, titles, and dialogue nuance naturally.${glossaryBlock}`;
+
+    let translatedEnglish = "";
+    let modelUsed = "";
+
+    // If chapter text is <= 4000 characters, translate in a single high-speed pass
+    if (cleanContent.length <= 4000) {
+      const userPrompt = `Translate the following chapter into natural, immersive English:\n\nNovel: ${
+        novelTitle || "Web Novel"
+      }\nChapter: ${chapterTitle || "Chapter"}\n\nOriginal Text:\n"""\n${cleanContent}\n"""\n\nEnglish Translation:`;
+
+      const result = await generateWithQuotaScheduler(userPrompt, systemPrompt, 0, 5, 2000);
+      translatedEnglish = result.text.trim();
+      modelUsed = result.modelUsed;
+    } else {
+      // Long chapter (> 4000 chars): partition into safe ~3000 character chunks to prevent 504 Deadline Exceeded
+      const paragraphs = cleanContent.split(/\r?\n+/).map((p: string) => p.trim()).filter((p: string) => p.length > 0);
+      const chunks: string[] = [];
+      let currentChunk = "";
+
+      for (const p of paragraphs) {
+        if ((currentChunk + "\n\n" + p).length > 3000 && currentChunk.length > 0) {
+          chunks.push(currentChunk);
+          currentChunk = p;
+        } else {
+          currentChunk = currentChunk ? currentChunk + "\n\n" + p : p;
+        }
+      }
+      if (currentChunk) chunks.push(currentChunk);
+
+      // Bound chunks to a safe limit (max 5 chunks)
+      const targetChunks = chunks.slice(0, 5);
+      const translatedParts: string[] = [];
+
+      for (let i = 0; i < targetChunks.length; i++) {
+        const subPrompt = `Translate this part (${i + 1}/${targetChunks.length}) of the chapter into natural, immersive English:\n\nNovel: ${
+          novelTitle || "Web Novel"
+        }\nChapter: ${chapterTitle || "Chapter"}\n\nOriginal Text:\n"""\n${targetChunks[i]}\n"""\n\nEnglish Translation:`;
+
+        const resPart = await generateWithQuotaScheduler(subPrompt, systemPrompt, 0, 4, 1500);
+        translatedParts.push(resPart.text.trim());
+        modelUsed = resPart.modelUsed;
+      }
+      translatedEnglish = translatedParts.join("\n\n");
+    }
+
+    res.json({
+      success: true,
+      chapterTitle: chapterTitle || "Chapter",
+      englishContent: translatedEnglish,
+      modelUsed,
+    });
+  } catch (err: any) {
+    console.error("Translate single chapter error:", err);
+    res.status(500).json({ error: formatCleanErrorMessage(err) || "Failed to translate chapter." });
+  }
+});
+
+// Find readable mirrors across all 11 library sites for any novel title (JJWXC, Changpei, etc.)
+app.post("/api/store/find-mirrors", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { title, author } = req.body;
+    if (!title) {
+      res.status(400).json({ error: "Missing 'title' parameter." });
+      return;
+    }
+
+    const mirrors = await findNovelMirrors(title, author);
+    res.json({ success: true, title, mirrors });
+  } catch (err: any) {
+    console.error("Find Mirrors Error:", err);
+    res.status(500).json({ error: err.message || "Failed to find novel mirrors." });
+  }
+});
+
+// Fetch Novel Table of Contents with automatic cross-mirror fallback
+app.post("/api/store/fetch-toc", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { novelUrl, siteId, title, author, intro, coverUrl, fileSize } = req.body;
+    if (!novelUrl) {
+      res.status(400).json({ error: "Missing 'novelUrl' parameter." });
+      return;
+    }
+
+    // If siteId is jjwxc or external, try finding mirrors if direct TOC fails
+    if (siteId === "jjwxc") {
+      const mirrors = await findNovelMirrors(title || "", author || "");
+      if (mirrors.length > 0) {
+        // Try fetching TOC from top mirror
+        try {
+          const topMirror = mirrors[0];
+          const mirrorToc = await fetchNovelTOC(topMirror.novelUrl, topMirror.siteId, title, author, intro, coverUrl, fileSize);
+          if (mirrorToc.chapters && mirrorToc.chapters.length > 0) {
+            res.json({
+              ...mirrorToc,
+              resolvedMirror: {
+                siteId: topMirror.siteId,
+                siteName: topMirror.siteName,
+                novelUrl: topMirror.novelUrl,
+              },
+              allMirrors: mirrors,
+            });
+            return;
+          }
+        } catch {}
+      }
+
+      // If no mirror TOC yet, return empty chapters with available mirrors
+      res.json({
+        title: title || "JJWXC Novel",
+        author: author || "Unknown",
+        novelUrl,
+        intro: intro || "No summary available.",
+        coverUrl: coverUrl || "",
+        fileSize: fileSize || "1.95 MB",
+        chapters: [],
+        allMirrors: mirrors,
+        isExternalSource: true,
+      });
+      return;
+    }
+
+    const detail = await fetchNovelTOC(novelUrl, siteId || "general", title, author, intro, coverUrl, fileSize);
+    res.json(detail);
+  } catch (err: any) {
+    console.error("Fetch TOC Error:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch novel table of contents." });
+  }
+});
+
+// Scrape and compile chapters for translation import (supports import all / full novel download)
+app.post("/api/store/import-novel", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { novelUrl, siteId, title, startChapter = 1, endChapter, chapters = [], importAll = false } = req.body;
+
+    let targetChapters = chapters;
+    if (!targetChapters || targetChapters.length === 0) {
+      let toc = await fetchNovelTOC(novelUrl, siteId || "general", title);
+      if ((!toc.chapters || toc.chapters.length === 0) && siteId === "jjwxc") {
+        const mirrors = await findNovelMirrors(title || "", req.body.author || "");
+        if (mirrors.length > 0) {
+          toc = await fetchNovelTOC(mirrors[0].novelUrl, mirrors[0].siteId, title, req.body.author);
+        }
+      }
+      targetChapters = toc.chapters;
+    }
+
+    const maxAvailable = targetChapters.length || 1;
+    const effectiveEnd = importAll || !endChapter || endChapter >= maxAvailable ? maxAvailable : endChapter;
+
+    // Filter by index range
+    const selected = targetChapters.filter(
+      (c: any) => c.index >= startChapter && c.index <= effectiveEnd
+    );
+
+    if (selected.length === 0) {
+      res.status(400).json({ error: "No chapters found in the selected range." });
+      return;
+    }
+
+    // Fetch chapter contents with batch concurrency (8 at a time for fast download)
+    const chapterTexts: string[] = [];
+    const BATCH_SIZE = 8;
+
+    for (let i = 0; i < selected.length; i += BATCH_SIZE) {
+      const batch = selected.slice(i, i + BATCH_SIZE);
+      const fetched = await Promise.all(
+        batch.map(async (item: any) => {
+          const body = await fetchChapterText(item.url);
+          const chHeader = item.title ? `${item.title}\n\n` : `第${item.index}章\n\n`;
+          return `${chHeader}${body}`;
+        })
+      );
+      chapterTexts.push(...fetched);
+    }
+
+    const fullRawText = chapterTexts.filter(Boolean).join("\n\n\n");
+
+    res.json({
+      success: true,
+      title: title || "Imported Web Novel",
+      totalChaptersScraped: selected.length,
+      rawText: fullRawText,
+    });
+  } catch (err: any) {
+    console.error("Import Novel Error:", err);
+    res.status(500).json({ error: err.message || "Failed to scrape novel chapters." });
+  }
+});
+
+// Authentic Google Text-to-Speech Audio Stream Proxy (100% Classic Google US Female Voice)
+app.get("/api/tts/google-audio", async (req, res) => {
+  const text = (req.query.text as string) || "";
+  const lang = (req.query.lang as string) || "en";
+  if (!text.trim()) {
+    res.status(400).send("Text is required");
+    return;
+  }
+  try {
+    const cleanText = text.trim().slice(0, 200);
+    const googleTtsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${encodeURIComponent(
+      lang
+    )}&client=tw-ob&q=${encodeURIComponent(cleanText)}`;
+
+    const audioRes = await fetch(googleTtsUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Referer: "https://translate.google.com/",
+      },
+    });
+
+    if (!audioRes.ok) {
+      res.status(audioRes.status).send("Failed to stream Google TTS audio.");
+      return;
+    }
+
+    const arrayBuffer = await audioRes.arrayBuffer();
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(Buffer.from(arrayBuffer));
+  } catch (err: any) {
+    console.error("Google TTS Audio Error:", err);
+    res.status(500).send(err.message || "Google TTS stream error");
   }
 });
 
@@ -2180,6 +3240,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    console.log(`[Server] Serving static files from ${distPath}, CWD: ${process.cwd()}`);
     // Cache static immutable assets (JS, CSS, images, fonts) for 1 year to save cellular data on return visits
     app.use(
       express.static(distPath, {

@@ -86,12 +86,29 @@ export function formatCleanErrorMessage(rawErr: any): string {
   try {
     const parsed = JSON.parse(msg);
     if (parsed.error?.message) {
+      if (
+        parsed.error.code === 504 ||
+        parsed.error.status === "DEADLINE_EXCEEDED" ||
+        parsed.error.message.includes("Deadline expired") ||
+        parsed.error.message.includes("504")
+      ) {
+        return "AI translation timed out (Google Gemini 504 Deadline Exceeded). Please retry in a moment.";
+      }
       const firstLine = parsed.error.message.split("\n")[0].trim();
       return firstLine || parsed.error.message;
     }
   } catch {
     // Not a JSON string
   }
+
+  if (
+    msg.includes("DEADLINE_EXCEEDED") ||
+    msg.includes("Deadline expired") ||
+    (msg.includes("504") && msg.includes("Gateway"))
+  ) {
+    return "AI translation timed out (Google Gemini 504 Deadline Exceeded). Please retry in a moment.";
+  }
+
   return msg.length > 200 ? msg.slice(0, 200) + "..." : msg;
 }
 
@@ -205,6 +222,7 @@ export class QuotaAwareKeyScheduler {
           headers: {
             "User-Agent": "aistudio-build",
           },
+          timeout: 35000,
         },
       });
 

@@ -9,7 +9,10 @@ import {
   Eye,
   EyeOff,
   Clock,
-  Settings2
+  Settings2,
+  Lock,
+  KeyRound,
+  ShieldCheck,
 } from "lucide-react";
 
 interface TelegramSettings {
@@ -44,6 +47,13 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   const [testError, setTestError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
+  // Passcode Gate settings state
+  const [newPasscode, setNewPasscode] = useState("");
+  const [showPasscodeInput, setShowPasscodeInput] = useState(false);
+  const [passcodeMsg, setPasscodeMsg] = useState<string | null>(null);
+  const [isUpdatingPasscode, setIsUpdatingPasscode] = useState(false);
+  const [hasPasscode, setHasPasscode] = useState(false);
+
   // Fetch current settings on open
   useEffect(() => {
     if (isOpen) {
@@ -58,8 +68,39 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
           console.error("Failed to load Telegram settings:", err);
           setIsLoading(false);
         });
+
+      fetch("/api/auth/status")
+        .then((res) => res.json())
+        .then((data) => {
+          setHasPasscode(data.hasPasscodeConfigured || false);
+        })
+        .catch(() => {});
     }
   }, [isOpen]);
+
+  const handleUpdatePasscode = async () => {
+    setIsUpdatingPasscode(true);
+    setPasscodeMsg(null);
+    try {
+      const res = await fetch("/api/auth/set-passcode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode: newPasscode.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setHasPasscode(data.hasPasscodeConfigured);
+        setPasscodeMsg(data.message || "Passcode updated.");
+        setNewPasscode("");
+      } else {
+        setPasscodeMsg(data.error || "Failed to update passcode.");
+      }
+    } catch {
+      setPasscodeMsg("Error connecting to server.");
+    } finally {
+      setIsUpdatingPasscode(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -341,6 +382,85 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Master Passcode Protection Section */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400">
+                    <Lock className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      Master Passcode Gate
+                    </h4>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {hasPasscode
+                        ? "Passcode gate active (UI requires password to open)."
+                        : "Passcode gate inactive (open UI access)."}
+                    </p>
+                  </div>
+                </div>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    hasPasscode
+                      ? "bg-purple-100 text-purple-700 border-purple-200 dark:bg-purple-950 dark:text-purple-300 dark:border-purple-800"
+                      : "bg-slate-200 text-slate-600 border-slate-300 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700"
+                  }`}
+                >
+                  {hasPasscode ? "Protected" : "Unprotected"}
+                </span>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800/60 space-y-2">
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <KeyRound className="h-3.5 w-3.5 text-purple-500" />
+                  <span>{hasPasscode ? "Change or Clear Passcode" : "Set Master Passcode"}</span>
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type={showPasscodeInput ? "text" : "password"}
+                      value={newPasscode}
+                      onChange={(e) => setNewPasscode(e.target.value)}
+                      placeholder={hasPasscode ? "Enter new passcode (or leave empty to clear)..." : "Enter new passcode..."}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-1.5 pl-3 pr-8 text-xs text-slate-900 dark:text-slate-100 focus:border-purple-500 focus:outline-none transition"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPasscodeInput(!showPasscodeInput)}
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      {showPasscodeInput ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleUpdatePasscode}
+                    disabled={isUpdatingPasscode}
+                    className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs shadow-xs transition disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1"
+                  >
+                    {isUpdatingPasscode ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <span>Save Passcode</span>
+                    )}
+                  </button>
+                </div>
+
+                {passcodeMsg && (
+                  <p className="text-[11px] font-medium text-purple-600 dark:text-purple-400 flex items-center gap-1 animate-in fade-in">
+                    <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                    <span>{passcodeMsg}</span>
+                  </p>
+                )}
+                <p className="text-[10px] text-slate-400 leading-normal">
+                  Note: Translation jobs and API operations continue running without requiring passcode authentication.
+                </p>
+              </div>
+            </div>
 
             {/* Save Button */}
             <div className="pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-end gap-3">

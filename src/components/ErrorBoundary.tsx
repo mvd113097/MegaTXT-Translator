@@ -1,5 +1,5 @@
 import React, { Component, ErrorInfo, ReactNode } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 
 interface Props {
   children: ReactNode;
@@ -32,6 +32,15 @@ export class ErrorBoundary extends React.Component<Props, State> {
     window.location.reload();
   };
 
+  public handleClearStateAndReload = () => {
+    try {
+      localStorage.removeItem("megatext_reader_session_v1");
+      localStorage.removeItem("megatext_translator_session_v1");
+    } catch {}
+    this.setState({ hasError: false, error: null });
+    window.location.reload();
+  };
+
   public render() {
     if (this.state.hasError) {
       return (
@@ -44,14 +53,29 @@ export class ErrorBoundary extends React.Component<Props, State> {
             <p className="text-xs text-slate-500 dark:text-slate-400">
               An unexpected display issue occurred. You can return to your workspace without losing translation progress.
             </p>
-            <button
-              type="button"
-              onClick={this.handleReset}
-              className="inline-flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-700 transition cursor-pointer"
-            >
-              <RefreshCw className="h-4 w-4" />
-              <span>Reload Workspace</span>
-            </button>
+            {this.state.error?.message && (
+              <p className="text-[11px] font-mono bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 p-2 rounded-xl text-left truncate">
+                {this.state.error.message}
+              </p>
+            )}
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={this.handleReset}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-700 transition cursor-pointer"
+              >
+                <RefreshCw className="h-4 w-4" />
+                <span>Reload Workspace</span>
+              </button>
+              <button
+                type="button"
+                onClick={this.handleClearStateAndReload}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition cursor-pointer"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>Reset Cache & Reload</span>
+              </button>
+            </div>
           </div>
         </div>
       );
