@@ -871,27 +871,29 @@ export default function App() {
     setIsStarting(true);
 
     try {
-      // 1. Try lightweight resume first (avoids sending 8-9MB payload if job exists on server)
-      const resumeRes = await fetch("/api/cloud-job/resume", {
-        method: "POST",
-        headers: getAuthHeaders(),
-      });
+      // 1. Try lightweight resume first ONLY if the server already has a job for this exact same novel
+      if (serverCloudJob && serverCloudJob.fileName === session.fileName && serverCloudJob.status !== "completed") {
+        const resumeRes = await fetch("/api/cloud-job/resume", {
+          method: "POST",
+          headers: getAuthHeaders(),
+        });
 
-      if (resumeRes.ok) {
-        const resumeData = await resumeRes.json();
-        if (resumeData && resumeData.success) {
-          setIsRunning(true);
-          setIsPaused(false);
-          setToastData({
-            message: "☁️ Cloud Mode Resumed: The server is actively translating your novel in the background.",
-            type: "success",
-          });
-          setTimeout(() => setToastData(null), 8000);
-          return;
+        if (resumeRes.ok) {
+          const resumeData = await resumeRes.json();
+          if (resumeData && resumeData.success) {
+            setIsRunning(true);
+            setIsPaused(false);
+            setToastData({
+              message: "☁️ Cloud Mode Resumed: The server is actively translating your novel in the background.",
+              type: "success",
+            });
+            setTimeout(() => setToastData(null), 8000);
+            return;
+          }
         }
       }
 
-      // 2. If job not found on server or needs initial launch, send start request
+      // 2. Launch full job payload to server (with all 561 chunks)
       const res = await fetch("/api/cloud-job/start", {
         method: "POST",
         headers: getAuthHeaders(),
