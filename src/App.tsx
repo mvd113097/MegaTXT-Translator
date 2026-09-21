@@ -67,6 +67,12 @@ import {
 
 const STORAGE_KEY = "megatext_translator_session_v1";
 
+const isSameNovel = (name1: string | undefined, name2: string | undefined) => {
+  if (!name1 || !name2) return false;
+  const norm = (s: string) => s.replace(/\.txt$/i, "").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
+  return norm(name1) === norm(name2);
+};
+
 export default function App() {
   // Theme state
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -762,12 +768,14 @@ export default function App() {
     const startPolling = () => {
       if (timer) clearInterval(timer);
       syncCloudProgress(false, false);
-      // Poll every 10 seconds while tab is actively being watched
-      timer = setInterval(() => {
-        if (!document.hidden) {
-          syncCloudProgress(false, false);
-        }
-      }, 10000);
+      // Poll every 10 seconds ONLY while translation is actively running to save mobile data
+      if (isRunning && !isPaused) {
+        timer = setInterval(() => {
+          if (!document.hidden) {
+            syncCloudProgress(false, false);
+          }
+        }, 10000);
+      }
     };
 
     const stopPolling = () => {
@@ -799,7 +807,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", startPolling);
     };
-  }, [mode]);
+  }, [mode, isRunning, isPaused]);
 
   // Dynamic Browser Wake-Lock & Keep-Alive (Method 3)
   // When a translation is actively running, sends a tiny keep-alive pulse every 90 seconds
@@ -1879,8 +1887,7 @@ Export Timestamp: ${new Date().toLocaleString()}
           getAuthHeaders={getAuthHeaders}
           sessionChunks={
             session &&
-            session.fileName.replace(/\.txt$/i, "").trim().toLowerCase() ===
-              readerNovel.novelTitle.trim().toLowerCase()
+            isSameNovel(session.fileName, readerNovel.novelTitle)
               ? session.chunks
               : undefined
           }
