@@ -162,54 +162,68 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
   if (!diskJob) return fsJob;
   if (!fsJob) return diskJob;
 
-  const baseJob = fsJob.chunks && fsJob.chunks.length > 0 ? fsJob : diskJob;
+  // Always prefer the job with more chunks to prevent accidental truncation on container restart
+  const baseJob = (fsJob.chunks?.length || 0) >= (diskJob.chunks?.length || 0) ? fsJob : diskJob;
   const otherJob = baseJob === fsJob ? diskJob : fsJob;
 
+  const baseChunkMap = new Map((baseJob.chunks || []).map((c) => [c.index, c]));
   const otherChunkMap = new Map((otherJob.chunks || []).map((c) => [c.index, c]));
 
-  const reconciledChunks: ServerTextChunk[] = (baseJob.chunks || []).map((bChunk) => {
-    const oChunk = otherChunkMap.get(bChunk.index);
-    const bCompleted = bChunk.status === "completed" && !!bChunk.englishText?.trim();
-    const oCompleted = oChunk?.status === "completed" && !!oChunk?.englishText?.trim();
+  const allIndices = Array.from(
+    new Set([...baseChunkMap.keys(), ...otherChunkMap.keys()])
+  ).sort((a, b) => a - b);
+
+  const reconciledChunks: ServerTextChunk[] = allIndices.map((idx) => {
+    const bChunk = baseChunkMap.get(idx);
+    const oChunk = otherChunkMap.get(idx);
+    const primary = bChunk || oChunk!;
+
+    const bCompleted = bChunk?.status === "completed" && !!bChunk.englishText?.trim();
+    const oCompleted = oChunk?.status === "completed" && !!oChunk.englishText?.trim();
 
     let finalStatus: "pending" | "processing" | "completed" | "error" = "pending";
     let finalEnglish = "";
 
     if (bCompleted && oCompleted) {
       finalStatus = "completed";
-      finalEnglish = (bChunk.englishText!.length >= (oChunk?.englishText?.length || 0))
-        ? bChunk.englishText!
+      finalEnglish = (bChunk!.englishText!.length >= (oChunk!.englishText?.length || 0))
+        ? bChunk!.englishText!
         : oChunk!.englishText!;
     } else if (bCompleted) {
       finalStatus = "completed";
-      finalEnglish = bChunk.englishText!;
+      finalEnglish = bChunk!.englishText!;
     } else if (oCompleted) {
       finalStatus = "completed";
       finalEnglish = oChunk!.englishText!;
-    } else if (bChunk.status === "processing" || oChunk?.status === "processing") {
+    } else if (bChunk?.status === "processing" || oChunk?.status === "processing") {
       finalStatus = "pending";
-    } else if (bChunk.status === "error" || oChunk?.status === "error") {
+    } else if (bChunk?.status === "error" || oChunk?.status === "error") {
       finalStatus = "error";
     } else {
       finalStatus = "pending";
     }
 
     return {
-      ...bChunk,
+      ...primary,
       status: finalStatus,
       englishText: finalStatus === "completed" ? finalEnglish : "",
-      chineseText: bChunk.chineseText || (oChunk ? oChunk.chineseText : ""),
-      chapterTitle: bChunk.chapterTitle || (oChunk ? oChunk.chapterTitle : ""),
-      charCount: bChunk.charCount || (oChunk ? oChunk.charCount : 0),
-      attempts: Math.max(bChunk.attempts || 0, oChunk?.attempts || 0),
-      edited: finalStatus === "completed" ? !!(bChunk.edited || oChunk?.edited) : false,
-      errorMessage: finalStatus === "completed" ? undefined : (bChunk.errorMessage || oChunk?.errorMessage),
+      chineseText: primary.chineseText || (oChunk ? oChunk.chineseText : ""),
+      chapterTitle: primary.chapterTitle || (oChunk ? oChunk.chapterTitle : ""),
+      charCount: primary.charCount || (oChunk ? oChunk.charCount : 0),
+      attempts: Math.max(bChunk?.attempts || 0, oChunk?.attempts || 0),
+      edited: finalStatus === "completed" ? !!(bChunk?.edited || oChunk?.edited) : false,
+      errorMessage: finalStatus === "completed" ? undefined : (bChunk?.errorMessage || oChunk?.errorMessage),
     };
   });
 
   const completedCount = reconciledChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-  const totalCount = reconciledChunks.length;
-  const isAllDone = completedCount === totalCount && totalCount > 0;
+  const totalCount = Math.max(
+    (fsJob as any).totalChunks || 0,
+    (diskJob as any).totalChunks || 0,
+    reconciledChunks.length
+  );
+  // Immutable lock: A job is ONLY complete if all expected chunks are present AND all are completed
+  const isAllDone = totalCount > 0 && reconciledChunks.length >= totalCount && completedCount === totalCount;
 
   let finalStatus: CloudJob["status"] = "idle";
   if (isAllDone) {
@@ -323,6 +337,48 @@ export async function saveChunkToFirestore(jobId: string, chunk: ServerTextChunk
 }
 
 /**
+ * Persist novel chunks in compact segment documents (50 chunks per segment) to Firestore.
+ * This guarantees all chunk Chinese text, indices, and chapter titles survive container restarts
+ * while using minimal Firestore document writes (e.g. 500 chunks = only 10 document writes).
+ */
+export async function saveJobSegmentsToFirestore(jobId: string, chunks: ServerTextChunk[]): Promise<boolean> {
+  if (!isCloudStorageAvailable() || !chunks || chunks.length === 0) return false;
+  const db = initFirestore();
+  if (!db || !jobId) return false;
+
+  try {
+    const CHUNKS_PER_SEGMENT = 50;
+    const totalSegments = Math.ceil(chunks.length / CHUNKS_PER_SEGMENT);
+
+    for (let segIdx = 0; segIdx < totalSegments; segIdx++) {
+      const slice = chunks.slice(segIdx * CHUNKS_PER_SEGMENT, (segIdx + 1) * CHUNKS_PER_SEGMENT);
+      const segRef = doc(db, "translation_jobs", jobId, "segments", `seg_${segIdx}`);
+      const segData = {
+        segmentIndex: segIdx,
+        startChunk: segIdx * CHUNKS_PER_SEGMENT,
+        endChunk: segIdx * CHUNKS_PER_SEGMENT + slice.length - 1,
+        totalChunksInJob: chunks.length,
+        updatedAt: Date.now(),
+        chunks: slice.map((c) => ({
+          id: c.id,
+          index: c.index,
+          chapterTitle: c.chapterTitle || "",
+          chineseText: c.chineseText || "",
+          charCount: c.charCount || 0,
+          status: c.status,
+          attempts: c.attempts || 0,
+        })),
+      };
+      await setDoc(segRef, segData, { merge: true });
+    }
+    return true;
+  } catch (err: any) {
+    handleFirestoreError(`saveJobSegmentsToFirestore(${jobId})`, err);
+    return false;
+  }
+}
+
+/**
  * Batch save chunks to Firestore
  */
 export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTextChunk[]): Promise<boolean> {
@@ -379,35 +435,99 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
     if (!jobSnap.exists()) return null;
 
     const data = jobSnap.data();
+
+    // 1. Try loading full chunk structures from segments first (contains all original Chinese text)
+    const segmentsRef = collection(db, "translation_jobs", jobId, "segments");
+    const segmentsSnap = await getDocs(segmentsRef);
+
+    let chunks: ServerTextChunk[] = [];
+    if (!segmentsSnap.empty) {
+      const segmentDocs: any[] = [];
+      segmentsSnap.forEach((d) => segmentDocs.push(d.data()));
+      segmentDocs.sort((a, b) => (a.segmentIndex || 0) - (b.segmentIndex || 0));
+
+      for (const seg of segmentDocs) {
+        if (Array.isArray(seg.chunks)) {
+          for (const c of seg.chunks) {
+            chunks.push({
+              id: c.id || `chunk_${c.index}`,
+              index: typeof c.index === "number" ? c.index : 0,
+              chapterTitle: c.chapterTitle || "",
+              chineseText: c.chineseText || "",
+              englishText: "",
+              charCount: typeof c.charCount === "number" ? c.charCount : 0,
+              status: c.status === "completed" ? "completed" : "pending",
+              attempts: typeof c.attempts === "number" ? c.attempts : 0,
+              edited: false,
+            });
+          }
+        }
+      }
+    }
+
+    // 2. Load completed chunk documents from chunks subcollection and overlay them
     const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
     const chunksSnap = await getDocs(chunksRef);
 
-    const chunks: ServerTextChunk[] = [];
-    chunksSnap.forEach((docSnap) => {
-      const c = docSnap.data();
-      const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
-      const isCompleted = c.status === "completed" && hasEnglish;
+    if (chunks.length === 0) {
+      // Legacy fallback if no segments were saved
+      chunksSnap.forEach((docSnap) => {
+        const c = docSnap.data();
+        const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+        const isCompleted = c.status === "completed" && hasEnglish;
 
-      chunks.push({
-        id: c.id || docSnap.id,
-        index: typeof c.index === "number" ? c.index : 0,
-        chapterTitle: c.chapterTitle || "",
-        chineseText: c.chineseText || "",
-        englishText: c.englishText || "",
-        charCount: typeof c.charCount === "number" ? c.charCount : 0,
-        status: isCompleted ? "completed" : (c.status === "processing" ? "pending" : (c.status || "pending")),
-        attempts: typeof c.attempts === "number" ? c.attempts : 0,
-        edited: !!c.edited,
-        durationMs: typeof c.durationMs === "number" ? c.durationMs : 0,
-        errorMessage: isCompleted ? undefined : c.errorMessage,
+        chunks.push({
+          id: c.id || docSnap.id,
+          index: typeof c.index === "number" ? c.index : 0,
+          chapterTitle: c.chapterTitle || "",
+          chineseText: c.chineseText || "",
+          englishText: c.englishText || "",
+          charCount: typeof c.charCount === "number" ? c.charCount : 0,
+          status: isCompleted ? "completed" : (c.status === "processing" ? "pending" : (c.status || "pending")),
+          attempts: typeof c.attempts === "number" ? c.attempts : 0,
+          edited: !!c.edited,
+          durationMs: typeof c.durationMs === "number" ? c.durationMs : 0,
+          errorMessage: isCompleted ? undefined : c.errorMessage,
+        });
       });
-    });
+    } else {
+      // Overlay completed chunks from chunks subcollection onto the segment chunks
+      const chunkMap = new Map(chunks.map((c) => [c.index, c]));
+      chunksSnap.forEach((docSnap) => {
+        const c = docSnap.data();
+        const existing = chunkMap.get(c.index);
+        const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+        if (existing) {
+          if (hasEnglish) {
+            existing.englishText = c.englishText;
+            existing.status = "completed";
+            existing.edited = !!c.edited;
+          }
+          if (c.chapterTitle) existing.chapterTitle = c.chapterTitle;
+          if (c.charCount) existing.charCount = c.charCount;
+          if (c.attempts) existing.attempts = Math.max(existing.attempts || 0, c.attempts);
+        } else {
+          chunks.push({
+            id: c.id || docSnap.id,
+            index: typeof c.index === "number" ? c.index : 0,
+            chapterTitle: c.chapterTitle || "",
+            chineseText: c.chineseText || "",
+            englishText: c.englishText || "",
+            charCount: typeof c.charCount === "number" ? c.charCount : 0,
+            status: hasEnglish ? "completed" : "pending",
+            attempts: typeof c.attempts === "number" ? c.attempts : 0,
+            edited: !!c.edited,
+          });
+        }
+      });
+    }
 
     chunks.sort((a, b) => a.index - b.index);
 
     const completedCount = chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
     const totalCount = data.totalChunks || chunks.length;
-    const isCompleted = completedCount === totalCount && totalCount > 0;
+    // CRITICAL: A job is ONLY complete if all expected chunks are present AND every single chunk is completed!
+    const isCompleted = totalCount > 0 && chunks.length >= totalCount && completedCount === totalCount;
 
     return {
       id: data.id || jobId,
@@ -420,7 +540,7 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       customInstructions: data.customInstructions || "",
       glossary: data.glossary || [],
       concurrency: data.concurrency || 1,
-      status: isCompleted ? "completed" : (data.status || "idle"),
+      status: isCompleted ? "completed" : (data.status === "completed" && !isCompleted ? "running" : (data.status || "idle")),
       startedAt: data.startedAt || Date.now(),
       lastActiveAt: data.lastActiveAt || Date.now(),
     };
@@ -452,8 +572,9 @@ export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>>
         const data = docSnap.data();
         const sKey = data.sessionId || "legacy_default";
 
-        // Only do the deep chunk query if the job is actively running
-        if (data.status === "running") {
+        // Do the deep chunk query if the job is actively running OR if it was prematurely marked completed
+        const isPrematureCompleted = data.status === "completed" && typeof data.totalChunks === "number" && typeof data.completedChunks === "number" && data.completedChunks < data.totalChunks;
+        if (data.status === "running" || isPrematureCompleted) {
           const job = await loadJobFromFirestore(jId);
           if (job) {
             result.set(sKey, job);
@@ -510,6 +631,16 @@ export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
         }
         await batch.commit();
       }
+    }
+
+    const segsRef = collection(db, "translation_jobs", jobId, "segments");
+    const segsSnap = await getDocs(segsRef);
+    if (!segsSnap.empty) {
+      const batch = writeBatch(db);
+      for (const d of segsSnap.docs) {
+        batch.delete(d.ref);
+      }
+      await batch.commit();
     }
 
     const jobRef = doc(db, "translation_jobs", jobId);

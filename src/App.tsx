@@ -552,8 +552,13 @@ export default function App() {
 
             // Monotonic chapter merge: NEVER downgrade completed local chunks
             const prevChunks = prev.chunks || [];
-            const merged = sortedChunks.map((incChunk: any) => {
-              const existing = prevChunks.find((c) => c.id === incChunk.id || c.index === incChunk.index);
+            // Union by chunk index to ensure that no chunks are ever dropped if server restarted with partial state
+            const chunkMap = new Map<number, any>();
+            for (const c of prevChunks) {
+              chunkMap.set(c.index, { ...c });
+            }
+            for (const incChunk of sortedChunks) {
+              const existing = chunkMap.get(incChunk.index);
               const hasEnglishLocally = existing && existing.status === "completed" && existing.englishText && existing.englishText.trim().length > 0;
               const hasEnglishServer = (incChunk.englishText && incChunk.englishText.trim().length > 0) || incChunk.hasEnglish || (incChunk.wordCount && incChunk.wordCount > 0);
 
@@ -570,7 +575,7 @@ export default function App() {
               const finalWordCount = incChunk.wordCount ?? existing?.wordCount ?? (mergedEnglish ? countEnglishWords(mergedEnglish) : 0);
               const finalCharCount = incChunk.charCount ?? existing?.charCount ?? 0;
 
-              return {
+              chunkMap.set(incChunk.index, {
                 ...existing,
                 ...incChunk,
                 chineseText: mergedChinese,
@@ -578,11 +583,28 @@ export default function App() {
                 wordCount: finalWordCount,
                 charCount: finalCharCount,
                 status: isDone ? "completed" : incChunk.status,
-              };
-            }).sort((a: any, b: any) => a.index - b.index);
+              });
+            }
 
-            const allDone = merged.every((c: any) => c.status === "completed");
-            const finalStatus = (allDone || prev.status === "completed" || sJob.status === "completed") ? "completed" : sJob.status;
+            const merged = Array.from(chunkMap.values()).sort((a: any, b: any) => a.index - b.index);
+
+            // Auto-heal: If local session has more chunks than the server had, rehydrate the server so it resumes translating
+            if (prevChunks.length > sortedChunks.length && sortedChunks.length > 0) {
+              console.log(`[Auto-Rehydrate] Server had ${sortedChunks.length} chunks vs local ${prevChunks.length}. Sending missing chunks to resume server translation!`);
+              fetch("/api/cloud-job/rehydrate-chunks", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  fileName: prev.fileName,
+                  chunks: merged,
+                }),
+              }).catch((e) => console.warn("Auto-rehydrate background error:", e));
+            }
+
+            const totalExpected = Math.max(prevChunks.length, sJob.totalChunks || 0, merged.length);
+            const completedCount = merged.filter((c: any) => c.status === "completed").length;
+            const allDone = totalExpected > 0 && merged.length >= totalExpected && completedCount === totalExpected;
+            const finalStatus = allDone ? "completed" : (sJob.status === "completed" && !allDone ? "running" : sJob.status);
 
             chunksRef.current = merged;
             return {
@@ -1425,11 +1447,13 @@ Export Timestamp: ${new Date().toLocaleString()}
   const estimatedRemainingSeconds =
     charsPerSec > 0 ? remainingChars / charsPerSec : 0;
 
-  // Explicit completion flag: verified if chunks finished, session status completed, or server job completed
+  // Explicit completion flag: verified ONLY if all chunks are finished and totalChunks matches
   const isCompleted =
-    (totalChunks > 0 && completedChunks === totalChunks) ||
-    session?.status === "completed" ||
-    Boolean(serverCloudJob && session && serverCloudJob.fileName === session.fileName && serverCloudJob.status === "completed");
+    totalChunks > 0 &&
+    completedChunks >= totalChunks &&
+    (session?.status === "completed" ||
+      Boolean(serverCloudJob && session && serverCloudJob.fileName === session.fileName && serverCloudJob.status === "completed") ||
+      completedChunks === totalChunks);
 
   // Dynamic document title reflecting progress or 100% completion
   useEffect(() => {

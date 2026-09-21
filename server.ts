@@ -17,6 +17,7 @@ import {
   saveJobToFirestore,
   saveChunkToFirestore,
   saveChunksBatchToFirestore,
+  saveJobSegmentsToFirestore,
   loadAllJobsFromFirestore,
   deleteJobFromFirestore,
   deleteJobByFileNameFromFirestore,
@@ -43,6 +44,18 @@ try {
 } catch (e) {
   console.warn("Could not create data directory:", e);
 }
+
+// Track last known public origin to ping external ingress and keep Cloud Run active
+let lastKnownPublicOrigin = "";
+
+app.use((req, res, next) => {
+  const host = (req.headers["x-forwarded-host"] as string) || req.headers.host;
+  const proto = (req.headers["x-forwarded-proto"] as string) || "https";
+  if (host && typeof host === "string" && !host.includes("localhost") && !host.includes("127.0.0.1")) {
+    lastKnownPublicOrigin = `${proto}://${host}`;
+  }
+  next();
+});
 
 // Support large payloads (text files can be large)
 app.use(express.json({ limit: "50mb" }));
@@ -716,13 +729,25 @@ function ensureCloudKeepAliveRunning() {
       return;
     }
     try {
-      // Ping internal nginx proxy (port 8080) with Host: localhost to refresh Cloud Run socket & container idle timer
+      // 1. External ping to public URL to reset Cloud Run ingress idle timer and keep background worker running
+      if (lastKnownPublicOrigin) {
+        await fetch(`${lastKnownPublicOrigin}/api/heartbeat`, {
+          headers: { "User-Agent": "MegaText-Cloud-KeepAlive/1.0" },
+          signal: AbortSignal.timeout(5000),
+        });
+      }
+    } catch {}
+    try {
+      // 2. Ping internal nginx proxy (port 8080) with Host: localhost to refresh Cloud Run socket
       await fetch("http://localhost:8080/api/heartbeat", {
         headers: { Host: "localhost" },
+        signal: AbortSignal.timeout(3000),
       });
     } catch {
       try {
-        await fetch("http://localhost:3000/api/heartbeat");
+        await fetch("http://localhost:3000/api/heartbeat", {
+          signal: AbortSignal.timeout(3000),
+        });
       } catch {}
     }
   }, 60000); // Heartbeat every 60 seconds while translation is actively running
@@ -736,7 +761,12 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
       fs.writeFileSync(jobFilePath, JSON.stringify(job, null, 2), "utf-8");
 
       // Permanently archive completed novels so they are never lost or overwritten
-      if (job.status === "completed" || (job.chunks && job.chunks.every((c) => c.status === "completed"))) {
+      const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
+      const isAllDone = expectedTotal > 0 &&
+        (job.chunks?.length || 0) >= expectedTotal &&
+        (job.chunks || []).every((c) => c.status === "completed" && !!c.englishText?.trim());
+
+      if (job.status === "completed" || isAllDone) {
         const safeNovel = sanitizeSessionKey(job.fileName || "novel");
         const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
         fs.writeFileSync(archivePath, JSON.stringify(job, null, 2), "utf-8");
@@ -765,55 +795,71 @@ function mergeMonotonicCloudJobs(jobA: CloudJob, jobB: CloudJob): CloudJob {
   if (!jobA) return jobB;
   if (!jobB) return jobA;
 
-  const baseChunks = (jobA.chunks && jobA.chunks.length >= (jobB.chunks?.length || 0)) ? jobA.chunks : (jobB.chunks || []);
-  const otherChunks = baseChunks === jobA.chunks ? (jobB.chunks || []) : (jobA.chunks || []);
-  const otherChunkMap = new Map(otherChunks.map((c) => [c.index, c]));
+  const chunkMapA = new Map((jobA.chunks || []).map((c) => [c.index, c]));
+  const chunkMapB = new Map((jobB.chunks || []).map((c) => [c.index, c]));
 
-  const mergedChunks: ServerTextChunk[] = baseChunks.map((cA) => {
-    const cB = otherChunkMap.get(cA.index);
-    const aComp = cA.status === "completed" && !!cA.englishText?.trim();
+  // Union of ALL chunk indices from both jobs so no pending chunks are ever dropped
+  const allIndices = Array.from(
+    new Set([...chunkMapA.keys(), ...chunkMapB.keys()])
+  ).sort((a, b) => a - b);
+
+  const mergedChunks: ServerTextChunk[] = allIndices.map((idx) => {
+    const cA = chunkMapA.get(idx);
+    const cB = chunkMapB.get(idx);
+    const primary = cA || cB!;
+
+    const aComp = cA?.status === "completed" && !!cA.englishText?.trim();
     const bComp = cB?.status === "completed" && !!cB?.englishText?.trim();
 
     if (aComp && bComp) {
-      const bestText = (cA.englishText?.length || 0) >= (cB?.englishText?.length || 0) ? cA.englishText : cB!.englishText;
+      const bestText = (cA!.englishText?.length || 0) >= (cB!.englishText?.length || 0) ? cA!.englishText : cB!.englishText;
       return {
-        ...cA,
+        ...primary,
         status: "completed",
         englishText: bestText,
-        attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
-        edited: !!(cA.edited || cB?.edited),
+        attempts: Math.max(cA?.attempts || 0, cB?.attempts || 0),
+        edited: !!(cA?.edited || cB?.edited),
       };
     }
     if (aComp) {
       return {
-        ...cA,
+        ...primary,
         status: "completed",
-        englishText: cA.englishText,
+        englishText: cA!.englishText,
       };
     }
     if (bComp) {
       return {
-        ...cA,
+        ...primary,
         status: "completed",
         englishText: cB!.englishText,
-        attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
+        attempts: Math.max(cA?.attempts || 0, cB?.attempts || 0),
         edited: !!cB?.edited,
       };
     }
 
-    const isProcessing = cA.status === "processing" || cB?.status === "processing";
-    const isError = cA.status === "error" || cB?.status === "error";
+    const isProcessing = cA?.status === "processing" || cB?.status === "processing";
+    const isError = cA?.status === "error" || cB?.status === "error";
     return {
-      ...cA,
+      ...primary,
+      chineseText: primary.chineseText || (cB ? cB.chineseText : ""),
+      chapterTitle: primary.chapterTitle || (cB ? cB.chapterTitle : ""),
+      charCount: primary.charCount || (cB ? cB.charCount : 0),
       status: isProcessing ? "processing" : isError ? "error" : "pending",
-      englishText: cA.englishText || cB?.englishText || "",
-      errorMessage: cA.errorMessage || cB?.errorMessage,
-      attempts: Math.max(cA.attempts || 0, cB?.attempts || 0),
+      englishText: cA?.englishText || cB?.englishText || "",
+      errorMessage: cA?.errorMessage || cB?.errorMessage,
+      attempts: Math.max(cA?.attempts || 0, cB?.attempts || 0),
     };
   });
 
   const completedCount = mergedChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-  const isFullyCompleted = completedCount === mergedChunks.length && mergedChunks.length > 0;
+  const totalExpected = Math.max(
+    (jobA as any).totalChunks || 0,
+    (jobB as any).totalChunks || 0,
+    mergedChunks.length
+  );
+  // CRITICAL: A job is ONLY fully completed if all expected totalChunks exist and every one is completed
+  const isFullyCompleted = totalExpected > 0 && mergedChunks.length >= totalExpected && completedCount === totalExpected;
 
   let finalStatus: CloudJob["status"] = "idle";
   if (isFullyCompleted) {
@@ -1045,6 +1091,13 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
 
     scheduleDebouncedFirestoreJobSync(finalJob, true);
 
+    // Persist all chunk structures in compact segments (50 per doc) so no Chinese text or pending chunks are lost on container restart
+    if (finalJob.chunks && finalJob.chunks.length > 0) {
+      saveJobSegmentsToFirestore(finalJob.id, finalJob.chunks).catch((err) => {
+        console.warn(`[Storage] Firestore segment sync note for ${finalJob.id}:`, err.message);
+      });
+    }
+
     // Only batch-save chunks that are ALREADY completed to avoid wasting writes on pending chunks
     const completedInitialChunks = (finalJob.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim());
     if (completedInitialChunks.length > 0) {
@@ -1157,8 +1210,17 @@ async function loadCloudJobsFromDisk() {
         }
 
         const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-        if (completedCount === reconciled.chunks.length && reconciled.chunks.length > 0) {
+        const expectedTotal = Math.max(
+          (reconciled as any).totalChunks || 0,
+          (fsJob as any)?.totalChunks || 0,
+          (dJob as any)?.totalChunks || 0,
+          reconciled.chunks.length
+        );
+        if (completedCount === expectedTotal && expectedTotal > 0 && reconciled.chunks.length >= expectedTotal) {
           reconciled.status = "completed";
+        } else if (reconciled.status === "completed" && (reconciled.chunks.length < expectedTotal || completedCount < expectedTotal)) {
+          console.warn(`[Startup] Self-healing premature completion on "${reconciled.fileName}": ${completedCount}/${expectedTotal} completed. Resuming job!`);
+          reconciled.status = "running";
         }
 
         cloudJobs.set(sId, reconciled);
@@ -1193,7 +1255,8 @@ async function loadCloudJobsFromDisk() {
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
       if (j.status !== "running") return false;
       if (isSyntheticOrTestJob(j)) return false;
-      const allDone = j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+      const expectedTotal = (j as any).totalChunks || j.chunks.length;
+      const allDone = expectedTotal > 0 && j.chunks.length >= expectedTotal && j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
       if (allDone) {
         j.status = "completed";
         saveJobToDisk(j.sessionId || "legacy_default", j);
@@ -1280,9 +1343,12 @@ async function startCloudWorkerLoop() {
           break;
         } else {
           // Check if this job has completed all its chunks
-          const allCompleted = job.chunks.every(
-            (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
-          );
+          const expectedTotal = (job as any).totalChunks || job.chunks.length;
+          const allCompleted = expectedTotal > 0 &&
+            job.chunks.length >= expectedTotal &&
+            job.chunks.every(
+              (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+            );
           if (allCompleted && job.status === "running") {
             console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) completed!`);
             job.status = "completed";
@@ -2087,7 +2153,8 @@ app.get("/api/cloud-job/status", (req, res) => {
   const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
 
-  if (completedChunks === targetJob.chunks.length && targetJob.status !== "completed") {
+  const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
+  if (expectedTotal > 0 && targetJob.chunks.length >= expectedTotal && completedChunks === expectedTotal && targetJob.status !== "completed") {
     targetJob.status = "completed";
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
     if (!isSyntheticOrTestJob(targetJob)) {
@@ -2308,11 +2375,15 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
     return;
   }
 
-  // Enforce server-side immutable lock: completed jobs cannot be resumed
+  // Enforce server-side immutable lock: only truly completed jobs with all chunks present cannot be resumed
   const completedChunks = targetJob.chunks.filter(
     (c) => c.status === "completed" && !!c.englishText?.trim()
   ).length;
-  const isFullyCompleted = (completedChunks === targetJob.chunks.length && targetJob.chunks.length > 0) || targetJob.status === "completed";
+  const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
+  const isFullyCompleted = expectedTotal > 0 &&
+    targetJob.chunks.length >= expectedTotal &&
+    completedChunks === expectedTotal &&
+    targetJob.status === "completed";
 
   if (isFullyCompleted) {
     targetJob.status = "completed";
@@ -2331,6 +2402,74 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
   startCloudWorkerLoop();
   res.json({ success: true, status: "running" });
+});
+
+// Rehydrate missing chunks from client (automatically restores pending chunks if a server restarted with partial state)
+app.post("/api/cloud-job/rehydrate-chunks", requireAuthMiddleware, (req, res) => {
+  try {
+    const { fileName, chunks } = req.body || {};
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      res.status(400).json({ success: false, error: "No chunks provided for rehydration." });
+      return;
+    }
+
+    const sessionId = getSessionId(req);
+    let targetJob = getJobForSession(req);
+
+    if (!targetJob) {
+      targetJob = {
+        id: "cloud_job_" + Date.now(),
+        sessionId,
+        fileName: fileName || "novel.txt",
+        fileSizeBytes: 0,
+        totalChineseChars: chunks.reduce((acc: number, c: any) => acc + (c.charCount || 0), 0),
+        chunks,
+        style: "xianxia",
+        customInstructions: "",
+        glossary: [],
+        concurrency: 1,
+        status: "running",
+        startedAt: Date.now(),
+        lastActiveAt: Date.now(),
+      };
+      setJobForSession(sessionId, targetJob);
+      startCloudWorkerLoop();
+      res.json({
+        success: true,
+        rehydrated: chunks.length,
+        totalChunks: targetJob.chunks.length,
+        status: targetJob.status,
+      });
+      return;
+    }
+
+    // Merge incoming full chunks with existing server job chunks, keeping any translated English text intact
+    const incomingJob: CloudJob = {
+      ...targetJob,
+      chunks,
+      status: "running",
+    };
+
+    const merged = mergeMonotonicCloudJobs(targetJob, incomingJob);
+    const completedCount = merged.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+    merged.status = (completedCount === merged.chunks.length && merged.chunks.length > 0) ? "completed" : "running";
+
+    setJobForSession(targetJob.sessionId || sessionId, merged);
+    if (merged.status === "running") {
+      startCloudWorkerLoop();
+    }
+
+    res.json({
+      success: true,
+      rehydrated: chunks.length,
+      totalChunks: merged.chunks.length,
+      completedChunks: completedCount,
+      status: merged.status,
+    });
+  } catch (err: any) {
+    console.error("Failed to rehydrate chunks:", err);
+    res.status(500).json({ success: false, error: err.message || "Failed to rehydrate chunks." });
+  }
 });
 
 // Stop and clear cloud job permanently
