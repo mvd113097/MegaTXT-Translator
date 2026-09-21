@@ -64,20 +64,17 @@ function handleFirestoreError(context: string, err: any): void {
   if (
     errCode === "resource-exhausted" ||
     errCode === 8 ||
-    errCode === "permission-denied" ||
-    errCode === 7 ||
-    /RESOURCE_EXHAUSTED|quota|permission_denied/i.test(errMsg)
+    /RESOURCE_EXHAUSTED/i.test(errMsg)
   ) {
     if (!isFirestoreQuotaExhausted) {
       console.warn(
-        `[FirestoreStorage] Circuit breaker activated (${context}): Cloud Firestore quota reached or writes throttled. Switching seamlessly to local disk cache persistence for 1 hour.`
+        `[FirestoreStorage] Transient throttle (${context}): Cloud Firestore burst limit reached. Backing off for 5s.`
       );
     }
     isFirestoreQuotaExhausted = true;
-    quotaExhaustedUntil = Date.now() + 60 * 60 * 1000; // 1 hour backoff
-    isFirestoreAvailable = false;
+    quotaExhaustedUntil = Date.now() + 5000; // 5 seconds transient backoff, NEVER 1 hour
   } else {
-    console.warn(`[FirestoreStorage] Warning (${context}):`, errMsg);
+    console.warn(`[FirestoreStorage] Notice (${context}):`, errMsg);
   }
 }
 
@@ -450,12 +447,35 @@ export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>>
 
     for (const docSnap of snapshot.docs) {
       const jId = docSnap.id;
-      if (jId.startsWith("_")) continue; // Skip internal health docs
+      if (jId.startsWith("_") || jId.startsWith("synthetic_") || jId.startsWith("test_")) continue; // Skip internal health/test docs
       try {
-        const job = await loadJobFromFirestore(jId);
-        if (job) {
-          const sKey = job.sessionId || "legacy_default";
-          result.set(sKey, job);
+        const data = docSnap.data();
+        const sKey = data.sessionId || "legacy_default";
+
+        // Only do the deep chunk query if the job is actively running
+        if (data.status === "running") {
+          const job = await loadJobFromFirestore(jId);
+          if (job) {
+            result.set(sKey, job);
+          }
+        } else {
+          // For completed or idle jobs, load metadata directly in O(1) time without querying hundreds of chunk documents
+          const lightweightJob: CloudJob = {
+            id: data.id || jId,
+            sessionId: sKey,
+            fileName: data.fileName || "novel.txt",
+            fileSizeBytes: data.fileSizeBytes || 0,
+            totalChineseChars: data.totalChineseChars || 0,
+            chunks: [],
+            style: data.style || "xianxia",
+            customInstructions: data.customInstructions || "",
+            glossary: data.glossary || [],
+            concurrency: data.concurrency || 1,
+            status: data.status || "idle",
+            startedAt: data.startedAt || Date.now(),
+            lastActiveAt: data.lastActiveAt || Date.now(),
+          };
+          result.set(sKey, lightweightJob);
         }
       } catch (jobErr: any) {
         handleFirestoreError(`loadAllJobsFromFirestore(${jId})`, jobErr);

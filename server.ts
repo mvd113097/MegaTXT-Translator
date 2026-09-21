@@ -676,6 +676,58 @@ function getJobForSession(req: express.Request): CloudJob | null {
   return null;
 }
 
+const pendingFirestoreJobSyncs = new Map<string, NodeJS.Timeout>();
+
+function scheduleDebouncedFirestoreJobSync(job: CloudJob, immediate: boolean = false) {
+  if (!job || !job.id) return;
+  const existingTimer = pendingFirestoreJobSyncs.get(job.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    pendingFirestoreJobSyncs.delete(job.id);
+  }
+
+  if (immediate || job.status === "completed" || job.status === "paused") {
+    saveJobToFirestore(job).catch((err) => {
+      console.warn(`[Storage] Firestore job sync note for ${job.id}:`, err.message);
+    });
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    pendingFirestoreJobSyncs.delete(job.id);
+    saveJobToFirestore(job).catch((err) => {
+      console.warn(`[Storage] Firestore debounced job sync note for ${job.id}:`, err.message);
+    });
+  }, 5000);
+  pendingFirestoreJobSyncs.set(job.id, timer);
+}
+
+let cloudKeepAliveInterval: NodeJS.Timeout | null = null;
+
+function ensureCloudKeepAliveRunning() {
+  if (cloudKeepAliveInterval) return;
+  cloudKeepAliveInterval = setInterval(async () => {
+    const hasRunning = Array.from(cloudJobs.values()).some((j) => j.status === "running");
+    if (!hasRunning) {
+      if (cloudKeepAliveInterval) {
+        clearInterval(cloudKeepAliveInterval);
+        cloudKeepAliveInterval = null;
+      }
+      return;
+    }
+    try {
+      // Ping internal nginx proxy (port 8080) with Host: localhost to refresh Cloud Run socket & container idle timer
+      await fetch("http://localhost:8080/api/heartbeat", {
+        headers: { Host: "localhost" },
+      });
+    } catch {
+      try {
+        await fetch("http://localhost:3000/api/heartbeat");
+      } catch {}
+    }
+  }, 60000); // Heartbeat every 60 seconds while translation is actively running
+}
+
 function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
   try {
     const safeKey = sanitizeSessionKey(sessionId);
@@ -694,10 +746,8 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
       if (sessionId === "legacy_default" || cloudJobs.size === 1) {
         fs.writeFileSync(CLOUD_JOB_FILE, JSON.stringify(job, null, 2), "utf-8");
       }
-      // Asynchronously mirror authoritative state and completed chunks to Firestore
-      saveJobToFirestore(job).catch((err) => {
-        console.warn(`[Storage] Firestore job sync note for ${job.id}:`, err.message);
-      });
+      // Asynchronously mirror authoritative state to Firestore with debouncing to respect rate limits
+      scheduleDebouncedFirestoreJobSync(job);
     } else {
       if (fs.existsSync(jobFilePath)) {
         fs.unlinkSync(jobFilePath);
@@ -969,6 +1019,16 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
           break;
         }
       }
+      // Check disk archive if not found in active memory
+      if (!existing) {
+        const safeNovel = sanitizeSessionKey(job.fileName || "novel");
+        const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
+        if (fs.existsSync(archivePath)) {
+          try {
+            existing = JSON.parse(fs.readFileSync(archivePath, "utf-8"));
+          } catch {}
+        }
+      }
     }
 
     const finalJob = existing ? mergeMonotonicCloudJobs(existing, job) : job;
@@ -983,12 +1043,15 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
 
     saveJobToDisk(sessionId, finalJob);
 
-    saveJobToFirestore(finalJob).catch((err) => {
-      console.warn(`[Storage] Firestore job sync note for ${finalJob.id}:`, err.message);
-    });
-    saveChunksBatchToFirestore(finalJob.id, finalJob.chunks).catch((err) => {
-      console.warn(`[Storage] Firestore initial chunks batch sync note for ${finalJob.id}:`, err.message);
-    });
+    scheduleDebouncedFirestoreJobSync(finalJob, true);
+
+    // Only batch-save chunks that are ALREADY completed to avoid wasting writes on pending chunks
+    const completedInitialChunks = (finalJob.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim());
+    if (completedInitialChunks.length > 0) {
+      saveChunksBatchToFirestore(finalJob.id, completedInitialChunks).catch((err) => {
+        console.warn(`[Storage] Firestore initial completed chunks batch sync note for ${finalJob.id}:`, err.message);
+      });
+    }
   } else {
     const existing = cloudJobs.get(sessionId) || null;
     deleteJobCompletely(existing, sessionId).catch((err) => {
@@ -1162,6 +1225,7 @@ async function loadCloudJobsFromDisk() {
 const inFlightChunkIds = new Set<string>();
 
 async function startCloudWorkerLoop() {
+  ensureCloudKeepAliveRunning();
   if (isCloudWorkerRunning) return;
   isCloudWorkerRunning = true;
 
@@ -2017,6 +2081,7 @@ app.get("/api/cloud-job/status", (req, res) => {
   }
 
   const includeFullText = req.query.full === "true";
+  const isSummaryOnly = req.query.summary === "true";
 
   const completedChunks = targetJob.chunks.filter((c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))).length;
   const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
@@ -2055,8 +2120,8 @@ app.get("/api/cloud-job/status", (req, res) => {
     .filter((c) => c.status === "completed")
     .reduce((acc, c) => acc + (c.charCount || 0), 0);
 
-  // Render chunks (lightweight metadata by default to save 99%+ mobile data)
-  const chunksData = targetJob.chunks.map((c) => {
+  // Render chunks (if summary=true, omit chunks array completely to save 99.6% mobile data)
+  const chunksData = isSummaryOnly ? [] : targetJob.chunks.map((c) => {
     const wordCount = c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0);
     if (includeFullText) {
       return { ...c, wordCount };
@@ -2100,7 +2165,8 @@ app.get("/api/cloud-job/status", (req, res) => {
       completedEnglishWords,
       completedChars,
       projectsSummary: quotaScheduler.getActiveProjectSummary(),
-      chunks: chunksData,
+      chunks: isSummaryOnly ? undefined : chunksData,
+      isSummary: isSummaryOnly,
     },
   });
 });

@@ -479,7 +479,13 @@ export default function App() {
         userHasResetRef.current = false;
         headers["x-novel-filename"] = encodeURIComponent(explicitNovelFileName);
       }
-      const url = forceFullText ? "/api/cloud-job/status?full=true" : "/api/cloud-job/status";
+      // Use summary mode by default for ultra-low data consumption (~350 bytes per sync)
+      const url = forceFullText
+        ? "/api/cloud-job/status?full=true"
+        : (session?.chunks && session.chunks.length > 0)
+        ? "/api/cloud-job/status?summary=true"
+        : "/api/cloud-job/status";
+
       const res = await fetch(url, {
         headers,
       });
@@ -493,86 +499,102 @@ export default function App() {
         }
         const sJob = data.job;
         setServerCloudJob(sJob);
-        const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
 
-        setSession((prev) => {
-          if (!prev || prev.fileName !== sJob.fileName) {
+        // If this is a lightweight summary update and we already have the novel session loaded
+        if (sJob.isSummary && session && session.fileName === sJob.fileName) {
+          setSession((prev) => {
+            if (!prev) return prev;
             return {
-              fileName: sJob.fileName,
-              fileSizeBytes: sJob.fileSizeBytes || 0,
-              totalChineseChars: sJob.totalChineseChars || 0,
-              chunks: sortedChunks.map((c: any) => ({
-                id: c.id,
-                index: c.index,
-                chapterTitle: c.chapterTitle,
-                chineseText: c.chineseText || "",
-                englishText: c.englishText || "",
-                charCount: c.charCount || 0,
-                wordCount: c.wordCount || 0,
-                status: c.status,
-                hasEnglish: c.hasEnglish,
-                hasChinese: c.hasChinese,
-                attempts: c.attempts,
-                errorMessage: c.errorMessage,
-              })),
-              style: (sJob.style as TranslationStyle) || "xianxia",
-              customInstructions: sJob.customInstructions || "",
-              glossary: sJob.glossary || [],
-              mode: "cloud",
-              status: sJob.status,
-              createdAt: sJob.startedAt,
-              lastUpdated: sJob.lastActiveAt,
+              ...prev,
+              status: (sJob.completedChunks === (prev.chunks?.length || 0) && (prev.chunks?.length || 0) > 0) ? "completed" : sJob.status,
               completedEnglishWords: sJob.completedEnglishWords,
               completedChars: sJob.completedChars,
-              lastDownloadedWordCount: prev?.lastDownloadedWordCount,
-              lastDownloadedAt: prev?.lastDownloadedAt,
+              lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
-          }
+          });
+        } else {
+          // Full structure or novel change
+          const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
 
-          // Monotonic chapter merge: NEVER downgrade completed local chunks
-          const prevChunks = prev.chunks || [];
-          const merged = sortedChunks.map((incChunk: any) => {
-            const existing = prevChunks.find((c) => c.id === incChunk.id || c.index === incChunk.index);
-            const hasEnglishLocally = existing && existing.status === "completed" && existing.englishText && existing.englishText.trim().length > 0;
-            const hasEnglishServer = (incChunk.englishText && incChunk.englishText.trim().length > 0) || incChunk.hasEnglish || (incChunk.wordCount && incChunk.wordCount > 0);
+          setSession((prev) => {
+            if (!prev || prev.fileName !== sJob.fileName) {
+              return {
+                fileName: sJob.fileName,
+                fileSizeBytes: sJob.fileSizeBytes || 0,
+                totalChineseChars: sJob.totalChineseChars || 0,
+                chunks: sortedChunks.map((c: any) => ({
+                  id: c.id,
+                  index: c.index,
+                  chapterTitle: c.chapterTitle,
+                  chineseText: c.chineseText || "",
+                  englishText: c.englishText || "",
+                  charCount: c.charCount || 0,
+                  wordCount: c.wordCount || 0,
+                  status: c.status,
+                  hasEnglish: c.hasEnglish,
+                  hasChinese: c.hasChinese,
+                  attempts: c.attempts,
+                  errorMessage: c.errorMessage,
+                })),
+                style: (sJob.style as TranslationStyle) || "xianxia",
+                customInstructions: sJob.customInstructions || "",
+                glossary: sJob.glossary || [],
+                mode: "cloud",
+                status: sJob.status,
+                createdAt: sJob.startedAt,
+                lastUpdated: sJob.lastActiveAt,
+                completedEnglishWords: sJob.completedEnglishWords,
+                completedChars: sJob.completedChars,
+                lastDownloadedWordCount: prev?.lastDownloadedWordCount,
+                lastDownloadedAt: prev?.lastDownloadedAt,
+              };
+            }
 
-            // Never downgrade completed local chapter text
-            const mergedEnglish = (incChunk.englishText && incChunk.englishText.trim().length > 0)
-              ? incChunk.englishText
-              : (existing?.englishText || "");
+            // Monotonic chapter merge: NEVER downgrade completed local chunks
+            const prevChunks = prev.chunks || [];
+            const merged = sortedChunks.map((incChunk: any) => {
+              const existing = prevChunks.find((c) => c.id === incChunk.id || c.index === incChunk.index);
+              const hasEnglishLocally = existing && existing.status === "completed" && existing.englishText && existing.englishText.trim().length > 0;
+              const hasEnglishServer = (incChunk.englishText && incChunk.englishText.trim().length > 0) || incChunk.hasEnglish || (incChunk.wordCount && incChunk.wordCount > 0);
 
-            const mergedChinese = incChunk.chineseText !== undefined && incChunk.chineseText.length > 0
-              ? incChunk.chineseText
-              : (existing?.chineseText || "");
+              // Never downgrade completed local chapter text
+              const mergedEnglish = (incChunk.englishText && incChunk.englishText.trim().length > 0)
+                ? incChunk.englishText
+                : (existing?.englishText || "");
 
-            const isDone = incChunk.status === "completed" || hasEnglishLocally || hasEnglishServer;
-            const finalWordCount = incChunk.wordCount ?? existing?.wordCount ?? (mergedEnglish ? countEnglishWords(mergedEnglish) : 0);
-            const finalCharCount = incChunk.charCount ?? existing?.charCount ?? 0;
+              const mergedChinese = incChunk.chineseText !== undefined && incChunk.chineseText.length > 0
+                ? incChunk.chineseText
+                : (existing?.chineseText || "");
 
+              const isDone = incChunk.status === "completed" || hasEnglishLocally || hasEnglishServer;
+              const finalWordCount = incChunk.wordCount ?? existing?.wordCount ?? (mergedEnglish ? countEnglishWords(mergedEnglish) : 0);
+              const finalCharCount = incChunk.charCount ?? existing?.charCount ?? 0;
+
+              return {
+                ...existing,
+                ...incChunk,
+                chineseText: mergedChinese,
+                englishText: mergedEnglish,
+                wordCount: finalWordCount,
+                charCount: finalCharCount,
+                status: isDone ? "completed" : incChunk.status,
+              };
+            }).sort((a: any, b: any) => a.index - b.index);
+
+            const allDone = merged.every((c: any) => c.status === "completed");
+            const finalStatus = (allDone || prev.status === "completed" || sJob.status === "completed") ? "completed" : sJob.status;
+
+            chunksRef.current = merged;
             return {
-              ...existing,
-              ...incChunk,
-              chineseText: mergedChinese,
-              englishText: mergedEnglish,
-              wordCount: finalWordCount,
-              charCount: finalCharCount,
-              status: isDone ? "completed" : incChunk.status,
+              ...prev,
+              status: finalStatus,
+              chunks: merged,
+              completedEnglishWords: sJob.completedEnglishWords,
+              completedChars: sJob.completedChars,
+              lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
-          }).sort((a: any, b: any) => a.index - b.index);
-
-          const allDone = merged.every((c: any) => c.status === "completed");
-          const finalStatus = (allDone || prev.status === "completed" || sJob.status === "completed") ? "completed" : sJob.status;
-
-          chunksRef.current = merged;
-          return {
-            ...prev,
-            status: finalStatus,
-            chunks: merged,
-            completedEnglishWords: sJob.completedEnglishWords,
-            completedChars: sJob.completedChars,
-            lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
-          };
-        });
+          });
+        }
 
         if (typeof sJob.concurrency === "number" && sJob.concurrency >= 1 && sJob.concurrency <= 5) {
           setConcurrency(sJob.concurrency);
@@ -597,14 +619,11 @@ export default function App() {
         }
 
         if (showFeedbackToast) {
-          const completedCount = Math.max(
-            sJob.completedChunks || 0,
-            sortedChunks.filter((c: any) => c.status === "completed" || c.hasEnglish).length
-          );
-          const totalCount = sJob.totalChunks || sortedChunks.length;
-          const wordsReady = sJob.completedEnglishWords || sortedChunks.reduce((acc: number, c: any) => acc + (c.wordCount || 0), 0);
+          const completedCount = sJob.completedChunks || 0;
+          const totalCount = sJob.totalChunks || 0;
+          const wordsReady = sJob.completedEnglishWords || 0;
           setToastData({
-            message: `Synced in ${elapsedMs}ms (~2 KB): ${completedCount}/${totalCount} chapters ready (${wordsReady.toLocaleString()} English words)`,
+            message: `Synced in ${elapsedMs}ms (~350 B): ${completedCount}/${totalCount} chapters ready (${wordsReady.toLocaleString()} English words)`,
             type: "success",
           });
           setTimeout(() => {
@@ -633,7 +652,7 @@ export default function App() {
     }
   };
 
-  // Auto-check and recover existing cloud job from server on initial load (Lightweight ~2 KB mode, saves 95%+ data)
+  // Auto-check and recover existing cloud job from server on initial load (Lightweight ~350 B mode)
   useEffect(() => {
     syncCloudProgress(false, false);
   }, []);
@@ -666,45 +685,53 @@ export default function App() {
     syncCompletedTexts(true);
   };
 
-  // Tab Visibility & Window Focus Listener:
-  // Automatically triggers a lightweight progress sync (~2 KB) whenever you re-open or switch back
-  // to the browser tab after getting a Telegram notification or multitasking.
+  // Tab Visibility & Focus Listener:
+  // Saves 99%+ mobile data: Completely pauses polling when mobile screen is locked or tab is hidden.
+  // Instantly refreshes with lightweight ~350 byte summary the exact second you open/unlock the tab.
   useEffect(() => {
     if (mode !== "cloud") return;
 
-    const handleVisibilityOrFocus = () => {
-      if (document.visibilityState === "visible") {
-        syncCloudProgress(false, false);
-      }
+    let timer: any = null;
+
+    const startPolling = () => {
+      if (timer) clearInterval(timer);
+      syncCloudProgress(false, false);
+      // Poll every 10 seconds while tab is actively being watched
+      timer = setInterval(() => {
+        if (!document.hidden) {
+          syncCloudProgress(false, false);
+        }
+      }, 10000);
     };
 
-    let intervalTime = typeof document !== "undefined" && document.hidden ? 15000 : 5000;
-    let timer = setInterval(() => {
-      syncCloudProgress(false, false);
-    }, intervalTime);
+    const stopPolling = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
 
     const handleVisibilityChange = () => {
-      clearInterval(timer);
       if (document.hidden) {
-        timer = setInterval(() => {
-          syncCloudProgress(false, false);
-        }, 15000);
+        // Stop polling completely when phone is locked or app is in background to save 100% of mobile background data
+        stopPolling();
       } else {
-        // Instantly poll on tab focus so UI is immediately up-to-date
-        syncCloudProgress(false, false);
-        timer = setInterval(() => {
-          syncCloudProgress(false, false);
-        }, 5000);
+        // Instantly refresh when phone unlocked or tab reopened
+        startPolling();
       }
     };
 
+    if (!document.hidden) {
+      startPolling();
+    }
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleVisibilityOrFocus);
+    window.addEventListener("focus", startPolling);
 
     return () => {
-      clearInterval(timer);
+      stopPolling();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", handleVisibilityOrFocus);
+      window.removeEventListener("focus", startPolling);
     };
   }, [mode]);
 

@@ -37,15 +37,15 @@ service cloud.firestore {
       allow update: if isValidId(jobId) && isValidJob(request.resource.data)
         // Terminal state lock: Completed jobs cannot be reverted to non-completed status
         && !(resource.data.status == 'completed' && request.resource.data.status != 'completed');
-      // Deletions are forbidden from client/rules layer to protect translated books
-      allow delete: if false;
+      // Allow deletion of jobs when requested by the application
+      allow delete: if isValidId(jobId);
 
       // Chunks subcollection
       match /chunks/{chunkId} {
         allow get: if isValidId(jobId) && isValidId(chunkId);
         allow list: if isValidId(jobId);
         allow create, update: if isValidId(jobId) && isValidId(chunkId) && isValidChunk(request.resource.data);
-        allow delete: if false;
+        allow delete: if isValidId(jobId) && isValidId(chunkId);
       }
     }
   }
