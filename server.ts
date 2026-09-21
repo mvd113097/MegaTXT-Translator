@@ -1317,6 +1317,11 @@ async function loadCloudJobsFromDisk() {
       const key = (job.fileName || "novel.txt").trim().toLowerCase();
       if (novelMap.has(key)) {
         const canonical = novelMap.get(key)!;
+        const total = (canonical as any).totalChunks || canonical.chunks.length;
+        const allDone = total > 0 && canonical.chunks.length >= total && canonical.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+        if (allDone) {
+          canonical.status = "completed";
+        }
         const finalJob = { ...canonical, sessionId: sId };
         cloudJobs.set(sId, finalJob);
         saveJobToDisk(sId, finalJob);
