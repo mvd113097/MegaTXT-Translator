@@ -415,8 +415,8 @@ export default function App() {
   const [isSyncingProgress, setIsSyncingProgress] = useState(false);
 
   // On-demand sync of full translated chapter texts for completed chunks
-  const syncCompletedTexts = async (force: boolean = false) => {
-    if (mode !== "cloud") return;
+  const syncCompletedTexts = async (force: boolean = false): Promise<TextChunk[]> => {
+    if (mode !== "cloud") return chunksRef.current;
 
     // Data-saving optimization: If not forced, check if all completed chunks already have English text in memory
     if (!force && chunksRef.current.length > 0) {
@@ -424,42 +424,86 @@ export default function App() {
         (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
       );
       if (!missingCompletedText) {
-        // All completed chunks are already populated in memory — 0 KB network data used!
-        return;
+        return chunksRef.current;
       }
     }
 
     try {
+      const headers = getAuthHeaders();
+      if (session?.fileName) {
+        headers["x-novel-filename"] = encodeURIComponent(session.fileName);
+      }
       const res = await fetch("/api/cloud-job/sync-texts?completedOnly=true", {
-        headers: getAuthHeaders(),
+        headers,
       });
       const data = await res.json();
-      if (data.success && Array.isArray(data.chunks)) {
-        const textMap = new Map<number, { chineseText: string; englishText: string }>();
+      if (data.success && Array.isArray(data.chunks) && data.chunks.length > 0) {
+        const textMap = new Map<number, { chineseText: string; englishText: string; chapterTitle?: string; id?: string }>();
         data.chunks.forEach((c: any) => {
-          textMap.set(c.index, { chineseText: c.chineseText || "", englishText: c.englishText || "" });
+          textMap.set(c.index, {
+            chineseText: c.chineseText || "",
+            englishText: c.englishText || "",
+            chapterTitle: c.chapterTitle,
+            id: c.id,
+          });
         });
 
-        setSession((prev) => {
-          if (!prev) return null;
-          const updated = prev.chunks.map((c) => {
+        let updated: TextChunk[] = [];
+        const baseChunks = chunksRef.current.length > 0 ? chunksRef.current : (session?.chunks || []);
+
+        if (baseChunks.length === 0 || baseChunks.length < data.chunks.length) {
+          // Reconstruct entire chunk list directly from server data
+          updated = data.chunks.map((c: any) => ({
+            id: c.id || `chunk-${c.index}`,
+            index: c.index,
+            chapterTitle: c.chapterTitle || `Section ${c.index + 1}`,
+            chineseText: c.chineseText || "",
+            englishText: c.englishText || "",
+            charCount: countChineseCharacters(c.chineseText || "") || (c.chineseText || "").length,
+            status: "completed" as const,
+          }));
+        } else {
+          updated = baseChunks.map((c) => {
             const synced = textMap.get(c.index);
             if (synced && synced.englishText) {
               return {
                 ...c,
+                chapterTitle: synced.chapterTitle || c.chapterTitle,
                 chineseText: synced.chineseText || c.chineseText,
                 englishText: synced.englishText,
+                status: "completed" as const,
               };
             }
             return c;
           });
-          chunksRef.current = updated;
-          return { ...prev, chunks: updated };
+        }
+
+        chunksRef.current = updated;
+        setSession((prev) => {
+          if (!prev) {
+            const now = Date.now();
+            return {
+              fileName: session?.fileName || "translated_novel.txt",
+              fileSizeBytes: 0,
+              totalChineseChars: updated.reduce((acc, c) => acc + c.charCount, 0),
+              chunks: updated,
+              style: style || "xianxia",
+              customInstructions: "",
+              glossary: [],
+              status: "completed",
+              createdAt: now,
+              lastUpdated: now,
+            };
+          }
+          return { ...prev, chunks: updated, lastUpdated: Date.now() };
         });
+
+        return updated;
       }
     } catch (err) {
       console.warn("Error syncing completed chapter texts:", err);
     }
+    return chunksRef.current;
   };
 
   // High-performance Cloud Progress Synchronization:
@@ -1268,8 +1312,8 @@ export default function App() {
 
   // Open Export Modal with automated background text synchronization if in cloud mode
   const handleOpenExport = async () => {
-    if (mode === "cloud") {
-      syncCompletedTexts();
+    if (mode === "cloud" || chunksRef.current.length === 0 || chunksRef.current.some(c => c.status === "completed" && !c.englishText?.trim())) {
+      await syncCompletedTexts(true);
     }
     setIsExportOpen(true);
   };
@@ -1277,14 +1321,40 @@ export default function App() {
   // Dedicated progress downloader: downloads strictly the unbroken continuous chapters from Chapter 1 without stopping background translation
   const handleDownloadProgress = async (format: "epub" | "txt" = "epub") => {
     if (!session) return;
-    if (mode === "cloud") {
-      await syncCompletedTexts();
+    let currentChunks = chunksRef.current;
+    if (mode === "cloud" || currentChunks.length === 0 || currentChunks.some(c => c.status === "completed" && !c.englishText?.trim())) {
+      const synced = await syncCompletedTexts(true);
+      if (synced && synced.length > 0) {
+        currentChunks = synced;
+      }
     }
-    const currentChunks = chunksRef.current.length > 0 ? chunksRef.current : session.chunks;
+    if (currentChunks.length === 0) {
+      currentChunks = session.chunks;
+    }
+
     const continuity = analyzeChunkContinuity(currentChunks);
-    const continuousList = continuity.continuousChunks;
+    let continuousList = continuity.continuousChunks;
+
+    // If continuousList is empty (e.g. index 0 title issue) but we have completed chunks, use allCompletedChunks
+    if (continuousList.length === 0 && continuity.allCompletedChunks.length > 0) {
+      continuousList = continuity.allCompletedChunks;
+    }
 
     if (continuousList.length === 0) {
+      // Direct server-side download attempt
+      if (mode === "cloud") {
+        try {
+          const downloadUrl = format === "epub" ? "/api/cloud-job/download-epub" : "/api/cloud-job/download-txt";
+          window.location.href = downloadUrl;
+          setToastData({
+            message: `Starting direct server download for ${format.toUpperCase()}...`,
+            type: "success",
+          });
+          setTimeout(() => setToastData(null), 5000);
+          return;
+        } catch {}
+      }
+
       setToastData({
         message:
           "Chapter 1 has not completed translation yet. The Never-Skip Engine guarantees all downloaded books start from Chapter 1 with zero gaps. Please wait for Chapter 1 to finish!",
@@ -1305,6 +1375,7 @@ export default function App() {
       if (format === "epub") {
         const res = await downloadEpub(continuousList, session.fileName, {
           bookTitle: baseName.replace(/_/g, " "),
+          allowGaps: true,
         });
 
         // Save that user downloaded up to this point so we can track incremental new words
@@ -1389,11 +1460,16 @@ Export Timestamp: ${new Date().toLocaleString()}
       });
       setTimeout(() => setToastData(null), 8000);
     } catch (err: any) {
-      setToastData({
-        message: "Download failed: " + (err.message || String(err)),
-        type: "error",
-      });
-      setTimeout(() => setToastData(null), 6000);
+      console.warn("Client generation encountered error, trying direct server download:", err);
+      if (mode === "cloud") {
+        window.location.href = format === "epub" ? "/api/cloud-job/download-epub" : "/api/cloud-job/download-txt";
+      } else {
+        setToastData({
+          message: "Download failed: " + (err.message || String(err)),
+          type: "error",
+        });
+        setTimeout(() => setToastData(null), 6000);
+      }
     }
   };
 

@@ -146,9 +146,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           url: res.downloadUrl,
         });
       } catch (err: any) {
-        setErrorMessage(
-          "Failed to build EPUB: " + (err.message || String(err))
-        );
+        console.warn("Client EPUB build failed in modal, falling back to server generator:", err);
+        try {
+          const url = `/api/cloud-job/download-epub${exportFormat === "bilingual_epub" ? "?bilingual=true" : ""}`;
+          window.location.href = url;
+          setDownloadSuccess({
+            filename: `${baseName}${exportFormat === "bilingual_epub" ? "_bilingual" : ""}.epub`,
+            url,
+          });
+        } catch {
+          setErrorMessage(
+            "Failed to build EPUB: " + (err.message || String(err))
+          );
+        }
       } finally {
         setIsExporting(false);
       }

@@ -572,31 +572,10 @@ export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>>
         const data = docSnap.data();
         const sKey = data.sessionId || "legacy_default";
 
-        // Do the deep chunk query if the job is actively running OR if it was prematurely marked completed
-        const isPrematureCompleted = data.status === "completed" && typeof data.totalChunks === "number" && typeof data.completedChunks === "number" && data.completedChunks < data.totalChunks;
-        if (data.status === "running" || isPrematureCompleted) {
-          const job = await loadJobFromFirestore(jId);
-          if (job) {
-            result.set(sKey, job);
-          }
-        } else {
-          // For completed or idle jobs, load metadata directly in O(1) time without querying hundreds of chunk documents
-          const lightweightJob: CloudJob = {
-            id: data.id || jId,
-            sessionId: sKey,
-            fileName: data.fileName || "novel.txt",
-            fileSizeBytes: data.fileSizeBytes || 0,
-            totalChineseChars: data.totalChineseChars || 0,
-            chunks: [],
-            style: data.style || "xianxia",
-            customInstructions: data.customInstructions || "",
-            glossary: data.glossary || [],
-            concurrency: data.concurrency || 1,
-            status: data.status || "idle",
-            startedAt: data.startedAt || Date.now(),
-            lastActiveAt: data.lastActiveAt || Date.now(),
-          };
-          result.set(sKey, lightweightJob);
+        // Always load full chunk content so translations and completed books are never truncated or stripped
+        const job = await loadJobFromFirestore(jId);
+        if (job) {
+          result.set(sKey, job);
         }
       } catch (jobErr: any) {
         handleFirestoreError(`loadAllJobsFromFirestore(${jId})`, jobErr);

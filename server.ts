@@ -24,6 +24,7 @@ import {
   deleteAllJobsFromFirestore,
   mergeMonotonicJob,
 } from "./server/firestoreStorage";
+import { generateServerEpubBuffer } from "./server/epubServer";
 
 dotenv.config();
 
@@ -625,68 +626,139 @@ function getSessionId(req: express.Request): string {
 
 function getJobForSession(req: express.Request): CloudJob | null {
   const sId = getSessionId(req);
+  let job: CloudJob | null = null;
+
   if (cloudJobs.has(sId)) {
-    return cloudJobs.get(sId)!;
+    job = cloudJobs.get(sId)!;
   }
 
   // Match by novel name if passed in query or header
-  const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
-  const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
-  let targetNovelName = "";
-  if (rawNovelHeader && typeof rawNovelHeader === "string") {
-    try {
-      targetNovelName = decodeURIComponent(rawNovelHeader).trim().toLowerCase();
-    } catch {
-      targetNovelName = rawNovelHeader.trim().toLowerCase();
+  if (!job) {
+    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+    let targetNovelName = "";
+    if (rawNovelHeader && typeof rawNovelHeader === "string") {
+      try {
+        targetNovelName = decodeURIComponent(rawNovelHeader).trim().toLowerCase();
+      } catch {
+        targetNovelName = rawNovelHeader.trim().toLowerCase();
+      }
+    } else if (novelQuery && typeof novelQuery === "string") {
+      try {
+        targetNovelName = decodeURIComponent(novelQuery).trim().toLowerCase();
+      } catch {
+        targetNovelName = novelQuery.trim().toLowerCase();
+      }
     }
-  } else if (novelQuery && typeof novelQuery === "string") {
-    try {
-      targetNovelName = decodeURIComponent(novelQuery).trim().toLowerCase();
-    } catch {
-      targetNovelName = novelQuery.trim().toLowerCase();
-    }
-  }
 
-  if (targetNovelName) {
-    for (const job of cloudJobs.values()) {
-      if (job.fileName && job.fileName.trim().toLowerCase() === targetNovelName) {
-        return job;
+    if (targetNovelName) {
+      for (const j of cloudJobs.values()) {
+        if (j.fileName && j.fileName.trim().toLowerCase() === targetNovelName) {
+          job = j;
+          break;
+        }
+      }
+      if (!job && fs.existsSync(JOBS_DIR)) {
+        try {
+          const files = fs.readdirSync(JOBS_DIR);
+          for (const f of files) {
+            if (!f.endsWith(".json")) continue;
+            const fullPath = path.join(JOBS_DIR, f);
+            const content = fs.readFileSync(fullPath, "utf-8");
+            const parsed = JSON.parse(content);
+            if (parsed?.fileName && parsed.fileName.trim().toLowerCase() === targetNovelName) {
+              job = parsed;
+              cloudJobs.set(parsed.sessionId || sId, parsed);
+              break;
+            }
+          }
+        } catch {}
       }
     }
   }
 
   // Match by explicit job id
-  const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
-  if (jobId && typeof jobId === "string") {
-    for (const job of cloudJobs.values()) {
-      if (job.id === jobId.trim()) return job;
+  if (!job) {
+    const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
+    if (jobId && typeof jobId === "string") {
+      for (const j of cloudJobs.values()) {
+        if (j.id === jobId.trim()) {
+          job = j;
+          break;
+        }
+      }
     }
   }
 
-  // Fallbacks: Only allowed if allowFallback is not false and only for actively RUNNING jobs
-  const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
-  if (!allowFallback) {
-    return null;
-  }
-
-  // Fallback 1: check legacy_default ONLY if running
-  if (cloudJobs.has("legacy_default")) {
-    const leg = cloudJobs.get("legacy_default")!;
-    if (leg.status === "running" && !isSyntheticOrTestJob(leg)) {
-      return leg;
+  // Check disk job file for sId if not in memory
+  if (!job) {
+    const safeKey = sanitizeSessionKey(sId);
+    const diskPath = path.join(JOBS_DIR, `job_${safeKey}.json`);
+    if (fs.existsSync(diskPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(diskPath, "utf-8"));
+        if (parsed && Array.isArray(parsed.chunks)) {
+          job = parsed;
+          cloudJobs.set(sId, job);
+        }
+      } catch {}
     }
   }
 
-  // Fallback 2: Check for any actively running non-test job
-  const activeRunning = Array.from(cloudJobs.values()).filter(
-    (j) => j.status === "running" && !isSyntheticOrTestJob(j)
-  );
-  if (activeRunning.length > 0) {
-    activeRunning.sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
-    return activeRunning[0];
+  // Fallbacks: Check legacy_default or any real job (completed or running)
+  if (!job) {
+    const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
+    if (allowFallback) {
+      if (cloudJobs.has("legacy_default") && !isSyntheticOrTestJob(cloudJobs.get("legacy_default")!)) {
+        job = cloudJobs.get("legacy_default")!;
+      } else {
+        const realJobs = Array.from(cloudJobs.values()).filter((j) => !isSyntheticOrTestJob(j));
+        if (realJobs.length > 0) {
+          realJobs.sort((a, b) => {
+            if (a.status === "running" && b.status !== "running") return -1;
+            if (b.status === "running" && a.status !== "running") return 1;
+            return (b.lastActiveAt || 0) - (a.lastActiveAt || 0);
+          });
+          job = realJobs[0];
+        } else if (fs.existsSync(CLOUD_JOB_FILE)) {
+          try {
+            const parsed = JSON.parse(fs.readFileSync(CLOUD_JOB_FILE, "utf-8"));
+            if (parsed && Array.isArray(parsed.chunks) && !isSyntheticOrTestJob(parsed)) {
+              job = parsed;
+              cloudJobs.set("legacy_default", job);
+            }
+          } catch {}
+        }
+      }
+    }
   }
 
-  return null;
+  // Safety self-heal: If the retrieved job has 0 chunks in memory, rehydrate from disk or archive
+  if (job && (!job.chunks || job.chunks.length === 0)) {
+    if (fs.existsSync(CLOUD_JOB_FILE)) {
+      try {
+        const rootParsed = JSON.parse(fs.readFileSync(CLOUD_JOB_FILE, "utf-8"));
+        if (rootParsed?.chunks?.length > 0 && (!job.fileName || rootParsed.fileName === job.fileName)) {
+          job.chunks = rootParsed.chunks;
+        }
+      } catch {}
+    }
+    if ((!job.chunks || job.chunks.length === 0) && fs.existsSync(JOBS_DIR)) {
+      try {
+        const files = fs.readdirSync(JOBS_DIR);
+        for (const f of files) {
+          if (!f.endsWith(".json")) continue;
+          const parsed = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf-8"));
+          if (parsed?.chunks?.length > 0 && parsed.fileName === job.fileName) {
+            job.chunks = parsed.chunks;
+            break;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return job;
 }
 
 const pendingFirestoreJobSyncs = new Map<string, NodeJS.Timeout>();
@@ -2269,6 +2341,81 @@ app.get("/api/cloud-job/sync-texts", (req, res) => {
       status: c.status,
     })),
   });
+});
+
+// Direct server-side EPUB builder & downloader with 0 client memory bottleneck
+app.get("/api/cloud-job/download-epub", async (req, res) => {
+  try {
+    const targetJob = getJobForSession(req);
+    if (!targetJob) {
+      res.status(404).send("No active or completed novel translation found.");
+      return;
+    }
+    const isBilingual = req.query.bilingual === "true";
+    const completedChunks = (targetJob.chunks || []).filter(
+      (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+    );
+    if (completedChunks.length === 0) {
+      res.status(400).send("No translated chapters ready to download yet.");
+      return;
+    }
+
+    const baseName = (targetJob.fileName || "translated_novel").replace(/\.[^/.]+$/, "");
+    const epubBuffer = await generateServerEpubBuffer(completedChunks, {
+      bookTitle: baseName.replace(/_/g, " "),
+      isBilingual,
+    });
+
+    const safeFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : ""}.epub`);
+    res.setHeader("Content-Type", "application/epub+zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"; filename*=UTF-8''${safeFilename}`);
+    res.setHeader("Content-Length", epubBuffer.length);
+    res.send(epubBuffer);
+  } catch (err: any) {
+    console.error("Server EPUB generation failed:", err);
+    res.status(500).send("Failed to generate EPUB: " + (err.message || String(err)));
+  }
+});
+
+// Direct server-side TXT downloader
+app.get("/api/cloud-job/download-txt", (req, res) => {
+  try {
+    const targetJob = getJobForSession(req);
+    if (!targetJob) {
+      res.status(404).send("No active or completed novel translation found.");
+      return;
+    }
+    const isBilingual = req.query.bilingual === "true";
+    const completedChunks = (targetJob.chunks || []).filter(
+      (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+    );
+    if (completedChunks.length === 0) {
+      res.status(400).send("No translated chapters ready to download yet.");
+      return;
+    }
+
+    const baseName = (targetJob.fileName || "translated_novel").replace(/\.[^/.]+$/, "");
+    let textContent = "";
+    if (isBilingual) {
+      textContent = completedChunks.map((c) => {
+        const header = c.chapterTitle ? `====================\n${c.chapterTitle}\n====================\n\n` : "";
+        return `${header}[ORIGINAL CHINESE]\n${(c.chineseText || "").trim()}\n\n[ENGLISH TRANSLATION]\n${(c.englishText || "").trim()}`;
+      }).join("\n\n--------------------\n\n");
+    } else {
+      textContent = completedChunks.map((c) => {
+        const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";
+        return `${header}${(c.englishText || "").trim()}`;
+      }).join("\n\n\n");
+    }
+
+    const safeFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : "_en"}.txt`);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"; filename*=UTF-8''${safeFilename}`);
+    res.send(textContent);
+  } catch (err: any) {
+    console.error("Server TXT generation failed:", err);
+    res.status(500).send("Failed to generate TXT: " + (err.message || String(err)));
+  }
 });
 
 // Fetch single full chunk by index for Chapter Reader or manual editing
