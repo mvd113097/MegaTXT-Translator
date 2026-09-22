@@ -1,7 +1,7 @@
 import React from "react";
-import catOnBooksImg from "../../assets/images/cat_on_books_master_1789382694223.jpg";
-import pagodaHeaderImg from "../../assets/images/pagoda_header_master_1789382709603.jpg";
-import storyVignetteImg from "../../assets/images/storybook_vignette_1789376893491.jpg";
+import catOnBooksImg from "../../assets/images/cat_on_books_master_1789382694223.webp";
+import pagodaHeaderImg from "../../assets/images/pagoda_header_master_1789382709603.webp";
+import storyVignetteImg from "../../assets/images/storybook_vignette_1789376893491.webp";
 
 /**
  * Storybook Artwork & Vector Illustrations

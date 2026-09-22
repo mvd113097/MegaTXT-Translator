@@ -9,7 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 import { sendTelegramNotification as rawSendTelegramNotification } from "./server/telegram";
-import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems } from "./server/storeScraper";
+import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems, fetchNovelFullIntro } from "./server/storeScraper";
 import { translateExploreItemsInPlace, translateWithGoogle, translateChapterWithGoogle, hasChineseCharacters } from "./server/googleTranslate";
 import { autoGenerateNovelGlossary } from "./server/glossaryExtractor";
 import {
@@ -3087,6 +3087,23 @@ app.get("/api/store/explore", requireAuthMiddleware, async (req, res) => {
   } catch (err: any) {
     console.error("Store Explore Error:", err);
     res.status(500).json({ error: err.message || "Failed to explore novel collections." });
+  }
+});
+
+// Full unabridged novel synopsis endpoint (with Google Translate to English)
+app.post("/api/store/full-intro", requireAuthMiddleware, async (req, res) => {
+  try {
+    const { novelUrl, siteId, title, author } = req.body;
+    if (!novelUrl && !title) {
+      res.status(400).json({ error: "Missing 'novelUrl' or 'title' parameter." });
+      return;
+    }
+
+    const fullIntro = await fetchNovelFullIntro({ novelUrl, siteId, title, author });
+    res.json(fullIntro);
+  } catch (err: any) {
+    console.error("Full Intro Fetch Error:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch full synopsis." });
   }
 });
 

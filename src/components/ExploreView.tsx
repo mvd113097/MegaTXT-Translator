@@ -38,6 +38,7 @@ import {
   Languages,
 } from "lucide-react";
 import { ChapterItem, StoreNovelDetail } from "./StoreView";
+import { cleanAuthorName, cleanSummaryText } from "../utils/storeFormatters";
 
 export interface ExploreNovelItem {
   id: string;
@@ -1005,11 +1006,66 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
     fetchExploreFeed(1);
   };
 
-  const toggleSummary = (id: string) => {
+  const [loadingIntroIds, setLoadingIntroIds] = useState<Record<string, boolean>>({});
+
+  const toggleSummary = async (item: ExploreNovelItem) => {
+    const id = item.id;
+    const isCurrentlyExpanded = !!expandedSummaryIds[id];
+
+    // Toggle UI expansion immediately for instant responsiveness
     setExpandedSummaryIds((prev) => ({
       ...prev,
-      [id]: !prev[id],
+      [id]: !isCurrentlyExpanded,
     }));
+
+    // If expanding and summary is short or ends with ellipses, fetch unabridged full synopsis from source
+    const curSummary = item.summaryZh || item.summary || "";
+    const isTruncated = curSummary.endsWith("...") || curSummary.endsWith("…") || curSummary.length < 180;
+
+    if (!isCurrentlyExpanded && isTruncated && !loadingIntroIds[id]) {
+      setLoadingIntroIds((prev) => ({ ...prev, [id]: true }));
+      try {
+        const res = await fetch("/api/store/full-intro", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({
+            novelUrl: item.novelUrl,
+            siteId: item.siteId,
+            title: item.title,
+            author: item.author,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && (data.introZh || data.introEn)) {
+            setItems((prev) =>
+              prev.map((it) => {
+                if (it.id === id || it.novelUrl === item.novelUrl) {
+                  return {
+                    ...it,
+                    summaryZh: data.introZh || it.summaryZh,
+                    summaryEn: data.introEn || it.summaryEn,
+                    summary: data.intro || it.summary,
+                    authorZh: cleanAuthorName(data.author || it.authorZh),
+                    author: cleanAuthorName(data.author || it.author),
+                    fileSize: data.fileSize || it.fileSize,
+                  };
+                }
+                return it;
+              })
+            );
+          }
+        }
+      } catch (e) {
+        // Graceful fallback
+      } finally {
+        setLoadingIntroIds((prev) => ({ ...prev, [id]: false }));
+      }
+    }
   };
 
   // Open Chapter Selection Modal for a novel (with auto cross-mirror resolution)
@@ -1825,7 +1881,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 const rankNum = (currentActivePage - 1) * 20 + index + 1;
                 const isCardZh = !!chineseModeCards[item.id];
                 const cardTitle = isCardZh ? (item.titleZh || item.title) : (item.titleEn || item.title);
-                const cardAuthor = isCardZh ? (item.authorZh || item.author) : (item.authorEn || item.author);
+                const cardAuthor = cleanAuthorName(isCardZh ? (item.authorZh || item.author) : (item.authorEn || item.author));
 
                 return (
                   <div
@@ -1986,14 +2042,15 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
               const isExpanded = !!expandedSummaryIds[item.id];
               const isCardZh = !!chineseModeCards[item.id];
               const cardTitle = isCardZh ? (item.titleZh || item.title) : (item.titleEn || item.title);
-              const cardAuthor = isCardZh ? (item.authorZh || item.author) : (item.authorEn || item.author);
+              const cardAuthor = cleanAuthorName(isCardZh ? (item.authorZh || item.author) : (item.authorEn || item.author));
               const cardSummary = isCardZh ? (item.summaryZh || item.summary) : (item.summaryEn || item.summary);
-              const displaySummary = cardSummary || "No synopsis available for this novel.";
-              const isLongSummary = displaySummary.length > 50 || displaySummary.includes("\n");
+              const displaySummary = cleanSummaryText(cardSummary) || "No synopsis available for this novel.";
+              const isLongSummary = displaySummary.length > 70 || displaySummary.includes("\n") || displaySummary.endsWith("...") || displaySummary.endsWith("…");
               const isJjwxc = item.siteId === "jjwxc";
               const bookmarked = isWishlisted(item);
               const cardTags = getAugmentedCardTags(item);
               const rankNum = (currentActivePage - 1) * 20 + index + 1;
+              const isLoadingThisIntro = !!loadingIntroIds[item.id];
 
               return (
                 <div
@@ -2161,15 +2218,21 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                   {/* Synopsis Box */}
                   <div className="rounded-lg bg-slate-50/90 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 p-2.5 sm:p-3 mb-2.5 text-[11px] sm:text-xs leading-relaxed text-slate-700 dark:text-slate-300">
                     <div className="flex items-center justify-between font-bold text-[10px] sm:text-[11px] text-purple-700 dark:text-purple-300 mb-1">
-                      <div className="flex items-center gap-1">
-                        <BookOpen className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <BookOpen className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400 shrink-0" />
                         <span>{isCardZh ? "Synopsis / 简介 (中文):" : "Synopsis (English):"}</span>
+                        {isLoadingThisIntro && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-normal text-purple-600 dark:text-purple-400 animate-pulse ml-1">
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                            Loading full text...
+                          </span>
+                        )}
                       </div>
 
                       {isLongSummary && (
                         <button
                           type="button"
-                          onClick={() => toggleSummary(item.id)}
+                          onClick={() => toggleSummary(item)}
                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-950/60 transition cursor-pointer"
                         >
                           {isExpanded ? (
@@ -2191,7 +2254,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                       {isExpanded || !isLongSummary
                         ? renderHighlightedText(displaySummary, searchQuery)
                         : renderHighlightedText(
-                            displaySummary.slice(0, 85) + (displaySummary.length > 85 ? "..." : ""),
+                            displaySummary.slice(0, 110) + (displaySummary.length > 110 ? "..." : ""),
                             searchQuery
                           )}
                     </div>

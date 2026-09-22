@@ -20,6 +20,7 @@ import {
   ThumbsUp,
   Languages,
 } from "lucide-react";
+import { cleanAuthorName, cleanSummaryText } from "../utils/storeFormatters";
 
 export interface StoreSearchResult {
   id: string;
@@ -207,12 +208,66 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
   // Synopsis dropdown toggle state
   const [expandedSummaryIds, setExpandedSummaryIds] = useState<Record<string, boolean>>({});
+  const [loadingIntroIds, setLoadingIntroIds] = useState<Record<string, boolean>>({});
 
-  const toggleSummary = (id: string) => {
+  const toggleSummary = async (novel: StoreSearchResult) => {
+    const id = novel.id;
+    const isCurrentlyExpanded = !!expandedSummaryIds[id];
+
+    // Toggle UI expansion immediately
     setExpandedSummaryIds((prev) => ({
       ...prev,
-      [id]: !prev[id],
+      [id]: !isCurrentlyExpanded,
     }));
+
+    // If expanding and intro is short or ends with ellipsis, fetch full synopsis
+    const curIntro = novel.introZh || novel.intro || "";
+    const isTruncated = curIntro.endsWith("...") || curIntro.endsWith("…") || curIntro.length < 180;
+
+    if (!isCurrentlyExpanded && isTruncated && !loadingIntroIds[id]) {
+      setLoadingIntroIds((prev) => ({ ...prev, [id]: true }));
+      try {
+        const res = await fetch("/api/store/full-intro", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({
+            novelUrl: novel.novelUrl,
+            siteId: novel.siteId,
+            title: novel.title,
+            author: novel.author,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && (data.introZh || data.introEn)) {
+            setResults((prev) =>
+              prev.map((it) => {
+                if (it.id === id || it.novelUrl === novel.novelUrl) {
+                  return {
+                    ...it,
+                    introZh: data.introZh || it.introZh,
+                    introEn: data.introEn || it.introEn,
+                    intro: data.intro || it.intro,
+                    authorZh: cleanAuthorName(data.author || it.authorZh),
+                    author: cleanAuthorName(data.author || it.author),
+                    fileSize: data.fileSize || it.fileSize,
+                  };
+                }
+                return it;
+              })
+            );
+          }
+        }
+      } catch (e) {
+        // Fallback gracefully
+      } finally {
+        setLoadingIntroIds((prev) => ({ ...prev, [id]: false }));
+      }
+    }
   };
 
   // Keyword highlighting
@@ -840,10 +895,11 @@ export const StoreView: React.FC<StoreViewProps> = ({
             const isExpanded = !!expandedSummaryIds[novel.id];
             const isCardZh = !!chineseModeCards[novel.id];
             const cardTitle = isCardZh ? (novel.titleZh || novel.title) : (novel.titleEn || novel.title);
-            const cardAuthor = isCardZh ? (novel.authorZh || novel.author) : (novel.authorEn || novel.author);
+            const cardAuthor = cleanAuthorName(isCardZh ? (novel.authorZh || novel.author) : (novel.authorEn || novel.author));
             const cardIntro = isCardZh ? (novel.introZh || novel.intro) : (novel.introEn || novel.intro);
-            const displayIntro = cardIntro || "No synopsis available.";
-            const isLongIntro = displayIntro.length > 60 || displayIntro.includes("\n");
+            const displayIntro = cleanSummaryText(cardIntro) || "No synopsis available.";
+            const isLongIntro = displayIntro.length > 70 || displayIntro.includes("\n") || displayIntro.endsWith("...") || displayIntro.endsWith("…");
+            const isLoadingThisIntro = !!loadingIntroIds[novel.id];
 
             return (
               <div
@@ -964,15 +1020,21 @@ export const StoreView: React.FC<StoreViewProps> = ({
                 {displayIntro && (
                   <div className="rounded-lg bg-slate-50/90 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 p-2.5 sm:p-3 mb-2.5 text-[11px] sm:text-xs leading-relaxed text-slate-700 dark:text-slate-300">
                     <div className="flex items-center justify-between font-bold text-[10px] sm:text-[11px] text-purple-700 dark:text-purple-300 mb-1">
-                      <div className="flex items-center gap-1">
-                        <BookOpen className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <BookOpen className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400 shrink-0" />
                         <span>{isCardZh ? "Synopsis / 简介 (中文):" : "Synopsis (English):"}</span>
+                        {isLoadingThisIntro && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-normal text-purple-600 dark:text-purple-400 animate-pulse ml-1">
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                            Loading full text...
+                          </span>
+                        )}
                       </div>
 
                       {isLongIntro && (
                         <button
                           type="button"
-                          onClick={() => toggleSummary(novel.id)}
+                          onClick={() => toggleSummary(novel)}
                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-950/60 transition cursor-pointer"
                         >
                           {isExpanded ? (
@@ -994,7 +1056,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
                       {isExpanded || !isLongIntro
                         ? renderHighlightedText(displayIntro, query)
                         : renderHighlightedText(
-                            displayIntro.slice(0, 95) + (displayIntro.length > 95 ? "..." : ""),
+                            displayIntro.slice(0, 110) + (displayIntro.length > 110 ? "..." : ""),
                             query
                           )}
                     </div>

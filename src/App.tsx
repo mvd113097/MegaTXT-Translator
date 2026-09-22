@@ -9,17 +9,38 @@ import { UploadSection } from "./components/UploadSection";
 import { TranslationControls } from "./components/TranslationControls";
 import { ProgressBar } from "./components/ProgressBar";
 import { TranslationQueueHub } from "./components/TranslationQueueHub";
-import { GlossaryModal } from "./components/GlossaryModal";
-import { ExportModal } from "./components/ExportModal";
-import { TelegramSettingsModal } from "./components/TelegramSettingsModal";
 import { BottomNav } from "./components/BottomNav";
-import { HistoryModal } from "./components/HistoryModal";
 import { ActiveTranslationView } from "./components/ActiveTranslationView";
 import { TranslationCompleteView } from "./components/TranslationCompleteView";
-import { StoreView } from "./components/StoreView";
-import { ExploreView } from "./components/ExploreView";
-import { LibraryView } from "./components/LibraryView";
-import { NovelReaderModal } from "./components/NovelReaderModal";
+
+// Lazy-loaded components and modals to minimize initial bundle size and initial download
+const GlossaryModal = React.lazy(() =>
+  import("./components/GlossaryModal").then((m) => ({ default: m.GlossaryModal }))
+);
+const ExportModal = React.lazy(() =>
+  import("./components/ExportModal").then((m) => ({ default: m.ExportModal }))
+);
+const TelegramSettingsModal = React.lazy(() =>
+  import("./components/TelegramSettingsModal").then((m) => ({ default: m.TelegramSettingsModal }))
+);
+const HistoryModal = React.lazy(() =>
+  import("./components/HistoryModal").then((m) => ({ default: m.HistoryModal }))
+);
+const StoreView = React.lazy(() =>
+  import("./components/StoreView").then((m) => ({ default: m.StoreView }))
+);
+const ExploreView = React.lazy(() =>
+  import("./components/ExploreView").then((m) => ({ default: m.ExploreView }))
+);
+const LibraryView = React.lazy(() =>
+  import("./components/LibraryView").then((m) => ({ default: m.LibraryView }))
+);
+const NovelReaderModal = React.lazy(() =>
+  import("./components/NovelReaderModal").then((m) => ({ default: m.NovelReaderModal }))
+);
+const PasswordGate = React.lazy(() =>
+  import("./components/PasswordGate").then((m) => ({ default: m.PasswordGate }))
+);
 import {
   getSessionFromIdb,
   saveSessionToIdb,
@@ -30,7 +51,6 @@ import {
   PagodaHeaderIllustration,
   SakuraFooterDecoration,
 } from "./components/illustrations/StorybookArtwork";
-import { PasswordGate } from "./components/PasswordGate";
 import {
   TextChunk,
   TranslationStyle,
@@ -1584,25 +1604,36 @@ Export Timestamp: ${new Date().toLocaleString()}
 
   if (authStatus?.requiresPasscode && !authStatus?.passcodeVerified) {
     return (
-      <PasswordGate
-        onUnlockSuccess={(token) => {
-          if (token) {
-            try {
-              localStorage.setItem("megatext_auth_token", token);
-            } catch {}
-          }
-          setAuthStatus({
-            authenticated: true,
-            requiresGoogle: false,
-            requiresPasscode: true,
-            googleVerified: true,
-            passcodeVerified: true,
-            hasPasscodeConfigured: true,
-          });
-          // Auto-fetch progress immediately on password unlock: loads the latest cloud job status and full texts
-          syncCloudProgress(true, false);
-        }}
-      />
+      <React.Suspense
+        fallback={
+          <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-300">
+            <div className="flex items-center gap-3 bg-slate-900/90 px-6 py-4 rounded-2xl border border-slate-800 shadow-2xl">
+              <RefreshCw className="w-5 h-5 animate-spin text-purple-400" />
+              <span className="text-sm font-semibold text-slate-200">Loading security gate...</span>
+            </div>
+          </div>
+        }
+      >
+        <PasswordGate
+          onUnlockSuccess={(token) => {
+            if (token) {
+              try {
+                localStorage.setItem("megatext_auth_token", token);
+              } catch {}
+            }
+            setAuthStatus({
+              authenticated: true,
+              requiresGoogle: false,
+              requiresPasscode: true,
+              googleVerified: true,
+              passcodeVerified: true,
+              hasPasscodeConfigured: true,
+            });
+            // Auto-fetch progress immediately on password unlock: loads the latest cloud job status and full texts
+            syncCloudProgress(true, false);
+          }}
+        />
+      </React.Suspense>
     );
   }
 
@@ -1633,50 +1664,59 @@ Export Timestamp: ${new Date().toLocaleString()}
       <main className={`flex-1 w-full mx-auto px-3 sm:px-4 pt-3 pb-24 relative ${
         activeNavTab === "store" || activeNavTab === "explore" || activeNavTab === "library" ? "max-w-4xl" : "max-w-md"
       }`}>
-        {/* Library Tab View (Personal Bookshelf & Reading Progress) */}
-        <div className={activeNavTab === "library" ? "block" : "hidden"}>
-          <LibraryView
-            onOpenReader={handleOpenReader}
-            onSearchStore={(keyword, site = "aiqu226") => {
-              setStoreSearchTrigger({ query: keyword, site, timestamp: Date.now() });
-              setActiveNavTab("store");
-            }}
-            onTranslateWholeBook={(book) => {
-              // Redirect to store to download full chapters or start translation
-              setStoreSearchTrigger({ query: book.title, site: "all", timestamp: Date.now() });
-              setActiveNavTab("store");
-            }}
-          />
-        </div>
+        <React.Suspense
+          fallback={
+            <div className="flex flex-col items-center justify-center py-24 text-slate-400 dark:text-slate-500">
+              <RefreshCw className="h-7 w-7 animate-spin text-purple-600 mb-3" />
+              <span className="text-xs font-semibold tracking-wide uppercase">Loading View...</span>
+            </div>
+          }
+        >
+          {/* Library Tab View (Personal Bookshelf & Reading Progress) */}
+          <div className={activeNavTab === "library" ? "block" : "hidden"}>
+            <LibraryView
+              onOpenReader={handleOpenReader}
+              onSearchStore={(keyword, site = "aiqu226") => {
+                setStoreSearchTrigger({ query: keyword, site, timestamp: Date.now() });
+                setActiveNavTab("store");
+              }}
+              onTranslateWholeBook={(book) => {
+                // Redirect to store to download full chapters or start translation
+                setStoreSearchTrigger({ query: book.title, site: "all", timestamp: Date.now() });
+                setActiveNavTab("store");
+              }}
+            />
+          </div>
 
-        {/* Store Tab View */}
-        <div className={activeNavTab === "store" ? "block" : "hidden"}>
-          <StoreView
-            onImportNovel={(title, rawText) => {
-              handleLoadText(rawText, title, 3000, true);
-              setActiveNavTab("home");
-            }}
-            getAuthHeaders={getAuthHeaders}
-            externalSearchTrigger={storeSearchTrigger}
-            onOpenReader={handleOpenReader}
-          />
-        </div>
+          {/* Store Tab View */}
+          <div className={activeNavTab === "store" ? "block" : "hidden"}>
+            <StoreView
+              onImportNovel={(title, rawText) => {
+                handleLoadText(rawText, title, 3000, true);
+                setActiveNavTab("home");
+              }}
+              getAuthHeaders={getAuthHeaders}
+              externalSearchTrigger={storeSearchTrigger}
+              onOpenReader={handleOpenReader}
+            />
+          </div>
 
-        {/* Explore & Leaderboards Tab View */}
-        <div className={activeNavTab === "explore" ? "block" : "hidden"}>
-          <ExploreView
-            onImportNovel={(title, rawText) => {
-              handleLoadText(rawText, title, 3000, true);
-              setActiveNavTab("home");
-            }}
-            getAuthHeaders={getAuthHeaders}
-            onSearchStore={(keyword, site = "aiqu226") => {
-              setStoreSearchTrigger({ query: keyword, site, timestamp: Date.now() });
-              setActiveNavTab("store");
-            }}
-            onOpenReader={handleOpenReader}
-          />
-        </div>
+          {/* Explore & Leaderboards Tab View */}
+          <div className={activeNavTab === "explore" ? "block" : "hidden"}>
+            <ExploreView
+              onImportNovel={(title, rawText) => {
+                handleLoadText(rawText, title, 3000, true);
+                setActiveNavTab("home");
+              }}
+              getAuthHeaders={getAuthHeaders}
+              onSearchStore={(keyword, site = "aiqu226") => {
+                setStoreSearchTrigger({ query: keyword, site, timestamp: Date.now() });
+                setActiveNavTab("store");
+              }}
+              onOpenReader={handleOpenReader}
+            />
+          </div>
+        </React.Suspense>
 
         {/* Home Tab Views (Upload / Translating / Completed) */}
         <div className={activeNavTab === "home" ? "block" : "hidden"}>
@@ -1766,52 +1806,100 @@ Export Timestamp: ${new Date().toLocaleString()}
         onChangeTab={handleBottomNavChange}
       />
 
-      {/* History Drawer Modal */}
-      <HistoryModal
-        isOpen={isHistoryOpen}
-        onClose={() => {
-          setIsHistoryOpen(false);
-          setActiveNavTab("home");
-        }}
-        session={session}
-        onDownloadProgress={handleDownloadProgress}
-        onReset={handleReset}
-        getAuthHeaders={getAuthHeaders}
-        onSelectNovel={(fileName) => syncCloudProgress(true, true, fileName)}
-      />
-
-      {/* Terminology & Glossary Modal */}
-      <GlossaryModal
-        isOpen={isGlossaryOpen}
-        onClose={() => setIsGlossaryOpen(false)}
-        glossary={glossary}
-        onSaveGlossary={(newGlossary) => {
-          setGlossary(newGlossary);
-          setSession((prev) =>
-            prev ? { ...prev, glossary: newGlossary } : null
-          );
-        }}
-        sampleChineseText={session?.chunks[0]?.chineseText || ""}
-      />
-
-      {/* Export & Download Modal */}
-      {session && (
-        <ExportModal
-          isOpen={isExportOpen}
-          onClose={() => setIsExportOpen(false)}
-          chunks={session.chunks}
-          fileName={session.fileName}
+      {/* Lazy Modal Suspense Boundary */}
+      <React.Suspense fallback={null}>
+        {/* History Drawer Modal */}
+        <HistoryModal
+          isOpen={isHistoryOpen}
+          onClose={() => {
+            setIsHistoryOpen(false);
+            setActiveNavTab("home");
+          }}
+          session={session}
+          onDownloadProgress={handleDownloadProgress}
+          onReset={handleReset}
+          getAuthHeaders={getAuthHeaders}
+          onSelectNovel={(fileName) => syncCloudProgress(true, true, fileName)}
         />
-      )}
 
-      {/* Telegram Notifications Settings Modal */}
-      <TelegramSettingsModal
-        isOpen={isTelegramSettingsOpen}
-        onClose={() => {
-          setIsTelegramSettingsOpen(false);
-          setActiveNavTab("home");
-        }}
-      />
+        {/* Terminology & Glossary Modal */}
+        <GlossaryModal
+          isOpen={isGlossaryOpen}
+          onClose={() => setIsGlossaryOpen(false)}
+          glossary={glossary}
+          onSaveGlossary={(newGlossary) => {
+            setGlossary(newGlossary);
+            setSession((prev) =>
+              prev ? { ...prev, glossary: newGlossary } : null
+            );
+          }}
+          sampleChineseText={session?.chunks[0]?.chineseText || ""}
+        />
+
+        {/* Export & Download Modal */}
+        {session && (
+          <ExportModal
+            isOpen={isExportOpen}
+            onClose={() => setIsExportOpen(false)}
+            chunks={session.chunks}
+            fileName={session.fileName}
+          />
+        )}
+
+        {/* Telegram Notifications Settings Modal */}
+        <TelegramSettingsModal
+          isOpen={isTelegramSettingsOpen}
+          onClose={() => {
+            setIsTelegramSettingsOpen(false);
+            setActiveNavTab("home");
+          }}
+        />
+
+        {/* Novel Reader Modal & Minimized Background Player */}
+        {readerNovel && (
+          <NovelReaderModal
+            key={`${readerNovel.novelTitle}__${readerNovel.novelUrl || readerNovel.siteId || ""}`}
+            isOpen={isReaderOpen}
+            isMinimized={isReaderMinimized}
+            onClose={handleCloseReader}
+            onToggleMinimize={() => setIsReaderMinimized((prev) => !prev)}
+            onUpdateChapterIndex={(chapterIndex, chapterTitle, allChapters) => {
+              setReaderNovel((prev) => {
+                if (!prev) return null;
+                return {
+                  ...prev,
+                  chapterIndex,
+                  ...(allChapters && allChapters.length > 0 ? { allChapters } : {}),
+                };
+              });
+            }}
+            novelTitle={readerNovel.novelTitle}
+            author={readerNovel.author}
+            coverUrl={readerNovel.coverUrl}
+            novelUrl={readerNovel.novelUrl}
+            siteId={readerNovel.siteId}
+            initialChapterIndex={readerNovel.chapterIndex || 1}
+            totalChapters={readerNovel.totalChapters || 1}
+            allChapters={readerNovel.allChapters}
+            initialContent={readerNovel.content}
+            initialEnglishContent={readerNovel.englishContent}
+            getAuthHeaders={getAuthHeaders}
+            sessionChunks={
+              session &&
+              isSameNovel(session.fileName, readerNovel.novelTitle)
+                ? session.chunks
+                : undefined
+            }
+            onImportNovel={() => {
+              if (readerNovel.novelTitle) {
+                setStoreSearchTrigger({ query: readerNovel.novelTitle, timestamp: Date.now() });
+                setActiveNavTab("store");
+                setIsReaderOpen(false);
+              }
+            }}
+          />
+        )}
+      </React.Suspense>
 
       {/* Floating Toast notification when user downloads progress or gets a status alert */}
       {toastData && (
@@ -1855,50 +1943,6 @@ Export Timestamp: ${new Date().toLocaleString()}
             </div>
           )}
         </div>
-      )}
-      {/* Novel Reader Modal & Minimized Background Player */}
-      {readerNovel && (
-        <NovelReaderModal
-          key={`${readerNovel.novelTitle}__${readerNovel.novelUrl || readerNovel.siteId || ""}`}
-          isOpen={isReaderOpen}
-          isMinimized={isReaderMinimized}
-          onClose={handleCloseReader}
-          onToggleMinimize={() => setIsReaderMinimized((prev) => !prev)}
-          onUpdateChapterIndex={(chapterIndex, chapterTitle, allChapters) => {
-            setReaderNovel((prev) => {
-              if (!prev) return null;
-              return {
-                ...prev,
-                chapterIndex,
-                ...(allChapters && allChapters.length > 0 ? { allChapters } : {}),
-              };
-            });
-          }}
-          novelTitle={readerNovel.novelTitle}
-          author={readerNovel.author}
-          coverUrl={readerNovel.coverUrl}
-          novelUrl={readerNovel.novelUrl}
-          siteId={readerNovel.siteId}
-          initialChapterIndex={readerNovel.chapterIndex || 1}
-          totalChapters={readerNovel.totalChapters || 1}
-          allChapters={readerNovel.allChapters}
-          initialContent={readerNovel.content}
-          initialEnglishContent={readerNovel.englishContent}
-          getAuthHeaders={getAuthHeaders}
-          sessionChunks={
-            session &&
-            isSameNovel(session.fileName, readerNovel.novelTitle)
-              ? session.chunks
-              : undefined
-          }
-          onImportNovel={() => {
-            if (readerNovel.novelTitle) {
-              setStoreSearchTrigger({ query: readerNovel.novelTitle, timestamp: Date.now() });
-              setActiveNavTab("store");
-              setIsReaderOpen(false);
-            }
-          }}
-        />
       )}
     </div>
   );

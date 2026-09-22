@@ -1,4 +1,3 @@
-import JSZip from "jszip";
 import { TextChunk } from "../types";
 import { downloadFile } from "./fileDownloader";
 import { getContiguousCompletedChunks } from "./chunker";
@@ -28,6 +27,7 @@ export async function generateEpubBlob(
   chunks: TextChunk[],
   options: EpubOptions = {}
 ): Promise<Blob> {
+  const { default: JSZip } = await import("jszip");
   const zip = new JSZip();
   const bookTitle = options.bookTitle || "Translated Novel";
   const author = options.author || "Web Novel Translator";
