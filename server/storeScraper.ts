@@ -151,6 +151,16 @@ export function cleanSummaryText(rawSummary?: string): string {
     ""
   );
 
+  // Strip 52shuku categories, tips, reading history, and pagination links
+  s = s.replace(/(?:所属专题|所属栏目|所属分类|Topics)[：:].*$/is, "");
+  s = s.replace(/Tips[：:].*$/is, "");
+  s = s.replace(/(?:开始阅读|阅读记录).*$/is, "");
+  s = s.replace(/(?:Start reading|Reading history).*$/is, "");
+  s = s.replace(/(?:第\s*\d+\s*页\s*){2,}.*$/is, "");
+  s = s.replace(/(?:Page\s*\d+\s*){2,}.*$/is, "");
+  s = s.replace(/第1页第2页.*$/is, "");
+  s = s.replace(/Page 1 Page 2.*$/is, "");
+
   return s.trim();
 }
 
@@ -1394,6 +1404,30 @@ export async function fetchNovelTOC(
       intro = rawBody.substring(idx);
     }
   }
+
+  // For 52shuku, main page summary is often truncated. Fetch page 2 (_2.html / Chapter 1) for the complete, unabridged synopsis
+  if ((siteId === "52shuku" || novelUrl.includes("52shuku.net")) && novelUrl.endsWith(".html") && !novelUrl.endsWith("_2.html")) {
+    const page2Url = novelUrl.replace(/\.html$/, "_2.html");
+    try {
+      const page2Html = await fetchHtml(page2Url);
+      const $2 = cheerio.load(page2Html);
+      const p2Text = $2(".article-content, article").text().trim();
+      if (p2Text && p2Text.length > 30) {
+        let p2Synopsis = p2Text;
+        const chapIdx = p2Synopsis.search(/(?:第\s*1\s*章|第一章|第1页|第2页)/);
+        if (chapIdx !== -1) {
+          p2Synopsis = p2Synopsis.substring(0, chapIdx);
+        }
+        const cleanedP2 = cleanSummaryText(p2Synopsis);
+        if (cleanedP2 && cleanedP2.length > 15) {
+          intro = cleanedP2;
+        }
+      }
+    } catch (e: any) {
+      console.warn("52shuku _2.html page2 intro fetch warning:", e.message);
+    }
+  }
+
   if (!intro || intro.length < 5) {
     intro = fallbackIntro || "No summary available.";
   }
@@ -3331,7 +3365,7 @@ const SHUKU_VERIFIED_BL_NOVELS: Record<string, { likes: number; year: number; au
   "无罪": { likes: 26350, year: 2017, author: "万灭之殇", url: "https://www.52shuku.net/xiandaidushi/2861.html" },
   "帝王之宠": { likes: 25985, year: 2017, author: "万灭之殇", url: "https://www.52shuku.net/jiakong/2862.html" },
   "难以放手": { likes: 25623, year: 2017, author: "万灭之殇", url: "https://www.52shuku.net/xiandaidushi/2863.html" },
-  "天官赐福": { likes: 25000, year: 2017, author: "墨香铜臭", url: "https://www.52shuku.net/jiakong/hpS7.html" },
+  "天官赐福": { likes: 324033, year: 2017, author: "墨香铜臭", url: "https://www.52shuku.net/jiakong/hpS7.html" },
   "镇魂": { likes: 24000, year: 2017, author: "priest", url: "https://www.52shuku.net/jiakong/196.html" },
   "提灯看刺刀": { likes: 22000, year: 2017, author: "淮上", url: "https://www.52shuku.net/xiandaidushi/336.html" },
   "缠缚": { likes: 21996, year: 2017, author: "万灭之殇", url: "https://www.52shuku.net/xiandaidushi/2864.html" },
