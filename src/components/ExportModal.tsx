@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { TextChunk } from "../types";
-import { countEnglishWords, analyzeChunkContinuity, getContiguousCompletedChunks } from "../utils/chunker";
+import { countEnglishWords, analyzeChunkContinuity, getContiguousCompletedChunks, cleanAndDeduplicateChunks } from "../utils/chunker";
 import { downloadEpub } from "../utils/epubGenerator";
 import { downloadFile } from "../utils/fileDownloader";
 
@@ -59,12 +59,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const allCompletedChunks = continuity.allCompletedChunks;
   
   // Use all completed chunks if all are done or if all completed chunks form a complete set
-  const exportChunks =
+  const rawExportChunks =
     allCompletedChunks.length >= chunks.length || allCompletedChunks.length > contiguousChunks.length
       ? allCompletedChunks
       : contiguousChunks.length > 0
       ? contiguousChunks
       : allCompletedChunks;
+
+  // Clean and deduplicate to strip empty stubs and merge duplicates seamlessly
+  const exportChunks = cleanAndDeduplicateChunks(rawExportChunks);
 
   const totalEnglishWords = exportChunks.reduce(
     (acc, c) => acc + countEnglishWords(c.englishText),
@@ -76,7 +79,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   // Generate output string based on format
   const generateExportContent = (): string => {
     if (exportFormat === "chinese_txt") {
-      const sortedChunks = [...chunks].sort((a, b) => a.index - b.index);
+      const sortedChunks = cleanAndDeduplicateChunks([...chunks].sort((a, b) => a.index - b.index));
       return sortedChunks
         .map((c) => {
           const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";

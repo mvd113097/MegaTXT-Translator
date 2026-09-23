@@ -5,6 +5,7 @@ import https from "https";
 import JSZip from "jszip";
 import { translateWithGoogle } from "./googleTranslate";
 import { SHUKU_AUTHENTIC_MAP } from "./shukuAuthenticData";
+import { cleanAndDeduplicateChapterList } from "../src/utils/chunkCleaner";
 
 /**
  * Strips metadata noise, duplicated tokens, and glued statistics from author names
@@ -208,6 +209,7 @@ export interface StoreNovelDetail {
   intro?: string;
   coverUrl?: string;
   chapters: ChapterItem[];
+  totalChapters?: number;
   fileSize?: string;
 }
 
@@ -271,14 +273,16 @@ function encodeGBKHex(str: string): string {
 
 // Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8)
 async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
+  const isCzbooks = url.includes("czbooks");
   const response = await axios.get(url, {
     responseType: "arraybuffer",
     timeout: timeoutMs,
     httpsAgent: sslAgent,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "User-Agent": isCzbooks
+        ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+        : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Accept-Language": isCzbooks ? "zh-TW,zh;q=0.9,en;q=0.8" : "zh-CN,zh;q=0.9,en;q=0.8",
       ...headers,
     },
   });
@@ -1230,10 +1234,23 @@ export function expandKeywordsForSearch(query: string): string[] {
     "childhood sweethearts": ["青梅竹马"],
     ceo: ["总裁", "豪门"],
     tycoon: ["豪门", "总裁"],
+    tribe: ["部落"],
+    tribes: ["部落"],
+    tribal: ["部落"],
+    "tribe in chinese": ["部落"],
   };
 
+  const cleanNoSuffix = clean
+    .replace(/\s*(?:in chinese|in jjwxc|in english|novel|novels|bl|danmei)\s*/gi, " ")
+    .trim();
+
   for (const [englishTerm, chineseTerms] of Object.entries(termMap)) {
-    if (clean === englishTerm || clean.includes(englishTerm)) {
+    if (
+      clean === englishTerm ||
+      clean.includes(englishTerm) ||
+      cleanNoSuffix === englishTerm ||
+      cleanNoSuffix.includes(englishTerm)
+    ) {
       for (const t of chineseTerms) {
         if (!queries.includes(t)) queries.push(t);
       }
@@ -1403,16 +1420,33 @@ export async function fetchNovelTOC(
   author = cleanAuthorName(author || fallbackAuthor);
 
   let intro = "";
-  // Find full synopsis from dedicated containers
-  const introEl = $(".intro, .desc, .book-intro, .article-content, #intro, #bookintro, .read_chapterDetail, .readDetail, .navtxt").first();
-  if (introEl.length > 0) {
-    intro = introEl.text().trim();
+  // Check JJWXC first for #novelintro
+  if (siteId === "jjwxc" || novelUrl.includes("jjwxc.net")) {
+    const jjwxcIntroEl = $("#novelintro");
+    if (jjwxcIntroEl.length > 0) {
+      const clone = jjwxcIntroEl.clone();
+      clone.find("br").replaceWith("\n");
+      intro = clone.text().trim();
+    }
   }
+
+  if (!intro) {
+    // Find full synopsis from dedicated containers
+    const introEl = $(".intro, .desc, .book-intro, .article-content, #intro, #bookintro, .read_chapterDetail, .readDetail, .navtxt, #novelintro").first();
+    if (introEl.length > 0) {
+      const clone = introEl.clone();
+      clone.find("br").replaceWith("\n");
+      intro = clone.text().trim();
+    }
+  }
+
   if (!intro || intro.length < 10) {
-    const rawBody = $.text();
-    const idx = rawBody.search(/(?:小说简介|简介|文案)[：:]/);
-    if (idx !== -1) {
-      intro = rawBody.substring(idx);
+    if (!novelUrl.includes("jjwxc.net")) {
+      const rawBody = $.text();
+      const idx = rawBody.search(/(?:小说简介|简介|文案)[：:]/);
+      if (idx !== -1) {
+        intro = rawBody.substring(idx, idx + 2000);
+      }
     }
   }
 
@@ -1725,9 +1759,12 @@ export async function fetchNovelTOC(
 
   const cleanSiteName = getShortSiteName(siteId);
 
+  // Automatically filter out anti-leech empty chapter stubs and deduplicate crawler entries
+  const cleanedChapters = cleanAndDeduplicateChapterList(chapters);
+
   // If no fileSize was explicitly stated, estimate from chapter count or intro
-  if (!fileSize && chapters.length > 0) {
-    fileSize = `${((chapters.length * 3000 * 3.0) / (1024 * 1024)).toFixed(2)} MB`;
+  if (!fileSize && cleanedChapters.length > 0) {
+    fileSize = `${((cleanedChapters.length * 3000 * 3.0) / (1024 * 1024)).toFixed(2)} MB`;
   }
 
   return {
@@ -1738,7 +1775,8 @@ export async function fetchNovelTOC(
     novelUrl,
     intro,
     coverUrl,
-    chapters,
+    chapters: cleanedChapters,
+    totalChapters: cleanedChapters.length,
     fileSize,
   };
 }
@@ -2131,6 +2169,7 @@ export interface ExploreNovelItem {
   summary: string;
   summaryZh?: string;
   summaryEn?: string;
+  hasFullSynopsis?: boolean;
   points: number; // Real JJWXC work points e.g. 23563821056
   likes: number; // e.g. bookmarks or popularity
   aiquLikes?: number; // Native Aiqu site forum upvotes (赞)
@@ -2286,10 +2325,8 @@ export const JJWXC_TAG_ID_MAP: Record<string, number> = {
   "基建": 225,
   "宫斗": 32,
   "宫廷侯爵": 32,
-  "史前": 69,
-  "原始": 69,
-  "部落": 69,
-  "洪荒": 69,
+  "血族": 69,
+  "吸血鬼": 69,
   "无限流": 83,
   "快穿": 125,
   "重生": 75,
@@ -2408,16 +2445,29 @@ function getNovelPointsAndLikes(_title: string, _author: string, _year: number):
 async function scrapeJjwxcExplore(options: ExploreFilterOptions): Promise<ExploreNovelItem[]> {
   const items: ExploreNovelItem[] = [];
 
-  // Determine tag ID or keyword
-  let tagId: number | undefined;
-  const rawTag = options.tag && options.tag !== "all" ? options.tag : "";
+  // Determine primary search keyword and tag
+  const rawTag = options.tag && options.tag !== "all" ? options.tag.trim() : "";
   const rawQuery = options.query?.trim() || "";
 
-  if (rawTag && JJWXC_TAG_ID_MAP[rawTag]) {
-    tagId = JJWXC_TAG_ID_MAP[rawTag];
-  } else if (rawQuery && JJWXC_TAG_ID_MAP[rawQuery]) {
-    tagId = JJWXC_TAG_ID_MAP[rawQuery];
+  let primarySearchTerm = "";
+  if (rawQuery) {
+    if (/[\u4e00-\u9fa5]/.test(rawQuery)) {
+      primarySearchTerm = rawQuery;
+    } else {
+      const exp = expandKeywordsForSearch(rawQuery);
+      const chTerm = exp.find((t) => /[\u4e00-\u9fa5]/.test(t));
+      primarySearchTerm = chTerm || rawQuery;
+    }
+  } else if (rawTag && rawTag !== "all") {
+    primarySearchTerm = rawTag;
   }
+
+  let tagId: number | undefined;
+  if (primarySearchTerm && JJWXC_TAG_ID_MAP[primarySearchTerm]) {
+    tagId = JJWXC_TAG_ID_MAP[primarySearchTerm];
+  }
+
+  const hasSpecificSearch = Boolean(primarySearchTerm);
 
   // Orientation mapping: 2 = BL (纯爱), 1 = Het (言情), 5 = No CP (无CP), 0 = All
   let xx = 0;
@@ -2426,10 +2476,11 @@ async function scrapeJjwxcExplore(options: ExploreFilterOptions): Promise<Explor
   else if (options.orientation === "no_cp") xx = 5;
 
   // Sort mapping: 2 = Work Points (作品积分), 4 = Bookmarks (收藏), 1 = Recent Update, 5 = Word count (字数)
+  // For JJWXC, default to sortType = 2 (Article Points / 作品积分) so results are highest to lowest
   let sortType = 2;
   if (options.sort === "recent") sortType = 1;
-  else if (options.sort === "likes") sortType = 4;
   else if (options.sort === "chapters") sortType = 5;
+  else sortType = 2;
 
   const gbkEncodeHex = (str: string) => {
     const gbkBuf = iconv.encode(str, "gbk");
@@ -2453,32 +2504,31 @@ async function scrapeJjwxcExplore(options: ExploreFilterOptions): Promise<Explor
       : "";
 
   const bookbaseUrls: string[] = [];
-  if (tagId) {
-    bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?bq=${tagId}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}`);
-  } else if (rawTag) {
-    const hexTag = gbkEncodeHex(rawTag);
-    bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?searchkeywords=${hexTag}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}`);
-  }
-  if (rawQuery) {
-    const hexQuery = gbkEncodeHex(rawQuery);
-    bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?searchkeywords=${hexQuery}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}`);
-  }
-
-  // Always query JJWXC bookbase for orientation / year filters so BL (纯爱), No CP, and specific years return rich results
-  if (xx !== 0 || yearParam || bookbaseUrls.length === 0) {
+  if (hasSpecificSearch) {
+    if (tagId && !rawQuery) {
+      // Official tag category
+      bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?bq=${tagId}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}`);
+      bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?bq=${tagId}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}&page=2`);
+    } else {
+      // Exact search query on JJWXC search engine
+      const hex = gbkEncodeHex(primarySearchTerm);
+      bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?searchkeywords=${hex}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}`);
+      bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?searchkeywords=${hex}${xx !== 0 ? `&xx=${xx}` : ""}${yearParam}&sortType=${sortType}&page=2`);
+    }
+  } else {
+    // Browsing general rankings without search query or tag
     if (xx !== 0) {
       bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?xx=${xx}${yearParam}&sortType=${sortType}`);
       bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?xx=${xx}${yearParam}&sortType=${sortType}&page=2`);
     } else {
-      // All orientations: include both Pure Love (BL, xx=2) and Het (言情, xx=1)
       bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?xx=2${yearParam}&sortType=${sortType}`);
       bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?xx=1${yearParam}&sortType=${sortType}`);
       bookbaseUrls.push(`https://www.jjwxc.net/bookbase.php?xx=5${yearParam}&sortType=${sortType}`);
     }
   }
 
-  // 1. Scrape TopTen ranking tables (Note: JJWXC topten.php is exclusively BG / 言情, so skip when BL or No CP is requested)
-  if (options.orientation !== "bl" && options.orientation !== "no_cp") {
+  // 1. Scrape TopTen ranking tables (Note: JJWXC topten.php is exclusively BG / 言情, so skip when BL or No CP is requested, or when searching a specific query)
+  if (!hasSpecificSearch && options.orientation !== "bl" && options.orientation !== "no_cp") {
     for (const url of toptenUrls) {
     try {
       const res = await axios.get(url, {
@@ -2662,7 +2712,7 @@ async function scrapeJjwxcExplore(options: ExploreFilterOptions): Promise<Explor
           dateStr: pubTime || `${year}-01-01`,
           orientation,
           orientationLabel,
-          tags: Array.from(new Set([...tags, ...(rawTag && rawTag !== "all" ? [rawTag] : []), ...(rawQuery ? [rawQuery] : [])])),
+          tags: Array.from(new Set([...tags, ...(rawTag && rawTag !== "all" ? [rawTag] : [])])),
           summary: summary || `JJWXC 积分榜作品 (${typeStr})，字数：${wordCount.toLocaleString()} 字。`,
           points: rawPoints,
           likes,
@@ -2743,7 +2793,216 @@ async function scrapeJjwxcExplore(options: ExploreFilterOptions): Promise<Explor
     }
   }
 
-  return items;
+  // Deduplicate JJWXC items while preserving order
+  const seenKeys = new Set<string>();
+  const uniqueItems: ExploreNovelItem[] = [];
+  for (const it of items) {
+    const key = `${it.title.trim().toLowerCase()}_${it.author.trim().toLowerCase()}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      uniqueItems.push(it);
+    }
+  }
+
+  // Ensure JJWXC items are strictly sorted from highest to lowest in Article Points (作品积分)
+  if (options.sort === "recent") {
+    uniqueItems.sort((a, b) => (b.year || 0) - (a.year || 0) || (b.dateStr || "").localeCompare(a.dateStr || ""));
+  } else if (options.sort === "chapters") {
+    uniqueItems.sort((a, b) => (b.wordCount || 0) - (a.wordCount || 0) || (b.chapterCount || 0) - (a.chapterCount || 0));
+  } else {
+    uniqueItems.sort((a, b) => (b.points || 0) - (a.points || 0) || (b.likes || 0) - (a.likes || 0));
+  }
+
+  return uniqueItems;
+}
+
+const CZBOOKS_EXPLORE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0";
+
+/**
+ * CZBooks (小说狂人 - czbooks.net) Explorer & Ranking Scraper
+ * Results are strictly ordered highest to lowest by Bookmark count (收藏数) - NOT views count.
+ */
+async function scrapeCzbooksExplore(options: ExploreFilterOptions): Promise<ExploreNovelItem[]> {
+  const items: ExploreNovelItem[] = [];
+  const seenUrls = new Set<string>();
+
+  const rawQuery = options.query?.trim() || "";
+  const rawTag = options.tag && options.tag !== "all" ? options.tag.trim() : "";
+  const activeTags = options.tags && options.tags.length > 0
+    ? options.tags.filter((t) => t && t !== "all")
+    : (rawTag ? [rawTag] : []);
+
+  // Expand English queries (e.g. "tribe" -> "部落", "farming" -> "种田")
+  let cleanQuery = "";
+  if (rawQuery) {
+    if (/[\u4e00-\u9fa5]/.test(rawQuery)) {
+      cleanQuery = rawQuery;
+    } else {
+      const exp = expandKeywordsForSearch(rawQuery);
+      const chTerm = exp.find((t) => /[\u4e00-\u9fa5]/.test(t));
+      cleanQuery = chTerm || rawQuery;
+    }
+  }
+
+  const urlsToFetch: string[] = [];
+
+  if (cleanQuery) {
+    urlsToFetch.push(`https://czbooks.net/s/${encodeURIComponent(cleanQuery)}`);
+    urlsToFetch.push(`https://czbooks.net/s/${encodeURIComponent(cleanQuery)}/2`);
+  } else if (activeTags.length > 0) {
+    for (const tg of activeTags.slice(0, 2)) {
+      urlsToFetch.push(`https://czbooks.net/s/${encodeURIComponent(tg)}`);
+      urlsToFetch.push(`https://czbooks.net/s/${encodeURIComponent(tg)}/2`);
+    }
+  } else {
+    const ori = options.orientation || "all";
+    if (ori === "bl") {
+      urlsToFetch.push("https://czbooks.net/c/danmei/total");
+      urlsToFetch.push("https://czbooks.net/c/danmei");
+      urlsToFetch.push("https://czbooks.net/c/danmei/2");
+    } else if (ori === "het") {
+      urlsToFetch.push("https://czbooks.net/c/yanqing/total");
+      urlsToFetch.push("https://czbooks.net/c/yanqing");
+      urlsToFetch.push("https://czbooks.net/c/yanqing/2");
+    } else {
+      // Official CZBooks Bookmarks leaderboard (收藏榜)
+      urlsToFetch.push("https://czbooks.net/c/favorite");
+      urlsToFetch.push("https://czbooks.net/c/favorite/2");
+      urlsToFetch.push("https://czbooks.net/c/danmei/total");
+      urlsToFetch.push("https://czbooks.net/c/yanqing/total");
+    }
+  }
+
+  for (const url of urlsToFetch) {
+    try {
+      const html = await fetchHtml(url, {
+        "User-Agent": CZBOOKS_EXPLORE_UA,
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        Referer: "https://czbooks.net/",
+      });
+      const $ = cheerio.load(html);
+
+      $("ul.novel-list > li").each((_, el) => {
+        const a = $(el).find("a[href*=\"/n/\"]").first();
+        const rawHref = a.attr("href") || "";
+        if (!rawHref) return;
+
+        const novelUrl = rawHref.startsWith("//")
+          ? "https:" + rawHref
+          : rawHref.startsWith("http")
+          ? rawHref
+          : `https://czbooks.net${rawHref}`;
+
+        if (seenUrls.has(novelUrl)) return;
+        seenUrls.add(novelUrl);
+
+        let title = $(el).find(".novel-item-title, .title, .name").first().text().trim() || a.text().trim();
+        let rawAuthor = $(el).find(".novel-item-author, .author").first().text().trim().replace(/作者[：:]\s*/, "");
+
+        if (title.includes("_")) {
+          const parts = title.split("_");
+          title = parts[0].trim();
+          if (!rawAuthor || rawAuthor === "Unknown") {
+            rawAuthor = parts[1].replace(/【.*】/g, "").trim();
+          }
+        }
+
+        title = title
+          .replace(/【(?:完結|完本|全本|全書|番外)[^】]*】/g, "")
+          .replace(/\s*【完结】.*$/i, "")
+          .replace(/[_\s]+$/g, "")
+          .trim();
+
+        if (!title) return;
+
+        const coverUrl = $(el).find("img").attr("src") || "";
+        const dateStr = $(el).find(".novel-item-date").text().trim();
+        const yearMatch = dateStr.match(/(\d{4})/);
+        const year = yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear();
+
+        const latestChapter = $(el).find(".novel-item-newest-chapter a, .novel-item-newest-chapter").text().trim().replace(/^最新[：:]\s*/, "");
+
+        // Bookmarks count (收藏数) - User requirement: NOT views count!
+        const bookmarkText = $(el).find(".novel-item-status li:has(.fa-bookmark)").text().trim();
+        let bookmarks = 0;
+        if (bookmarkText) {
+          const bClean = bookmarkText.replace(/,/g, "").trim();
+          if (bClean.toLowerCase().includes("w") || bClean.includes("萬") || bClean.includes("万")) {
+            bookmarks = Math.round(parseFloat(bClean) * 10000);
+          } else if (bClean.toLowerCase().includes("k")) {
+            bookmarks = Math.round(parseFloat(bClean) * 1000);
+          } else {
+            bookmarks = parseInt(bClean, 10) || 0;
+          }
+        }
+
+        let orientation: "bl" | "het" | "no_cp" | "general" = "general";
+        let orientationLabel = "General";
+
+        if (url.includes("/danmei") || title.includes("耽美") || title.includes("純愛") || title.includes("純情") || title.includes("攻") || title.includes("受") || title.includes("男男") || title.includes("ABO") || title.includes("快穿")) {
+          orientation = "bl";
+          orientationLabel = "BL (耽美)";
+        } else if (url.includes("/yanqing") || title.includes("言情") || title.includes("嬌妻") || title.includes("王妃") || title.includes("總裁") || title.includes("娘子")) {
+          orientation = "het";
+          orientationLabel = "Het (言情)";
+        }
+
+        const novelIdMatch = novelUrl.match(/\/n\/([a-zA-Z0-9]+)/);
+        const czId = novelIdMatch ? novelIdMatch[1] : `${items.length}`;
+
+        items.push({
+          id: `czbooks_${czId}`,
+          title,
+          author: rawAuthor || "Unknown",
+          siteId: "czbooks",
+          siteName: "czbooks",
+          novelUrl,
+          coverUrl: coverUrl.startsWith("//") ? "https:" + coverUrl : coverUrl,
+          dateStr,
+          year,
+          orientation,
+          orientationLabel,
+          tags: [orientation === "bl" ? "耽美" : orientation === "het" ? "言情" : "小说狂人"],
+          summary: `${title} - ${rawAuthor} (小說狂人 czbooks.net)`,
+          points: bookmarks,
+          likes: bookmarks, // Bookmark count as community appreciation
+          latestChapter,
+          status: "完结",
+        });
+      });
+    } catch (e: any) {
+      console.warn(`Error scraping czbooks ${url}:`, e.message);
+    }
+  }
+
+  // Deduplicate items
+  const deduped: ExploreNovelItem[] = [];
+  const seenKeys = new Set<string>();
+  for (const it of items) {
+    const k = `${it.title.toLowerCase()}_${it.author.toLowerCase()}`;
+    if (!seenKeys.has(k)) {
+      seenKeys.add(k);
+      deduped.push(it);
+    }
+  }
+
+  // Sorting: Highest to lowest in bookmarks (NOT views count)
+  if (options.sort === "recent") {
+    deduped.sort((a, b) => (b.year || 0) - (a.year || 0) || (b.dateStr || "").localeCompare(a.dateStr || ""));
+  } else if (options.sort === "chapters") {
+    deduped.sort((a, b) => (b.wordCount || 0) - (a.wordCount || 0) || (b.chapterCount || 0) - (a.chapterCount || 0));
+  } else {
+    deduped.sort((a, b) => {
+      if (cleanQuery) {
+        const aExact = a.title.includes(cleanQuery) ? 1 : 0;
+        const bExact = b.title.includes(cleanQuery) ? 1 : 0;
+        if (bExact !== aExact) return bExact - aExact;
+      }
+      return (b.likes || 0) - (a.likes || 0);
+    });
+  }
+
+  return deduped;
 }
 
 // Helper to build smart search queries based on user's filters (trope, orientation, custom keywords, year)
@@ -2759,6 +3018,19 @@ function buildExploreSearchKeywords(options: ExploreFilterOptions): string[] {
   // 1. If user typed an explicit search query, prioritize it and any sub-tokens
   if (q) {
     queries.push(q);
+    const expanded = expandKeywordsForSearch(q);
+    for (const exp of expanded) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+    const cleanNoSuffix = q
+      .replace(/\s*(?:in chinese|in jjwxc|in english|novel|novels|bl|danmei)\s*/gi, " ")
+      .trim();
+    if (cleanNoSuffix && !queries.includes(cleanNoSuffix)) {
+      queries.push(cleanNoSuffix);
+      for (const exp of expandKeywordsForSearch(cleanNoSuffix)) {
+        if (!queries.includes(exp)) queries.push(exp);
+      }
+    }
     const subParts = q.split(/\s+/).filter((p) => p.length > 0);
     if (subParts.length > 1) {
       queries.push(...subParts);
@@ -3690,7 +3962,9 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
   const activeTags = [...(options.tags || []), ...(options.tag && options.tag !== "all" ? [options.tag] : []), ...(options.query ? [options.query] : [])];
   const queryText = activeTags.join(" ");
 
-  if (oriFilter === "bl" || oriFilter === "all") {
+  const hasSpecificQuery = Boolean(options.query && options.query.trim());
+
+  if (!hasSpecificQuery && (oriFilter === "bl" || oriFilter === "all")) {
     if (!reqYear || reqYear === 0 || options.year === "all" || options.year === "older") {
       recUrls.push(
         "https://www.52shuku.net/tuijian/DanMei_top.html",
@@ -3705,7 +3979,7 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
     }
   }
 
-  if (oriFilter === "het" || oriFilter === "all") {
+  if (!hasSpecificQuery && (oriFilter === "het" || oriFilter === "all")) {
     if (!reqYear || reqYear === 0 || options.year === "all" || options.year === "older") {
       recUrls.push(
         "https://www.52shuku.net/tuijian/YanQing_Top.html",
@@ -4534,6 +4808,92 @@ async function scrapeFuxsbExplore(options: ExploreFilterOptions): Promise<Explor
 
 // Cache for full detail metadata from aiqu226 detail pages
 export const aiquDetailCache = new Map<string, { fileSize?: string; points?: number; likes?: number; aiquLikes?: number; summary?: string }>();
+
+// Cache for full detail metadata and full synopsis from jjwxc detail pages
+export const jjwxcDetailCache = new Map<string, { introZh: string; introEn?: string; author?: string; title?: string; coverUrl?: string }>();
+
+export async function enrichJjwxcNovelItems(items: ExploreNovelItem[]): Promise<void> {
+  const toFetch = items.filter(
+    (it) => it.siteId === "jjwxc" && it.novelUrl && !jjwxcDetailCache.has(it.novelUrl)
+  );
+
+  // If already cached, apply immediately
+  items.forEach((it) => {
+    if (it.siteId === "jjwxc" && it.novelUrl && jjwxcDetailCache.has(it.novelUrl)) {
+      const cached = jjwxcDetailCache.get(it.novelUrl)!;
+      if (cached.introZh && (!it.summaryZh || cached.introZh.length > it.summaryZh.length)) {
+        it.summaryZh = cached.introZh;
+        it.hasFullSynopsis = true;
+      }
+      if (cached.introEn && (!it.summaryEn || cached.introEn.length > it.summaryEn.length)) {
+        it.summaryEn = cached.introEn;
+        it.summary = cached.introEn;
+      }
+      if (cached.coverUrl && !it.coverUrl) it.coverUrl = cached.coverUrl;
+    }
+  });
+
+  if (toFetch.length === 0) return;
+
+  // Fetch top uncached items in chunks of 5
+  const chunks: ExploreNovelItem[][] = [];
+  for (let i = 0; i < Math.min(toFetch.length, 10); i += 5) {
+    chunks.push(toFetch.slice(i, i + 5));
+  }
+
+  for (const chunk of chunks) {
+    await Promise.allSettled(
+      chunk.map(async (it) => {
+        try {
+          const res = await axios.get(it.novelUrl, {
+            responseType: "arraybuffer",
+            timeout: 5000,
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              Referer: "https://www.jjwxc.net/",
+            },
+          });
+          const html = iconv.decode(Buffer.from(res.data), "gbk");
+          const $ = cheerio.load(html);
+
+          const introEl = $("#novelintro");
+          if (introEl.length > 0) {
+            const clone = introEl.clone();
+            clone.find("br").replaceWith("\n");
+            const introZh = cleanSummaryText(clone.text().trim());
+            const coverUrl = $("img.noveldefaultimage").attr("src") || $(".novelintro img").attr("src");
+
+            let introEn = "";
+            if (introZh) {
+              introEn = await translateWithGoogle(introZh.slice(0, 3000), "zh-CN", "en", 4000);
+              introEn = cleanSummaryText(introEn);
+            }
+
+            jjwxcDetailCache.set(it.novelUrl, {
+              introZh,
+              introEn,
+              coverUrl,
+            });
+
+            if (introZh) {
+              it.summaryZh = introZh;
+              it.hasFullSynopsis = true;
+            }
+            if (introEn) {
+              it.summaryEn = introEn;
+              it.summary = introEn;
+            }
+            if (coverUrl && !it.coverUrl) {
+              it.coverUrl = coverUrl;
+            }
+          }
+        } catch {
+          // ignore background fetch error
+        }
+      })
+    );
+  }
+}
 
 // Cache for Aiqu Forum Native Rankings (lt.aqxsw66.com)
 let cachedAiquForumData: { voteMap: Map<string, number>; items: ExploreNovelItem[]; timestamp: number } | null = null;
@@ -5882,6 +6242,11 @@ export async function scrapeExploreNovels(options: ExploreFilterOptions): Promis
     promises.push(safeScrapeWithTimeout(scrapeDmxsExplore(options), 12000));
   }
 
+  // czbooks (小说狂人)
+  if (targetSite === "all" || targetSite === "czbooks") {
+    promises.push(safeScrapeWithTimeout(scrapeCzbooksExplore(options), 15000));
+  }
+
   const results = await Promise.allSettled(promises);
   for (const res of results) {
     if (res.status === "fulfilled") {
@@ -6048,43 +6413,87 @@ export async function scrapeExploreNovels(options: ExploreFilterOptions): Promis
   }
 
   // 4. Keyword search across TITLE AND SUMMARY (smart tokenized matching)
-  if (options.query && options.query.trim()) {
+  // For JJWXC & CZBooks searches, their authoritative search engines have already executed the search across complete novel metadata and content.
+  if (options.site !== "jjwxc" && options.site !== "czbooks" && options.query && options.query.trim()) {
     const rawQ = options.query.trim().toLowerCase();
-    const qTokens = rawQ.split(/\s+/).filter(Boolean);
+    const expandedQ = expandKeywordsForSearch(rawQ);
+    const cleanNoSuffix = rawQ
+      .replace(/\s*(?:in chinese|in jjwxc|in english|novel|novels|bl|danmei)\s*/gi, " ")
+      .trim();
+
+    const STOPWORDS = new Set(["in", "the", "a", "an", "of", "to", "at", "by", "for", "with", "about", "from", "into", "on", "and", "or"]);
+    const searchTokens = Array.from(
+      new Set([
+        rawQ,
+        cleanNoSuffix,
+        ...rawQ.split(/\s+/).filter((t) => t.length > 2 && !STOPWORDS.has(t.toLowerCase())),
+        ...(cleanNoSuffix ? cleanNoSuffix.split(/\s+/).filter((t) => t.length > 2 && !STOPWORDS.has(t.toLowerCase())) : []),
+        ...expandedQ.map((e) => e.toLowerCase()),
+      ])
+    ).filter((t) => t && (t.length >= 2 || /[\u4e00-\u9fa5]/.test(t)) && !STOPWORDS.has(t.toLowerCase()));
 
     const scoredKeyword = allItems.map((item) => {
+      // If item was fetched from JJWXC or CZBooks search, it already matched the query on the respective site
+      if (item.siteId === "jjwxc" || item.siteId === "czbooks") {
+        return { item, score: 30 };
+      }
+
       const inTitle = item.title.toLowerCase();
       const inAuthor = item.author.toLowerCase();
       const inSummary = item.summary.toLowerCase();
-      const inTags = item.tags.map((t) => t.toLowerCase()).join(" ");
+      const inTags = (item.tags || []).map((t) => t.toLowerCase()).join(" ");
 
       let score = 0;
-      if (inTitle.includes(rawQ)) score += 10;
-      if (inAuthor.includes(rawQ)) score += 8;
-      if (inSummary.includes(rawQ)) score += 4;
-      if (inTags.includes(rawQ)) score += 6;
-
-      for (const tok of qTokens) {
-        if (inTitle.includes(tok)) score += 5;
-        if (inAuthor.includes(tok)) score += 4;
-        if (inSummary.includes(tok)) score += 2;
-        if (inTags.includes(tok)) score += 3;
+      for (const tok of searchTokens) {
+        if (!tok) continue;
+        if (inTitle.includes(tok)) score += 15;
+        if (inAuthor.includes(tok)) score += 12;
+        if (inSummary.includes(tok)) score += 6;
+        if (inTags.includes(tok)) score += 8;
       }
 
       return { item, score };
     });
 
     const matching = scoredKeyword.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).map((s) => s.item);
-    if (matching.length > 0) {
-      allItems = matching;
-    }
+    allItems = matching;
   }
 
-  // 5. Sort results (Strictly default to Likes / Popularity descending across ALL sites)
-  const sortMode = options.sort || "likes";
+  // 5. Sort results
+  // For JJWXC, official standard is Article Points (作品积分) from highest to lowest.
+  // For CZBooks, user standard is Bookmarks (收藏数) from highest to lowest - NOT views count.
+  const isJjwxcSite = options.site === "jjwxc";
+  const isCzbooksSite = options.site === "czbooks";
+  const sortMode = options.sort || (isJjwxcSite ? "points" : "likes");
 
-  if (sortMode === "likes") {
+  if (isJjwxcSite && sortMode !== "recent" && sortMode !== "chapters") {
     allItems.sort((a, b) => {
+      // Strict highest to lowest in Article Points (作品积分)
+      const pDiff = (b.points || 0) - (a.points || 0);
+      if (pDiff !== 0) return pDiff;
+      const lDiff = (b.likes || 0) - (a.likes || 0);
+      if (lDiff !== 0) return lDiff;
+      return (b.year || 0) - (a.year || 0);
+    });
+  } else if (isCzbooksSite && sortMode !== "recent" && sortMode !== "chapters") {
+    allItems.sort((a, b) => {
+      // Strict highest to lowest in Bookmarks (收藏数) - NOT views count
+      const cleanQ = options.query?.trim();
+      if (cleanQ) {
+        const aExact = a.title.includes(cleanQ) ? 1 : 0;
+        const bExact = b.title.includes(cleanQ) ? 1 : 0;
+        if (bExact !== aExact) return bExact - aExact;
+      }
+      const lDiff = (b.likes || 0) - (a.likes || 0);
+      if (lDiff !== 0) return lDiff;
+      return (b.year || 0) - (a.year || 0);
+    });
+  } else if (sortMode === "likes") {
+    allItems.sort((a, b) => {
+      if (a.siteId === "jjwxc" && b.siteId === "jjwxc") {
+        const pDiff = (b.points || 0) - (a.points || 0);
+        if (pDiff !== 0) return pDiff;
+      }
       const bLikes = b.likes || 0;
       const aLikes = a.likes || 0;
       if (bLikes !== aLikes) return bLikes - aLikes;
@@ -6164,32 +6573,105 @@ export async function fetchNovelFullIntro(params: {
 }> {
   const { novelUrl, siteId, title: fallbackTitle, author: fallbackAuthor } = params;
   try {
-    const detail = await fetchNovelTOC(novelUrl, siteId || "general", fallbackTitle, fallbackAuthor);
-    let introZh = cleanSummaryText(detail.intro || "");
-    if (!introZh || introZh === "No summary available." || introZh.length < 5) {
-      if (fallbackAuthor) {
-        introZh = cleanSummaryText(fallbackAuthor);
+    // Check JJWXC cache first for instantaneous response
+    if ((siteId === "jjwxc" || novelUrl.includes("jjwxc.net")) && jjwxcDetailCache.has(novelUrl)) {
+      const cached = jjwxcDetailCache.get(novelUrl)!;
+      return {
+        success: true,
+        intro: cached.introEn || cached.introZh,
+        introZh: cached.introZh,
+        introEn: cached.introEn,
+        author: cleanAuthorName(fallbackAuthor),
+        title: (fallbackTitle || "Novel").replace(/^《|》$/g, "").trim(),
+      };
+    }
+
+    let introZh = "";
+    let cleanAuth = cleanAuthorName(fallbackAuthor);
+    let cleanTit = (fallbackTitle || "Novel").replace(/^《|》$/g, "").trim();
+    let fileSize: string | undefined;
+
+    if (siteId === "jjwxc" || novelUrl.includes("jjwxc.net")) {
+      const res = await axios.get(novelUrl, {
+        responseType: "arraybuffer",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          Referer: "https://www.jjwxc.net/",
+        },
+        timeout: 8000,
+      });
+      const html = iconv.decode(Buffer.from(res.data), "gbk");
+      const $ = cheerio.load(html);
+
+      const introEl = $("#novelintro");
+      if (introEl.length > 0) {
+        const clone = introEl.clone();
+        clone.find("br").replaceWith("\n");
+        introZh = cleanSummaryText(clone.text().trim());
       }
-    }
-    const cleanAuth = cleanAuthorName(detail.author || fallbackAuthor);
-    const cleanTit = (detail.title || fallbackTitle || "Novel").replace(/^《|》$/g, "").trim();
 
-    // Auto-translate the full synopsis to English
-    let introEn = "";
-    if (introZh) {
-      introEn = await translateWithGoogle(introZh, "zh-CN", "en", 6000);
-      introEn = cleanSummaryText(introEn);
-    }
+      const jjwxcAuthor =
+        $("span[itemprop=author]").text().trim() ||
+        $("a[href*=\"oneauthor.php\"]").first().text().trim();
+      if (jjwxcAuthor) cleanAuth = cleanAuthorName(jjwxcAuthor);
 
-    return {
-      success: true,
-      intro: introEn || introZh,
-      introZh,
-      introEn,
-      author: cleanAuth,
-      title: cleanTit,
-      fileSize: detail.fileSize,
-    };
+      const jjwxcTitle =
+        $("span[itemprop=articleSection]").text().trim() || $("h1 span").text().trim();
+      if (jjwxcTitle) cleanTit = jjwxcTitle.replace(/^《|》$/g, "").trim();
+
+      const coverUrl = $("img.noveldefaultimage").attr("src") || $(".novelintro img").attr("src");
+
+      let introEn = "";
+      if (introZh) {
+        introEn = await translateWithGoogle(introZh.slice(0, 3500), "zh-CN", "en", 6000);
+        introEn = cleanSummaryText(introEn);
+      }
+
+      jjwxcDetailCache.set(novelUrl, {
+        introZh,
+        introEn,
+        author: cleanAuth,
+        title: cleanTit,
+        coverUrl,
+      });
+
+      return {
+        success: true,
+        intro: introEn || introZh,
+        introZh,
+        introEn,
+        author: cleanAuth,
+        title: cleanTit,
+      };
+    } else {
+      const detail = await fetchNovelTOC(novelUrl, siteId || "general", fallbackTitle, fallbackAuthor);
+      introZh = cleanSummaryText(detail.intro || "");
+      if (!introZh || introZh === "No summary available." || introZh.length < 5) {
+        if (fallbackAuthor) {
+          introZh = cleanSummaryText(fallbackAuthor);
+        }
+      }
+      cleanAuth = cleanAuthorName(detail.author || fallbackAuthor);
+      cleanTit = (detail.title || fallbackTitle || "Novel").replace(/^《|》$/g, "").trim();
+      fileSize = detail.fileSize;
+
+      let introEn = "";
+      if (introZh) {
+        introEn = await translateWithGoogle(introZh.slice(0, 3500), "zh-CN", "en", 6000);
+        introEn = cleanSummaryText(introEn);
+      }
+
+      return {
+        success: true,
+        intro: introEn || introZh,
+        introZh,
+        introEn,
+        author: cleanAuth,
+        title: cleanTit,
+        fileSize,
+      };
+    }
   } catch (err: any) {
     console.warn("fetchNovelFullIntro error:", err.message);
     const cleanAuth = cleanAuthorName(fallbackAuthor);

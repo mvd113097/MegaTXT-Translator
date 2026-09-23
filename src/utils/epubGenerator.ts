@@ -1,6 +1,6 @@
 import { TextChunk } from "../types";
 import { downloadFile } from "./fileDownloader";
-import { getContiguousCompletedChunks } from "./chunker";
+import { getContiguousCompletedChunks, cleanAndDeduplicateChunks } from "./chunker";
 
 function escapeXml(unsafe: string): string {
   return unsafe
@@ -35,9 +35,12 @@ export async function generateEpubBlob(
   const isBilingual = !!options.isBilingual;
 
   // Enforce contiguous completion guarantee unless explicitly overridden
-  const validChunks = options.allowGaps
+  const rawValidChunks = options.allowGaps
     ? chunks.filter((c) => c.englishText && c.englishText.trim().length > 0)
     : getContiguousCompletedChunks(chunks);
+
+  // Automatically detect and strip empty stubs and merge duplicate chapter headers
+  const validChunks = cleanAndDeduplicateChunks(rawValidChunks);
 
   if (validChunks.length === 0) {
     throw new Error(

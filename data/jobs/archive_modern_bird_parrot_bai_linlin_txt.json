@@ -1,6 +1,6 @@
 {
   "id": "cloud_job_1789375685794",
-  "sessionId": "legacy_default",
+  "sessionId": "sess_sltxv2d4dl_mtzuv4qu",
   "fileName": "modern bird parrot bai linlin.txt",
   "fileSizeBytes": 1827068,
   "totalChineseChars": 455761,
@@ -3406,50 +3406,50 @@
   "customInstructions": "",
   "glossary": [
     {
-      "notes": "Protagonist of the novel",
-      "category": "Character",
-      "original": "萧炎",
+      "id": "g-1",
       "translation": "Xiao Yan",
-      "id": "g-1"
+      "original": "萧炎",
+      "notes": "Protagonist of the novel",
+      "category": "Character"
     },
     {
-      "id": "g-2",
       "original": "斗气大陆",
+      "translation": "Dou Qi Continent",
       "category": "Location",
       "notes": "The fantasy realm",
-      "translation": "Dou Qi Continent"
+      "id": "g-2"
     },
     {
       "translation": "Dou Disciple / Dou Power",
-      "id": "g-3",
       "category": "Realm/Rank",
       "notes": "Foundational cultivation stage",
+      "id": "g-3",
       "original": "斗之力"
     },
     {
-      "category": "Location",
-      "id": "g-4",
       "translation": "Wu Tan City",
+      "id": "g-4",
+      "category": "Location",
       "original": "乌坦城",
       "notes": "Starting hometown"
     },
     {
+      "category": "Character",
       "translation": "Yao Lao",
       "id": "g-5",
-      "category": "Character",
       "original": "药老",
       "notes": "Ancient master dwelling in the ring"
     },
     {
-      "original": "焚诀",
-      "category": "Concept",
-      "id": "g-6",
       "notes": "Supreme growth cultivation technique",
-      "translation": "Flame Mantra (Fen Jue)"
+      "id": "g-6",
+      "category": "Concept",
+      "translation": "Flame Mantra (Fen Jue)",
+      "original": "焚诀"
     }
   ],
   "concurrency": 5,
   "status": "completed",
   "startedAt": 1789375685794,
-  "lastActiveAt": 1790074259765
+  "lastActiveAt": 1790144853017
 }

@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { cleanAndDeduplicateChunks } from "../src/utils/chunkCleaner";
 
 export interface ServerTextChunk {
   id?: string;
@@ -37,9 +38,11 @@ export async function generateServerEpubBuffer(
   const language = options.language || "en";
   const isBilingual = !!options.isBilingual;
 
-  const validChunks = (chunks || []).filter(
+  const rawValidChunks = (chunks || []).filter(
     (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
   );
+
+  const validChunks = cleanAndDeduplicateChunks(rawValidChunks);
 
   if (validChunks.length === 0) {
     throw new Error(

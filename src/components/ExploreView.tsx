@@ -59,6 +59,7 @@ export interface ExploreNovelItem {
   summary: string;
   summaryZh?: string;
   summaryEn?: string;
+  hasFullSynopsis?: boolean;
   points: number; // Authentic JJWXC work points or popularity score
   likes: number;
   aiquLikes?: number; // Native Aiqu site forum upvotes (赞)
@@ -86,6 +87,7 @@ export interface ReadableMirror {
 
 export function formatCleanSiteName(siteId?: string, siteName?: string): string {
   const s = (siteId || siteName || "").toLowerCase();
+  if (s.includes("czbooks") || s.includes("狂人")) return "czbooks";
   if (s.includes("aiqu")) return "aiqu";
   if (s.includes("jjwxc") || s.includes("晋江")) return "jjwxc";
   if (s.includes("52shuku") || s.includes("52")) return "52shuku";
@@ -117,8 +119,9 @@ interface ExploreViewProps {
 
 const SITE_OPTIONS = [
   { id: "all", label: "All Sites", shortLabel: "All Sites" },
-  { id: "aiqu226", label: "aiqu", shortLabel: "aiqu" },
+  { id: "czbooks", label: "czbooks", shortLabel: "czbooks" },
   { id: "jjwxc", label: "jjwxc", shortLabel: "jjwxc" },
+  { id: "aiqu226", label: "aiqu", shortLabel: "aiqu" },
   { id: "52shuku", label: "52shuku", shortLabel: "52shuku" },
   { id: "fuxsb", label: "fuxsb", shortLabel: "fuxsb" },
   { id: "dmxs", label: "dmxs", shortLabel: "dmxs" },
@@ -169,9 +172,9 @@ const POPULAR_TROPES = [
 ];
 
 const SORT_OPTIONS = [
+  { id: "points", label: "⭐️ Highest Article Points / Rating", shortLabel: "Article Points" },
   { id: "likes", label: "🔥 Most Popular / Likes", shortLabel: "Popular" },
   { id: "aiquLikes", label: "👍 Aiqu Site Votes", shortLabel: "Aiqu Votes" },
-  { id: "points", label: "⭐️ Highest Rating / Points", shortLabel: "Rating" },
   { id: "recent", label: "⏱️ Newest Release", shortLabel: "Recent" },
   { id: "chapters", label: "📚 Most Chapters / Words", shortLabel: "Chapters" },
 ];
@@ -244,9 +247,42 @@ export function getAugmentedCardTags(item: ExploreNovelItem): string[] {
 
 function sortNovelItems(
   list: ExploreNovelItem[],
-  sort: "points" | "likes" | "aiquLikes" | "recent" | "chapters"
+  sort: "points" | "likes" | "aiquLikes" | "recent" | "chapters",
+  siteId?: string,
+  searchQuery?: string
 ): ExploreNovelItem[] {
   const sorted = [...list];
+  const isJjwxc = siteId === "jjwxc" || (sorted.length > 0 && sorted.every((it) => it.siteId === "jjwxc"));
+  const isCzbooks = siteId === "czbooks" || (sorted.length > 0 && sorted.every((it) => it.siteId === "czbooks"));
+  const rawQLower = (searchQuery || "").trim().toLowerCase();
+
+  // For JJWXC, the official standard is Article Points (作品积分) from highest to lowest
+  if (isJjwxc && sort !== "recent" && sort !== "chapters") {
+    sorted.sort((a, b) => {
+      const pDiff = (b.points || 0) - (a.points || 0);
+      if (pDiff !== 0) return pDiff;
+      const lDiff = (b.likes || 0) - (a.likes || 0);
+      if (lDiff !== 0) return lDiff;
+      return (b.year || 0) - (a.year || 0);
+    });
+    return sorted;
+  }
+
+  // For CZBooks, standard is Bookmarks (收藏数) from highest to lowest - NOT views count
+  if (isCzbooks && sort !== "recent" && sort !== "chapters") {
+    sorted.sort((a, b) => {
+      if (rawQLower) {
+        const aMatch = a.title.toLowerCase().includes(rawQLower) ? 1 : 0;
+        const bMatch = b.title.toLowerCase().includes(rawQLower) ? 1 : 0;
+        if (bMatch !== aMatch) return bMatch - aMatch;
+      }
+      const lDiff = (b.likes || 0) - (a.likes || 0);
+      if (lDiff !== 0) return lDiff;
+      return (b.year || 0) - (a.year || 0);
+    });
+    return sorted;
+  }
+
   if (sort === "aiquLikes") {
     sorted.sort((a, b) => {
       const aVal = (a.aiquLikes && a.aiquLikes <= 10000) ? a.aiquLikes : 0;
@@ -263,6 +299,11 @@ function sortNovelItems(
     });
   } else if (sort === "likes") {
     sorted.sort((a, b) => {
+      // If comparing two JJWXC items, points is the primary metric
+      if (a.siteId === "jjwxc" && b.siteId === "jjwxc") {
+        const pDiff = (b.points || 0) - (a.points || 0);
+        if (pDiff !== 0) return pDiff;
+      }
       const aVal = a.likes || 0;
       const bVal = b.likes || 0;
       if (bVal !== aVal) return bVal - aVal;
@@ -278,12 +319,6 @@ function sortNovelItems(
     });
   } else if (sort === "points") {
     sorted.sort((a, b) => {
-      if ((a.points || 0) === 0 && (b.points || 0) === 0 && (a.rating !== undefined || b.rating !== undefined)) {
-        const aR = a.rating ?? 0;
-        const bR = b.rating ?? 0;
-        if (bR !== aR) return bR - aR;
-        return (b.ratingCount || 0) - (a.ratingCount || 0);
-      }
       const aPoints = a.points || 0;
       const bPoints = b.points || 0;
       const pDiff = bPoints - aPoints;
@@ -598,9 +633,13 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>(() =>
     getInitialParam("q", cachedFeedState?.filters.query || "")
   );
-  const [sortBy, setSortBy] = useState<"points" | "likes" | "aiquLikes" | "recent" | "chapters">(() =>
-    (getInitialParam("sort", cachedFeedState?.filters.sort || "likes") as any)
-  );
+  const [sortBy, setSortBy] = useState<"points" | "likes" | "aiquLikes" | "recent" | "chapters">(() => {
+    const fromUrl = getInitialParam("sort", cachedFeedState?.filters.sort || "");
+    if (fromUrl) return fromUrl as any;
+    const initialSite = getInitialParam("site", cachedFeedState?.filters.site || "all");
+    if (initialSite === "jjwxc") return "points";
+    return "likes";
+  });
   const [page, setPage] = useState<number>(() => {
     const pageStr = getInitialParam("page", "");
     const parsed = parseInt(pageStr, 10);
@@ -746,12 +785,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   // Filtered/Computed novel list (or wishlist with 20-per-page slicing)
   const displayItems = useMemo(() => {
     if (showWishlistOnly) {
-      const sorted = sortNovelItems(wishlist, sortBy);
+      const sorted = sortNovelItems(wishlist, sortBy, selectedSite, searchQuery);
       const start = (wishlistPage - 1) * 20;
       return sorted.slice(start, start + 20);
     }
-    return sortNovelItems(items, sortBy);
-  }, [items, wishlist, showWishlistOnly, sortBy, wishlistPage]);
+    return sortNovelItems(items, sortBy, selectedSite, searchQuery);
+  }, [items, wishlist, showWishlistOnly, sortBy, wishlistPage, selectedSite, searchQuery]);
 
   // Total pages calculation (20 novels per page)
   const totalPages = useMemo(() => {
@@ -798,7 +837,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
     // 1. Instant cache hit (reject if stale or contains legacy corrupted nutrient votes > 10000)
     const hasCorruptedVotes = cached?.items?.some((it) => it.aiquLikes && it.aiquLikes > 10000);
     if (!forceRefresh && !hasCorruptedVotes && cached && now - cached.timestamp < CLIENT_CACHE_TTL_MS) {
-      setItems(sortNovelItems(cached.items, sort));
+      setItems(sortNovelItems(cached.items, sort, site, query));
       setTotalAvailable(cached.total);
       setHasMore(cached.hasMore);
       setPage(pageIdx);
@@ -889,7 +928,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
       setTotalAvailable(totalCount);
       setHasMore(moreAvailable);
-      setItems(sortNovelItems(newItems, sort));
+      setItems(sortNovelItems(newItems, sort, site, query));
       setPage(pageIdx);
 
       // Save to client cache
@@ -928,7 +967,9 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   // Filter handlers - update selection state only; search executes on Search button click or page change
   const handleSelectSite = (siteId: string) => {
     setSelectedSite(siteId);
-    if ((siteId === "aiqu226" || siteId === "52shuku" || siteId === "fuxsb") && sortBy === "points") {
+    if (siteId === "jjwxc") {
+      setSortBy("points");
+    } else if ((siteId === "czbooks" || siteId === "aiqu226" || siteId === "52shuku" || siteId === "fuxsb" || siteId === "dmxs") && sortBy === "points") {
       setSortBy("likes");
     }
   };
@@ -1018,9 +1059,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
       [id]: !isCurrentlyExpanded,
     }));
 
-    // If expanding and summary is short or ends with ellipses, fetch unabridged full synopsis from source
+    // If expanding and summary is short, truncated, or JJWXC snippet, fetch unabridged full synopsis from source
     const curSummary = item.summaryZh || item.summary || "";
-    const isTruncated = curSummary.endsWith("...") || curSummary.endsWith("…") || curSummary.length < 180;
+    const isTruncated =
+      item.siteId === "jjwxc"
+        ? !item.hasFullSynopsis && (curSummary.length < 250 || curSummary.endsWith("...") || curSummary.endsWith("…"))
+        : curSummary.endsWith("...") || curSummary.endsWith("…") || curSummary.length < 180;
 
     if (!isCurrentlyExpanded && isTruncated && !loadingIntroIds[id]) {
       setLoadingIntroIds((prev) => ({ ...prev, [id]: true }));
@@ -1047,6 +1091,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 if (it.id === id || it.novelUrl === item.novelUrl) {
                   return {
                     ...it,
+                    hasFullSynopsis: true,
                     summaryZh: data.introZh || it.summaryZh,
                     summaryEn: data.introEn || it.summaryEn,
                     summary: data.intro || it.summary,
@@ -1710,6 +1755,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Sort:</span>
           {SORT_OPTIONS.map((opt) => {
             const active = sortBy === opt.id;
+            const label =
+              selectedSite === "jjwxc" && opt.id === "points"
+                ? "⭐️ Article Points"
+                : selectedSite === "czbooks" && opt.id === "likes"
+                ? "🔖 Bookmarks"
+                : opt.shortLabel;
             return (
               <button
                 key={opt.id}
@@ -1721,7 +1772,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                     : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-purple-50 dark:hover:bg-slate-700"
                 }`}
               >
-                {opt.shortLabel}
+                {label}
               </button>
             );
           })}
@@ -1959,10 +2010,20 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                           </span>
                         )}
                         {item.likes !== undefined && item.likes > 0 && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 text-[11px] font-bold border border-pink-200/60 dark:border-pink-900/40">
-                            <Heart className="h-3 w-3 fill-pink-500 text-pink-500" />
-                            <span>{formatDisplayLikes(item.likes)}</span>
-                          </span>
+                          item.siteId === "czbooks" ? (
+                            <span
+                              title={`Bookmarks (收藏數): ${item.likes.toLocaleString()}`}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 text-[11px] font-bold border border-sky-200/60 dark:border-sky-900/40"
+                            >
+                              <Bookmark className="h-3 w-3 fill-sky-400 text-sky-600" />
+                              <span>{formatDisplayLikes(item.likes)} bookmarks</span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 text-[11px] font-bold border border-pink-200/60 dark:border-pink-900/40">
+                              <Heart className="h-3 w-3 fill-pink-500 text-pink-500" />
+                              <span>{formatDisplayLikes(item.likes)}</span>
+                            </span>
+                          )
                         )}
                       </div>
 
@@ -2051,6 +2112,13 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
               const displaySummary = cleanSummaryText(cardSummary) || "No synopsis available for this novel.";
               const isLongSummary = displaySummary.length > 70 || displaySummary.includes("\n") || displaySummary.endsWith("...") || displaySummary.endsWith("…");
               const isJjwxc = item.siteId === "jjwxc";
+              const canExpandSummary =
+                isJjwxc ||
+                isLongSummary ||
+                displaySummary.endsWith("...") ||
+                displaySummary.endsWith("…") ||
+                Boolean(item.hasFullSynopsis) ||
+                Boolean(item.summaryZh && item.summaryZh.length > 80);
               const bookmarked = isWishlisted(item);
               const cardTags = getAugmentedCardTags(item);
               const rankNum = (currentActivePage - 1) * 20 + index + 1;
@@ -2178,13 +2246,23 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                     )}
 
                     {item.likes !== undefined && item.likes > 0 && (
-                      <span
-                        title={`Likes / Bookmarks: ${item.likes.toLocaleString()}`}
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 text-[10px] font-bold border border-pink-200/70 dark:border-pink-900/40"
-                      >
-                        <Heart className="h-3 w-3 fill-pink-500 text-pink-500" />
-                        <span>{formatDisplayLikes(item.likes)}</span>
-                      </span>
+                      item.siteId === "czbooks" ? (
+                        <span
+                          title={`Bookmarks (收藏數): ${item.likes.toLocaleString()}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 text-[10px] font-bold border border-sky-200/70 dark:border-sky-900/40"
+                        >
+                          <Bookmark className="h-3 w-3 fill-sky-400 text-sky-600" />
+                          <span>{formatDisplayLikes(item.likes)} bookmarks</span>
+                        </span>
+                      ) : (
+                        <span
+                          title={`Likes: ${item.likes.toLocaleString()}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 text-[10px] font-bold border border-pink-200/70 dark:border-pink-900/40"
+                        >
+                          <Heart className="h-3 w-3 fill-pink-500 text-pink-500" />
+                          <span>{formatDisplayLikes(item.likes)}</span>
+                        </span>
+                      )
                     )}
                   </div>
 
@@ -2235,11 +2313,11 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                         )}
                       </div>
 
-                      {isLongSummary && (
+                      {canExpandSummary && (
                         <button
                           type="button"
                           onClick={() => toggleSummary(item)}
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-950/60 transition cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/50 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-200/70 dark:border-purple-800/70 transition cursor-pointer"
                         >
                           {isExpanded ? (
                             <>
@@ -2248,7 +2326,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                             </>
                           ) : (
                             <>
-                              <span>Read More</span>
+                              <span>Show More</span>
                               <ChevronDown className="h-3 w-3" />
                             </>
                           )}
@@ -2257,10 +2335,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                     </div>
 
                     <div className="whitespace-pre-line text-slate-600 dark:text-slate-300">
-                      {isExpanded || !isLongSummary
+                      {isExpanded || (!isLongSummary && !isJjwxc && !displaySummary.endsWith("...") && !displaySummary.endsWith("…"))
                         ? renderHighlightedText(displaySummary, searchQuery)
                         : renderHighlightedText(
-                            displaySummary.slice(0, 110) + (displaySummary.length > 110 ? "..." : ""),
+                            displaySummary.length > 130
+                              ? displaySummary.slice(0, 130) + "..."
+                              : displaySummary,
                             searchQuery
                           )}
                     </div>

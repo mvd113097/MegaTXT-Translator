@@ -9,7 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 import { sendTelegramNotification as rawSendTelegramNotification } from "./server/telegram";
-import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems, fetchNovelFullIntro } from "./server/storeScraper";
+import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems, enrichJjwxcNovelItems, fetchNovelFullIntro } from "./server/storeScraper";
 import { translateExploreItemsInPlace, translateWithGoogle, translateChapterWithGoogle, hasChineseCharacters } from "./server/googleTranslate";
 import { autoGenerateNovelGlossary } from "./server/glossaryExtractor";
 import {
@@ -25,6 +25,7 @@ import {
   mergeMonotonicJob,
 } from "./server/firestoreStorage";
 import { generateServerEpubBuffer } from "./server/epubServer";
+import { cleanAndDeduplicateChunks } from "./src/utils/chunkCleaner";
 
 dotenv.config();
 
@@ -2357,9 +2358,10 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
       return;
     }
     const isBilingual = req.query.bilingual === "true";
-    const completedChunks = (targetJob.chunks || []).filter(
+    const rawCompletedChunks = (targetJob.chunks || []).filter(
       (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
     );
+    const completedChunks = cleanAndDeduplicateChunks(rawCompletedChunks);
     if (completedChunks.length === 0) {
       res.status(400).send("No translated chapters ready to download yet.");
       return;
@@ -2391,9 +2393,10 @@ app.get("/api/cloud-job/download-txt", (req, res) => {
       return;
     }
     const isBilingual = req.query.bilingual === "true";
-    const completedChunks = (targetJob.chunks || []).filter(
+    const rawCompletedChunks = (targetJob.chunks || []).filter(
       (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
     );
+    const completedChunks = cleanAndDeduplicateChunks(rawCompletedChunks);
     if (completedChunks.length === 0) {
       res.status(400).send("No translated chapters ready to download yet.");
       return;
@@ -3030,7 +3033,7 @@ app.get("/api/store/explore", requireAuthMiddleware, async (req, res) => {
     const page = parseInt((req.query.page as string) || "1", 10);
     const forceRefresh = req.query.refresh === "true" || req.query.fresh === "true";
 
-    const collectionKey = `explore_col_v3:${site}:${year}:${orientation}:${tags.slice().sort().join(",")}:${tag}:${query.toLowerCase().trim()}:${sort}`;
+    const collectionKey = `explore_col_v5:${site}:${year}:${orientation}:${tags.slice().sort().join(",")}:${tag}:${query.toLowerCase().trim()}:${sort}`;
     const cached = exploreCache.get(collectionKey);
     const now = Date.now();
     let allItems: any[];
@@ -3074,6 +3077,7 @@ app.get("/api/store/explore", requireAuthMiddleware, async (req, res) => {
 
     // Non-blocking background enrichment so the response is returned immediately to the client!
     enrichAiquNovelItems(pageItems).catch(() => {});
+    enrichJjwxcNovelItems(pageItems).catch(() => {});
 
     res.json({
       success: true,

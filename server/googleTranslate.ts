@@ -39,24 +39,32 @@ export async function translateWithGoogle(
     return googleTranslateCache.get(cacheKey)!;
   }
 
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(
-      from
-    )}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(trimmed)}`;
+  const endpoints = [
+    `https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&q=${encodeURIComponent(trimmed)}`,
+    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(trimmed)}`,
+  ];
 
-    const response = await axios.get(url, {
-      timeout: timeoutMs,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        Accept: "*/*",
-      },
-    });
+  for (const url of endpoints) {
+    try {
+      const response = await axios.get(url, {
+        timeout: timeoutMs,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          Accept: "*/*",
+        },
+      });
 
-    if (Array.isArray(response.data) && Array.isArray(response.data[0])) {
-      const translated = response.data[0]
-        .map((segment: any) => (Array.isArray(segment) && segment[0] ? segment[0] : ""))
-        .join("");
+      let translated = "";
+      if (Array.isArray(response.data)) {
+        if (typeof response.data[0] === "string") {
+          translated = response.data.join("");
+        } else if (Array.isArray(response.data[0])) {
+          translated = response.data[0]
+            .map((segment: any) => (Array.isArray(segment) && segment[0] ? segment[0] : (typeof segment === "string" ? segment : "")))
+            .join("");
+        }
+      }
 
       if (translated && translated.trim()) {
         const result = translated.trim();
@@ -69,9 +77,9 @@ export async function translateWithGoogle(
 
         return result;
       }
+    } catch {
+      // try next endpoint
     }
-  } catch (err: any) {
-    // Graceful fallback on network glitch or timeout
   }
 
   return trimmed;

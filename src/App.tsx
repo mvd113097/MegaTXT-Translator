@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Navbar } from "./components/Navbar";
 import { UploadSection } from "./components/UploadSection";
 import { TranslationControls } from "./components/TranslationControls";
@@ -350,22 +350,83 @@ export default function App() {
     setIsReaderMinimized(true);
   };
 
+  // Memoized finished session chunks for active reader, sorted strictly in order 1, 2, 3, 4, 5...
+  const currentSessionReaderChunks = useMemo(() => {
+    if (!session || !session.chunks || session.chunks.length === 0) return undefined;
+    const finished = session.chunks
+      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+      .sort((a, b) => a.index - b.index);
+    return finished.length > 0 ? finished : session.chunks;
+  }, [session]);
+
   const handleOpenCurrentSessionReader = () => {
-    if (!session) return;
+    if (!session || !session.chunks || session.chunks.length === 0) return;
     const cleanTitle = session.fileName.replace(/\.txt$/i, "");
+
+    // Extract all finished chapters translated by Gemini in order 1, 2, 3, 4, 5...
+    const finishedChunks = session.chunks
+      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+      .sort((a, b) => a.index - b.index);
+
+    // If translation just began and no chunks are finished yet, fallback gracefully to initial chunks
+    const activeChunks = finishedChunks.length > 0 ? finishedChunks : session.chunks;
+
+    // Strict in-order chapters 1.2.3.4.5...
+    const allChapters = activeChunks.map((c, idx) => ({
+      title: c.chapterTitle || `Chapter ${idx + 1}`,
+      url: "",
+      index: idx + 1,
+      originalIndex: c.index + 1,
+    }));
+
+    // Find starting chapter index: preserve existing progress if within valid range, else start at Chapter 1
+    let targetIdx = 1;
+    if (readerNovel && isSameNovel(readerNovel.novelTitle, cleanTitle)) {
+      if (readerNovel.chapterIndex && readerNovel.chapterIndex >= 1 && readerNovel.chapterIndex <= activeChunks.length) {
+        targetIdx = readerNovel.chapterIndex;
+      }
+    }
+
+    const selectedChunk = activeChunks[targetIdx - 1] || activeChunks[0];
+
     handleOpenReader({
       novelTitle: cleanTitle,
-      totalChapters: session.chunks.length,
-      chapterIndex: 1,
-      allChapters: session.chunks.map((c, idx) => ({
-        title: c.chapterTitle || `Chapter ${idx + 1}`,
-        url: "",
-        index: idx + 1,
-      })),
-      content: session.chunks[0]?.chineseText || "",
-      englishContent: session.chunks[0]?.englishText || "",
+      totalChapters: activeChunks.length,
+      chapterIndex: targetIdx,
+      allChapters,
+      content: selectedChunk?.chineseText || "",
+      englishContent: selectedChunk?.englishText || "",
     });
   };
+
+  // Keep active reader novel chapters list synchronized in real time as background Gemini translation finishes more chapters
+  useEffect(() => {
+    if (!session || !session.chunks || !readerNovel) return;
+    if (!isSameNovel(session.fileName, readerNovel.novelTitle)) return;
+
+    const finished = session.chunks
+      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+      .sort((a, b) => a.index - b.index);
+
+    if (finished.length === 0) return;
+
+    const newTotal = finished.length;
+    if (readerNovel.totalChapters !== newTotal || (readerNovel.allChapters && readerNovel.allChapters.length !== newTotal)) {
+      setReaderNovel((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          totalChapters: newTotal,
+          allChapters: finished.map((c, idx) => ({
+            title: c.chapterTitle || `Chapter ${idx + 1}`,
+            url: "",
+            index: idx + 1,
+            originalIndex: c.index + 1,
+          })),
+        };
+      });
+    }
+  }, [session, readerNovel?.novelTitle]);
 
   const handleBottomNavChange = (tab: "home" | "library" | "store" | "explore" | "history") => {
     setActiveNavTab(tab);
@@ -1887,7 +1948,7 @@ Export Timestamp: ${new Date().toLocaleString()}
             sessionChunks={
               session &&
               isSameNovel(session.fileName, readerNovel.novelTitle)
-                ? session.chunks
+                ? currentSessionReaderChunks
                 : undefined
             }
             onImportNovel={() => {

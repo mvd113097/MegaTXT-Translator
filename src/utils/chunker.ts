@@ -1,4 +1,12 @@
 import { TextChunk } from "../types";
+export {
+  isStubOrEmptyText,
+  isStubOrEmptyChunk,
+  extractChapterNormalizedKey,
+  cleanChapterTitle,
+  cleanAndDeduplicateChunks,
+  cleanAndDeduplicateChapterList,
+} from "./chunkCleaner";
 
 export interface ChunkOptions {
   targetChunkChars?: number; // default ~2500 characters
