@@ -775,12 +775,12 @@ export default function App() {
 
             const merged = Array.from(chunkMap.values()).sort((a: any, b: any) => a.index - b.index);
 
-            // Auto-heal: If local session has more chunks than the server had, rehydrate the server so it resumes translating
-            if (prevChunks.length > sortedChunks.length && sortedChunks.length > 0) {
-              console.log(`[Auto-Rehydrate] Server had ${sortedChunks.length} chunks vs local ${prevChunks.length}. Sending missing chunks to resume server translation!`);
+            // Auto-heal only if server lost chunks completely (0 total chunks on server)
+            if ((!sJob.totalChunks || sJob.totalChunks === 0) && prevChunks.length > 0) {
+              console.log(`[Auto-Rehydrate] Server had 0 chunks vs local ${prevChunks.length}. Sending missing chunks to resume server translation.`);
               fetch("/api/cloud-job/rehydrate-chunks", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...getAuthHeaders() },
                 body: JSON.stringify({
                   fileName: prev.fileName,
                   chunks: merged,
