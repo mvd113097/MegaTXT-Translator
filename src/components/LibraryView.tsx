@@ -11,9 +11,15 @@ import {
   Clock,
   ArrowRight,
   TrendingUp,
+  Zap,
+  Cloud,
 } from "lucide-react";
 import { LibraryBook } from "../types";
-import { getLocalLibraryBooks, removeBookFromLibrary } from "../utils/indexedDbStorage";
+import {
+  getLocalLibraryBooks,
+  removeBookFromLibrary,
+  getAllNovelCachedChapterCounts,
+} from "../utils/indexedDbStorage";
 
 interface LibraryViewProps {
   onOpenReader: (novel: {
@@ -36,9 +42,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 }) => {
   const [books, setBooks] = useState<LibraryBook[]>(() => getLocalLibraryBooks());
   const [searchQuery, setSearchQuery] = useState("");
+  const [cacheCounts, setCacheCounts] = useState<Record<string, number>>({});
 
   const refreshBooks = () => {
     setBooks(getLocalLibraryBooks());
+    getAllNovelCachedChapterCounts().then(setCacheCounts).catch(() => {});
   };
 
   useEffect(() => {
@@ -143,6 +151,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             const currentCh = book.currentChapterIndex || 1;
             const totalCh = book.totalChapters || 1;
             const progressPercent = Math.min(100, Math.round((currentCh / Math.max(1, totalCh)) * 100));
+            const novelKey = book.id || `${book.siteId || "src"}_${book.title}`.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, "_");
+            const cachedChCount = cacheCounts[book.id] || cacheCounts[novelKey] || Object.entries(cacheCounts).find(([k]) => k.includes(book.title))?.[1] || 0;
 
             return (
               <div
@@ -169,6 +179,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                           {book.siteName}
                         </span>
                       )}
+
+                      {/* Offline Cached Badge */}
+                      {cachedChCount > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border border-emerald-300/60 dark:border-emerald-800/60">
+                          <Zap className="h-2.5 w-2.5 text-emerald-600 dark:text-emerald-400 fill-current" />
+                          <span>{cachedChCount} Ch Offline Ready</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
+                          <Cloud className="h-2.5 w-2.5" />
+                          <span>Online Stream</span>
+                        </span>
+                      )}
+
                       <span className="text-[10px] text-slate-400 font-medium">
                         Added {new Date(book.addedAt || Date.now()).toLocaleDateString()}
                       </span>

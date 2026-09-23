@@ -46,6 +46,7 @@ import {
   saveSessionToIdb,
   clearSessionFromIdb,
   getLocalLibraryBooks,
+  addReadingHistory,
 } from "./utils/indexedDbStorage";
 import {
   PagodaHeaderIllustration,
@@ -342,6 +343,17 @@ export default function App() {
     setReaderNovel(novel);
     setIsReaderOpen(true);
     setIsReaderMinimized(false);
+    try {
+      addReadingHistory({
+        title: novel.novelTitle,
+        author: novel.author,
+        coverUrl: novel.coverUrl,
+        novelUrl: novel.novelUrl,
+        siteId: novel.siteId,
+        chapterIndex: novel.chapterIndex || 1,
+        totalChapters: novel.totalChapters || novel.allChapters?.length || 1,
+      });
+    } catch {}
   };
 
   const handleCloseReader = () => {
@@ -1881,6 +1893,7 @@ Export Timestamp: ${new Date().toLocaleString()}
           onReset={handleReset}
           getAuthHeaders={getAuthHeaders}
           onSelectNovel={(fileName) => syncCloudProgress(true, true, fileName)}
+          onOpenReader={handleOpenReader}
         />
 
         {/* Terminology & Glossary Modal */}

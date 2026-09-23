@@ -401,3 +401,181 @@ export async function replaceTermsInNovelCache(
   }
 }
 
+// ----------------------------------------------------
+// Offline Cached Chapters Statistics Helper
+// ----------------------------------------------------
+
+/**
+ * Counts how many chapters are saved offline in IndexedDB for a given novelId
+ */
+export async function getNovelCachedChaptersCount(novelId: string): Promise<number> {
+  if (!novelId) return 0;
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORES.CACHED_CHAPTERS, "readonly");
+      const store = tx.objectStore(STORES.CACHED_CHAPTERS);
+      const req = store.openCursor();
+      let count = 0;
+
+      req.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+        if (cursor) {
+          const key = String(cursor.key);
+          if (key.startsWith(`${novelId}__ch_`)) {
+            count++;
+          }
+          cursor.continue();
+        } else {
+          resolve(count);
+        }
+      };
+
+      req.onerror = () => resolve(0);
+    });
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Gets offline cached chapter counts for all novels in IndexedDB
+ */
+export async function getAllNovelCachedChapterCounts(): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORES.CACHED_CHAPTERS, "readonly");
+      const store = tx.objectStore(STORES.CACHED_CHAPTERS);
+      const req = store.openCursor();
+
+      req.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+        if (cursor) {
+          const key = String(cursor.key);
+          const parts = key.split("__ch_");
+          if (parts.length === 2 && parts[0]) {
+            const novelId = parts[0];
+            counts[novelId] = (counts[novelId] || 0) + 1;
+          }
+          cursor.continue();
+        } else {
+          resolve(counts);
+        }
+      };
+
+      req.onerror = () => resolve(counts);
+    });
+  } catch {
+    return counts;
+  }
+}
+
+// ----------------------------------------------------
+// Reading History Persistence
+// ----------------------------------------------------
+
+export interface ReadingHistoryItem {
+  id: string;
+  title: string;
+  author?: string;
+  coverUrl?: string;
+  novelUrl?: string;
+  siteId?: string;
+  lastReadChapterIndex: number;
+  lastReadChapterTitle: string;
+  totalChapters?: number;
+  timestamp: number;
+}
+
+const READING_HISTORY_KEY = "megatext_reading_history_v1";
+
+export function getReadingHistory(): ReadingHistoryItem[] {
+  try {
+    const raw = localStorage.getItem(READING_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveReadingHistory(history: ReadingHistoryItem[]): void {
+  try {
+    localStorage.setItem(READING_HISTORY_KEY, JSON.stringify(history));
+  } catch (err) {
+    console.warn("Failed to persist reading history:", err);
+  }
+}
+
+export function addReadingHistory(
+  item: {
+    id?: string;
+    title: string;
+    author?: string;
+    coverUrl?: string;
+    novelUrl?: string;
+    siteId?: string;
+    chapterIndex?: number;
+    chapterTitle?: string;
+    totalChapters?: number;
+  }
+): ReadingHistoryItem[] {
+  if (!item || !item.title) return getReadingHistory();
+
+  const novelId = item.id || `${item.siteId || "src"}_${item.title}`.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, "_");
+  const list = getReadingHistory();
+  const existingIdx = list.findIndex(
+    (h) => h.id === novelId || (h.title.trim().toLowerCase() === item.title.trim().toLowerCase() && (h.author === item.author || !item.author))
+  );
+
+  const prev = existingIdx >= 0 ? list[existingIdx] : null;
+  const chapterIdx = item.chapterIndex || prev?.lastReadChapterIndex || 1;
+  const chapterTitle = item.chapterTitle || prev?.lastReadChapterTitle || `Chapter ${chapterIdx}`;
+  const totalCh = item.totalChapters || prev?.totalChapters || 1;
+
+  const newEntry: ReadingHistoryItem = {
+    id: novelId,
+    title: item.title,
+    author: item.author || prev?.author,
+    coverUrl: item.coverUrl || prev?.coverUrl,
+    novelUrl: item.novelUrl || prev?.novelUrl,
+    siteId: item.siteId || prev?.siteId || "default",
+    lastReadChapterIndex: chapterIdx,
+    lastReadChapterTitle: chapterTitle,
+    totalChapters: totalCh,
+    timestamp: Date.now(),
+  };
+
+  // Prepend to top of list so most recently read is first
+  let nextList = list.filter(
+    (h) => h.id !== novelId && !(h.title.trim().toLowerCase() === item.title.trim().toLowerCase() && (h.author === item.author || !item.author))
+  );
+  nextList.unshift(newEntry);
+
+  // Cap at 100 recent entries to keep storage compact
+  if (nextList.length > 100) {
+    nextList = nextList.slice(0, 100);
+  }
+
+  saveReadingHistory(nextList);
+  return nextList;
+}
+
+export function removeReadingHistoryItem(idOrTitle: string): ReadingHistoryItem[] {
+  const list = getReadingHistory();
+  const nextList = list.filter(
+    (h) => h.id !== idOrTitle && h.title !== idOrTitle
+  );
+  saveReadingHistory(nextList);
+  return nextList;
+}
+
+export function clearReadingHistory(): void {
+  try {
+    localStorage.removeItem(READING_HISTORY_KEY);
+  } catch (err) {
+    console.warn("Failed to clear reading history:", err);
+  }
+}
+

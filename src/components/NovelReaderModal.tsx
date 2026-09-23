@@ -37,6 +37,8 @@ import {
   RotateCw,
   BookMarked,
   Infinity,
+  Zap,
+  CheckCircle2,
 } from "lucide-react";
 import {
   getCachedChapter,
@@ -51,6 +53,8 @@ import {
   applyGlossaryToText,
   replaceTermsInNovelCache,
   NovelGlossaryTerm,
+  addReadingHistory,
+  getNovelCachedChaptersCount,
 } from "../utils/indexedDbStorage";
 import { NovelGlossaryDrawer } from "./NovelGlossaryDrawer";
 import { TextChunk } from "../types";
@@ -199,11 +203,142 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
     return books.some((b) => b.id === novelId || (b.title === novelTitle && (b.author === author || !author)));
   });
 
+  // Offline pre-caching state
+  const [isPreCaching, setIsPreCaching] = useState(false);
+  const [preCacheProgress, setPreCacheProgress] = useState<{ current: number; total: number; message: string } | null>(null);
+  const [offlineCachedCount, setOfflineCachedCount] = useState<number>(0);
+
+  // Load offline cached count for this novel
+  const refreshOfflineCount = useCallback(() => {
+    if (novelId) {
+      getNovelCachedChaptersCount(novelId).then(setOfflineCachedCount).catch(() => {});
+    }
+  }, [novelId]);
+
+  useEffect(() => {
+    if (novelId && isOpen) {
+      refreshOfflineCount();
+    }
+  }, [novelId, isOpen, currentChapterIndex, refreshOfflineCount]);
+
   // Sync library status whenever novel changes
   useEffect(() => {
     const books = getLocalLibraryBooks();
     setIsInLibrary(books.some((b) => b.id === novelId || (b.title === novelTitle && (b.author === author || !author))));
   }, [novelId, novelTitle, author]);
+
+  // Pre-Cache Next 10 Chapters for Zero-Data Offline Reading
+  const handlePreCacheNextChapters = async (count: number = 10) => {
+    if (isPreCaching) return;
+    setIsPreCaching(true);
+
+    const total = totalChapters || chapterList.length || (currentChapterIndex + count);
+    const startIdx = currentChapterIndex + 1;
+    const endIdx = Math.min(total, currentChapterIndex + count);
+    const totalToFetch = Math.max(1, endIdx - startIdx + 1);
+
+    if (startIdx > total) {
+      setPreCacheProgress({ current: 0, total: 0, message: "Already at the end of the novel!" });
+      setTimeout(() => {
+        setIsPreCaching(false);
+        setPreCacheProgress(null);
+      }, 3000);
+      return;
+    }
+
+    setPreCacheProgress({
+      current: 0,
+      total: totalToFetch,
+      message: `Pre-caching next ${totalToFetch} chapters for offline reading...`,
+    });
+
+    let cachedCount = 0;
+    for (let targetIdx = startIdx; targetIdx <= endIdx; targetIdx++) {
+      try {
+        // 1. Check if already in IndexedDB cache
+        const existing = await getCachedChapter(novelId, targetIdx);
+        if (existing && existing.chineseContent) {
+          cachedCount++;
+          setPreCacheProgress({
+            current: cachedCount,
+            total: totalToFetch,
+            message: `Chapter ${targetIdx} already offline (Cached)`,
+          });
+          continue;
+        }
+
+        // 2. Fetch from active session chunks if available
+        if (sessionChunks && sessionChunks.length > 0) {
+          const chunk = sessionChunks.find((c) => c.index === targetIdx - 1);
+          if (chunk && chunk.chineseText) {
+            await setCachedChapter(novelId, targetIdx, {
+              chapterIndex: targetIdx,
+              chapterTitle: chunk.chapterTitle || `Chapter ${targetIdx}`,
+              chineseContent: chunk.chineseText,
+              englishContent: chunk.englishText || "",
+              totalChapters: total,
+            });
+            cachedCount++;
+            setPreCacheProgress({
+              current: cachedCount,
+              total: totalToFetch,
+              message: `Saved Chapter ${targetIdx} (${cachedCount}/${totalToFetch})`,
+            });
+            continue;
+          }
+        }
+
+        // 3. Fetch from store crawler
+        const chapterObj = chapterList.find((c) => (c.index || 0) === targetIdx) || chapterList[targetIdx - 1];
+        let res;
+        if (chapterObj && chapterObj.url) {
+          res = await fetch("/api/store/fetch-chapter", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+            body: JSON.stringify({ chapterUrl: chapterObj.url, chapterTitle: chapterObj.title }),
+          });
+        } else {
+          res = await fetch("/api/store/peek-chapter", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+            body: JSON.stringify({ novelUrl, siteId, title: novelTitle, author, targetIndex: targetIdx }),
+          });
+        }
+
+        if (res.ok) {
+          const data = await res.json();
+          const fTitle = data.chapterTitle || chapterObj?.title || `Chapter ${targetIdx}`;
+          await setCachedChapter(novelId, targetIdx, {
+            chapterIndex: targetIdx,
+            chapterTitle: fTitle,
+            chineseContent: data.content || "",
+            englishContent: data.englishContent || "",
+            totalChapters: data.totalChapters || total,
+          });
+          cachedCount++;
+          setPreCacheProgress({
+            current: cachedCount,
+            total: totalToFetch,
+            message: `Cached Chapter ${targetIdx} (${cachedCount}/${totalToFetch})`,
+          });
+        }
+      } catch (err) {
+        console.warn(`Error pre-caching chapter ${targetIdx}:`, err);
+      }
+    }
+
+    refreshOfflineCount();
+    setPreCacheProgress({
+      current: totalToFetch,
+      total: totalToFetch,
+      message: `✅ Pre-cached ${cachedCount} chapters! Ready for zero-data reading.`,
+    });
+
+    setTimeout(() => {
+      setIsPreCaching(false);
+      setPreCacheProgress(null);
+    }, 4500);
+  };
 
   // Persistent Novel Glossary state & ref
   const [novelGlossary, setNovelGlossary] = useState<NovelGlossaryTerm[]>([]);
@@ -2411,6 +2546,27 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                       </span>
                     </button>
 
+                    {/* Pre-Cache Next 10 Chapters for Airplane/Offline Mode */}
+                    <button
+                      type="button"
+                      disabled={isPreCaching}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowTopMoreMenu(false);
+                        handlePreCacheNextChapters(10);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl text-left font-bold text-xs cursor-pointer transition bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-600 hover:text-white dark:hover:bg-emerald-600 dark:hover:text-white group text-emerald-800 dark:text-emerald-200"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Zap className="h-4.5 w-4.5 shrink-0 text-emerald-600 dark:text-emerald-400 group-hover:text-white fill-current" />
+                        <span className="truncate">{isPreCaching ? "Pre-Caching in Background..." : "Pre-Cache Next 10 Chapters"}</span>
+                      </div>
+                      <span className="text-[9px] font-mono opacity-80 group-hover:opacity-100 shrink-0">
+                        {offlineCachedCount} Offline
+                      </span>
+                    </button>
+
                     {/* Translate Chapter Scope Modal */}
                     <button
                       type="button"
@@ -3259,7 +3415,42 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                 </button>
               </div>
 
-              <div className="p-2">
+              <div className="p-2 space-y-2">
+                {/* Pre-Cache Next 10 Chapters Button & Progress */}
+                <button
+                  type="button"
+                  disabled={isPreCaching}
+                  onClick={() => handlePreCacheNextChapters(10)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <Zap className={`h-4 w-4 ${isPreCaching ? "animate-bounce" : "fill-current"}`} />
+                    <span>{isPreCaching ? "Pre-Caching..." : "Pre-Cache Next 10 Ch"}</span>
+                  </div>
+                  <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full font-mono">
+                    {offlineCachedCount} Offline
+                  </span>
+                </button>
+
+                {preCacheProgress && (
+                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2 space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-emerald-700 dark:text-emerald-300 font-bold">
+                      <span className="truncate">{preCacheProgress.message}</span>
+                      {preCacheProgress.total > 0 && (
+                        <span className="shrink-0 ml-1">{preCacheProgress.current}/{preCacheProgress.total}</span>
+                      )}
+                    </div>
+                    {preCacheProgress.total > 0 && (
+                      <div className="h-1 w-full bg-emerald-200 dark:bg-emerald-950 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 transition-all duration-300 rounded-full"
+                          style={{ width: `${Math.min(100, (preCacheProgress.current / preCacheProgress.total) * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <input
                   type="text"
                   placeholder="Search chapter title or #..."

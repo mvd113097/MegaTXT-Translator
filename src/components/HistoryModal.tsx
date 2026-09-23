@@ -12,8 +12,16 @@ import {
   RotateCw,
   Loader2,
   Check,
+  BookMarked,
+  Sparkles,
 } from "lucide-react";
 import { TranslationSession } from "../types";
+import {
+  getReadingHistory,
+  removeReadingHistoryItem,
+  clearReadingHistory,
+  ReadingHistoryItem,
+} from "../utils/indexedDbStorage";
 
 interface StoredNovel {
   id: string;
@@ -35,6 +43,15 @@ interface HistoryModalProps {
   onReset: (novelName?: string) => void;
   getAuthHeaders?: () => Record<string, string>;
   onSelectNovel?: (fileName: string) => void;
+  onOpenReader?: (novel: {
+    novelTitle: string;
+    author?: string;
+    coverUrl?: string;
+    novelUrl?: string;
+    siteId?: string;
+    chapterIndex?: number;
+    totalChapters?: number;
+  }) => void;
 }
 
 export const HistoryModal: React.FC<HistoryModalProps> = ({
@@ -45,11 +62,18 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
   onReset,
   getAuthHeaders,
   onSelectNovel,
+  onOpenReader,
 }) => {
+  const [activeTab, setActiveTab] = useState<"reading" | "cloud">("reading");
+  const [readingHistory, setReadingHistory] = useState<ReadingHistoryItem[]>([]);
   const [novels, setNovels] = useState<StoredNovel[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [isClearingAll, setIsClearingAll] = useState(false);
+
+  const refreshReadingHistory = () => {
+    setReadingHistory(getReadingHistory());
+  };
 
   const fetchNovels = async () => {
     if (!isOpen) return;
@@ -70,11 +94,55 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      refreshReadingHistory();
       fetchNovels();
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const handleDeleteHistoryItem = (item: ReadingHistoryItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = removeReadingHistoryItem(item.id);
+    setReadingHistory(updated);
+  };
+
+  const handleClearAllHistory = () => {
+    if (readingHistory.length === 0) return;
+    const confirmClear = window.confirm(
+      "Are you sure you want to delete ALL novels from your reading history?"
+    );
+    if (!confirmClear) return;
+    clearReadingHistory();
+    setReadingHistory([]);
+  };
+
+  const handleReadHistoryNovel = (item: ReadingHistoryItem) => {
+    if (onOpenReader) {
+      onOpenReader({
+        novelTitle: item.title,
+        author: item.author,
+        coverUrl: item.coverUrl,
+        novelUrl: item.novelUrl,
+        siteId: item.siteId,
+        chapterIndex: item.lastReadChapterIndex || 1,
+        totalChapters: item.totalChapters || 1,
+      });
+      onClose();
+    }
+  };
+
+  const formatRelativeTime = (timestamp: number) => {
+    const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+    if (diffSec < 60) return "Just now";
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return `${diffHour}h ago`;
+    const diffDays = Math.floor(diffHour / 24);
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return new Date(timestamp).toLocaleDateString();
+  };
 
   const handleDeleteNovel = async (novel: StoredNovel) => {
     const confirmDelete = window.confirm(
@@ -160,21 +228,23 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
             </div>
             <div>
               <h3 className="text-sm font-extrabold text-slate-800 dark:text-slate-100">
-                Translation History & Library
+                History & Novel Library
               </h3>
-              <p className="text-[11px] text-slate-500">Manage all stored & active novel translations</p>
+              <p className="text-[11px] text-slate-500">Your read novels & background translations</p>
             </div>
           </div>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={fetchNovels}
-              disabled={isLoading}
-              title="Refresh novel list"
-              className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
-            >
-              <RotateCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin text-purple-600" : ""}`} />
-            </button>
+            {activeTab === "cloud" && (
+              <button
+                type="button"
+                onClick={fetchNovels}
+                disabled={isLoading}
+                title="Refresh novel list"
+                className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
+              >
+                <RotateCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin text-purple-600" : ""}`} />
+              </button>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -185,148 +255,290 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
           </div>
         </div>
 
-        {/* Scrollable Novel List */}
-        <div className="flex-1 overflow-y-auto space-y-3 pr-0.5">
-          {isLoading && novels.length === 0 ? (
-            <div className="py-12 text-center space-y-2">
-              <Loader2 className="h-6 w-6 animate-spin text-purple-600 mx-auto" />
-              <p className="text-xs font-medium text-slate-500">Loading stored translations...</p>
-            </div>
-          ) : novels.length > 0 ? (
-            novels.map((novel) => {
-              const isCurrentSession = session && session.fileName.toLowerCase() === novel.fileName.toLowerCase();
-              const percent = novel.totalChunks > 0 ? Math.round((novel.completedChunks / novel.totalChunks) * 100) : 0;
-              const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks === novel.totalChunks);
-              const isRunning = novel.status === "running";
-              const isDeleting = deletingId === novel.id;
+        {/* Tab Switcher */}
+        <div className="flex items-center gap-1 p-1 rounded-2xl bg-slate-100 dark:bg-slate-800/80 shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab("reading")}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl text-xs font-bold transition cursor-pointer ${
+              activeTab === "reading"
+                ? "bg-white dark:bg-slate-900 text-purple-700 dark:text-purple-300 shadow-xs"
+                : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            }`}
+          >
+            <BookMarked className="h-3.5 w-3.5" />
+            <span>Reading History</span>
+            <span className="ml-1 px-1.5 py-0.2 rounded-full bg-purple-100 dark:bg-purple-950 text-[10px] font-mono">
+              {readingHistory.length}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("cloud")}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl text-xs font-bold transition cursor-pointer ${
+              activeTab === "cloud"
+                ? "bg-white dark:bg-slate-900 text-purple-700 dark:text-purple-300 shadow-xs"
+                : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            }`}
+          >
+            <RotateCw className="h-3.5 w-3.5" />
+            <span>Cloud Translations</span>
+            <span className="ml-1 px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-700 text-[10px] font-mono">
+              {novels.length}
+            </span>
+          </button>
+        </div>
 
-              return (
-                <div
-                  key={novel.id || novel.fileName}
-                  className={`rounded-2xl border p-4 space-y-3 transition ${
-                    isCurrentSession
-                      ? "border-purple-300 dark:border-purple-600 bg-purple-50/40 dark:bg-purple-950/20 shadow-xs"
-                      : "border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 hover:bg-white dark:hover:bg-slate-800"
-                  }`}
+        {/* TAB 1: READING HISTORY */}
+        {activeTab === "reading" && (
+          <div className="flex-1 flex flex-col min-h-0 space-y-3">
+            {/* Reading History Top Bar with Clear-All Trash Icon */}
+            <div className="flex items-center justify-between px-1 shrink-0">
+              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                Novels you opened in Reader mode
+              </span>
+              {readingHistory.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearAllHistory}
+                  title="Delete ALL novels from reading history"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-rose-200/60 dark:border-rose-900/40 transition cursor-pointer active:scale-95"
                 >
-                  {/* Title and badges */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <BookOpen className={`h-4 w-4 shrink-0 ${isCurrentSession ? "text-purple-600" : "text-slate-500"}`} />
-                      <div className="min-w-0">
-                        <h4 className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate" title={novel.fileName}>
-                          {novel.fileName}
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Clear All</span>
+                </button>
+              )}
+            </div>
+
+            {/* Reading History List */}
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-0.5">
+              {readingHistory.length === 0 ? (
+                <div className="py-12 text-center space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-purple-50 dark:bg-purple-950/50 text-purple-500 mx-auto flex items-center justify-center border border-purple-100 dark:border-purple-900/40">
+                    <BookMarked className="h-6 w-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                      No Reading History Yet
+                    </p>
+                    <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                      Whenever you tap <strong>Read</strong> on a novel card in Explore, Store, or Library, it will appear here for instant 1-tap resuming!
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                readingHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    onClick={() => handleReadHistoryNovel(item)}
+                    className="group rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 hover:border-purple-300 dark:hover:border-purple-700/60 shadow-xs hover:shadow-md transition-all cursor-pointer flex items-center justify-between gap-3"
+                  >
+                    {/* Cover Thumbnail / Book Icon */}
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      {item.coverUrl ? (
+                        <img
+                          src={item.coverUrl}
+                          alt={item.title}
+                          className="w-11 h-14 object-cover rounded-xl shrink-0 border border-black/10 shadow-2xs"
+                        />
+                      ) : (
+                        <div className="w-11 h-14 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-700 text-white flex items-center justify-center shrink-0 shadow-2xs font-black text-xs">
+                          {item.title.slice(0, 1)}
+                        </div>
+                      )}
+
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100 truncate group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">
+                          {item.title}
                         </h4>
-                        {isCurrentSession && (
-                          <span className="text-[10px] font-semibold text-purple-600 dark:text-purple-400">
-                            Currently Active View
+                        <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {item.author && <span className="truncate">{item.author}</span>}
+                          <span>•</span>
+                          <span className="text-purple-600 dark:text-purple-400 font-semibold truncate">
+                            {item.lastReadChapterTitle || `Chapter ${item.lastReadChapterIndex}`}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 block">
+                          Read {formatRelativeTime(item.timestamp)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons: Read + Single Trash */}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleReadHistoryNovel(item);
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs shadow-xs active:scale-95 transition cursor-pointer"
+                        title="Resume reading this novel"
+                      >
+                        <BookOpen className="h-3.5 w-3.5" />
+                        <span>Read</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteHistoryItem(item, e)}
+                        title="Remove novel from reading history"
+                        className="p-1.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition cursor-pointer"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: CLOUD TRANSLATIONS */}
+        {activeTab === "cloud" && (
+          <div className="flex-1 overflow-y-auto space-y-3 pr-0.5">
+            {isLoading && novels.length === 0 ? (
+              <div className="py-12 text-center space-y-2">
+                <Loader2 className="h-6 w-6 animate-spin text-purple-600 mx-auto" />
+                <p className="text-xs font-medium text-slate-500">Loading stored translations...</p>
+              </div>
+            ) : novels.length > 0 ? (
+              novels.map((novel) => {
+                const isCurrentSession = session && session.fileName.toLowerCase() === novel.fileName.toLowerCase();
+                const percent = novel.totalChunks > 0 ? Math.round((novel.completedChunks / novel.totalChunks) * 100) : 0;
+                const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks === novel.totalChunks);
+                const isRunning = novel.status === "running";
+                const isDeleting = deletingId === novel.id;
+
+                return (
+                  <div
+                    key={novel.id || novel.fileName}
+                    className={`rounded-2xl border p-4 space-y-3 transition ${
+                      isCurrentSession
+                        ? "border-purple-300 dark:border-purple-600 bg-purple-50/40 dark:bg-purple-950/20 shadow-xs"
+                        : "border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 hover:bg-white dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    {/* Title and badges */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <BookOpen className={`h-4 w-4 shrink-0 ${isCurrentSession ? "text-purple-600" : "text-slate-500"}`} />
+                        <div className="min-w-0">
+                          <h4 className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate" title={novel.fileName}>
+                            {novel.fileName}
+                          </h4>
+                          {isCurrentSession && (
+                            <span className="text-[10px] font-semibold text-purple-600 dark:text-purple-400">
+                              Currently Active View
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isDone ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:text-emerald-200">
+                            <CheckCircle2 className="h-3 w-3" />
+                            Completed
+                          </span>
+                        ) : isRunning ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 dark:bg-sky-950/80 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300 animate-pulse">
+                            <RotateCw className="h-3 w-3 animate-spin" />
+                            Translating
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-slate-200 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-bold text-slate-700 dark:text-slate-300">
+                            Paused / Idle
                           </span>
                         )}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {isDone ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:text-emerald-200">
-                          <CheckCircle2 className="h-3 w-3" />
-                          Completed
-                        </span>
-                      ) : isRunning ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 dark:bg-sky-950/80 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300 animate-pulse">
-                          <RotateCw className="h-3 w-3 animate-spin" />
-                          Translating
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-slate-200 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-bold text-slate-700 dark:text-slate-300">
-                          Paused / Idle
-                        </span>
+                    {/* Progress bar */}
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>{novel.completedChunks} / {novel.totalChunks} Chunks ({percent}%)</span>
+                        {novel.wordCount > 0 && <span>~{novel.wordCount.toLocaleString()} words</span>}
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            isDone
+                              ? "bg-emerald-500"
+                              : "bg-gradient-to-r from-sky-400 to-purple-600"
+                          }`}
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {!isCurrentSession && onSelectNovel && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectNovel(novel.fileName);
+                            onClose();
+                          }}
+                          className="inline-flex items-center justify-center gap-1 rounded-xl bg-purple-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-2xs hover:bg-purple-700 active:scale-95 transition cursor-pointer"
+                        >
+                          <Play className="h-3 w-3 fill-current" />
+                          <span>Open Novel</span>
+                        </button>
                       )}
-                    </div>
-                  </div>
 
-                  {/* Progress bar */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px] text-slate-500 dark:text-slate-400">
-                      <span>{novel.completedChunks} / {novel.totalChunks} Chunks ({percent}%)</span>
-                      {novel.wordCount > 0 && <span>~{novel.wordCount.toLocaleString()} words</span>}
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                      <div
-                        className={`h-full rounded-full transition-all duration-300 ${
-                          isDone
-                            ? "bg-emerald-500"
-                            : "bg-gradient-to-r from-sky-400 to-purple-600"
-                        }`}
-                        style={{ width: `${percent}%` }}
-                      />
-                    </div>
-                  </div>
+                      {isCurrentSession && novel.completedChunks > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onDownloadProgress("epub")}
+                            className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
+                          >
+                            <Download className="h-3 w-3" />
+                            <span>EPUB</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDownloadProgress("txt")}
+                            className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
+                          >
+                            <FileText className="h-3 w-3" />
+                            <span>TXT</span>
+                          </button>
+                        </>
+                      )}
 
-                  {/* Actions */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    {!isCurrentSession && onSelectNovel && (
                       <button
                         type="button"
-                        onClick={() => {
-                          onSelectNovel(novel.fileName);
-                          onClose();
-                        }}
-                        className="inline-flex items-center justify-center gap-1 rounded-xl bg-purple-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-2xs hover:bg-purple-700 active:scale-95 transition cursor-pointer"
+                        disabled={isDeleting}
+                        onClick={() => handleDeleteNovel(novel)}
+                        className="ml-auto inline-flex items-center justify-center gap-1 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 active:scale-95 transition cursor-pointer disabled:opacity-50"
                       >
-                        <Play className="h-3 w-3 fill-current" />
-                        <span>Open Novel</span>
+                        {isDeleting ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3 w-3" />
+                        )}
+                        <span>Delete</span>
                       </button>
-                    )}
-
-                    {isCurrentSession && novel.completedChunks > 0 && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onDownloadProgress("epub")}
-                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
-                        >
-                          <Download className="h-3 w-3" />
-                          <span>EPUB</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onDownloadProgress("txt")}
-                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
-                        >
-                          <FileText className="h-3 w-3" />
-                          <span>TXT</span>
-                        </button>
-                      </>
-                    )}
-
-                    <button
-                      type="button"
-                      disabled={isDeleting}
-                      onClick={() => handleDeleteNovel(novel)}
-                      className="ml-auto inline-flex items-center justify-center gap-1 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 active:scale-95 transition cursor-pointer disabled:opacity-50"
-                    >
-                      {isDeleting ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3 w-3" />
-                      )}
-                      <span>Delete</span>
-                    </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="py-8 text-center space-y-2">
-              <p className="text-xs font-medium text-slate-400 dark:text-slate-500">
-                No saved translation records found.
-              </p>
-              <p className="text-[11px] text-slate-400">
-                Upload a Chinese novel or select one from Explore to start translating!
-              </p>
-            </div>
-          )}
-        </div>
+                );
+              })
+            ) : (
+              <div className="py-8 text-center space-y-2">
+                <p className="text-xs font-medium text-slate-400 dark:text-slate-500">
+                  No saved translation records found.
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  Upload a Chinese novel or select one from Explore to start translating!
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Footer actions */}
         <div className="border-t border-purple-100/70 dark:border-purple-900/40 pt-3 space-y-2 shrink-0">
