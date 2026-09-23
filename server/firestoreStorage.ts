@@ -589,6 +589,63 @@ export async function loadAllJobsFromFirestore(): Promise<Map<string, CloudJob>>
 }
 
 /**
+ * Record a tombstone entry in Firestore for a deleted job ID or fileName so it is NEVER re-imported
+ */
+export async function recordDeletedJobInFirestore(jobId?: string, fileName?: string): Promise<boolean> {
+  if (!isCloudStorageAvailable()) return false;
+  const db = initFirestore();
+  if (!db) return false;
+
+  try {
+    const cleanId = (jobId || "").trim();
+    const cleanFileName = (fileName || "").trim().toLowerCase();
+    if (!cleanId && !cleanFileName) return false;
+
+    const docKey = cleanId ? `tombstone_${cleanId}` : `tombstone_file_${cleanFileName.replace(/[^a-z0-9_]/gi, "_")}`;
+    const tombstoneRef = doc(db, "deleted_jobs", docKey);
+    await setDoc(
+      tombstoneRef,
+      {
+        id: cleanId,
+        fileName: cleanFileName,
+        deletedAt: Date.now(),
+      },
+      { merge: true }
+    );
+    return true;
+  } catch (err: any) {
+    handleFirestoreError("recordDeletedJobInFirestore", err);
+    return false;
+  }
+}
+
+/**
+ * Get all tombstone entries for deleted jobs from Firestore
+ */
+export async function getDeletedJobTombstonesFromFirestore(): Promise<{ ids: Set<string>; fileNames: Set<string> }> {
+  const ids = new Set<string>();
+  const fileNames = new Set<string>();
+
+  if (!isCloudStorageAvailable()) return { ids, fileNames };
+  const db = initFirestore();
+  if (!db) return { ids, fileNames };
+
+  try {
+    const tombstonesRef = collection(db, "deleted_jobs");
+    const snapshot = await getDocs(tombstonesRef);
+    for (const docSnap of snapshot.docs) {
+      const data = docSnap.data();
+      if (data.id) ids.add(data.id);
+      if (data.fileName) fileNames.add(String(data.fileName).trim().toLowerCase());
+    }
+  } catch (err: any) {
+    handleFirestoreError("getDeletedJobTombstonesFromFirestore", err);
+  }
+
+  return { ids, fileNames };
+}
+
+/**
  * Permanently delete a job and all its chunks from Firestore
  */
 export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
@@ -624,6 +681,10 @@ export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
 
     const jobRef = doc(db, "translation_jobs", jobId);
     await deleteDoc(jobRef);
+
+    // Write tombstone entry
+    await recordDeletedJobInFirestore(jobId);
+
     console.log(`[FirestoreStorage] Deleted job ${jobId} and its chunk subcollection from Firestore`);
     return true;
   } catch (err: any) {
@@ -644,6 +705,7 @@ export async function deleteJobByFileNameFromFirestore(fileName: string): Promis
   let deletedCount = 0;
 
   try {
+    await recordDeletedJobInFirestore(undefined, fileName);
     const jobsRef = collection(db, "translation_jobs");
     const snapshot = await getDocs(jobsRef);
     for (const docSnap of snapshot.docs) {
