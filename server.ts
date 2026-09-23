@@ -988,7 +988,10 @@ async function deleteJobCompletely(
         }
       }
     } catch {}
-    await deleteAllJobsFromFirestore().catch(() => {});
+    // Non-blocking firestore purge
+    deleteAllJobsFromFirestore().catch((err) => {
+      console.warn("[Storage] Background deleteAllJobsFromFirestore error:", err?.message);
+    });
     return;
   }
 
@@ -1108,22 +1111,26 @@ async function deleteJobCompletely(
     console.warn("Error deleting job files from disk:", err);
   }
 
-  // 5. Delete matching jobs from Firestore
-  for (const tid of targetIds) {
-    try {
-      await deleteJobFromFirestore(tid);
-    } catch (err: any) {
-      console.warn(`[Storage] Firestore delete error for job ID ${tid}:`, err?.message);
+  // 5. Delete matching jobs from Firestore non-blockingly in background
+  (async () => {
+    for (const tid of targetIds) {
+      try {
+        await deleteJobFromFirestore(tid);
+      } catch (err: any) {
+        console.warn(`[Storage] Firestore delete error for job ID ${tid}:`, err?.message);
+      }
     }
-  }
 
-  for (const tName of targetFileNames) {
-    try {
-      await deleteJobByFileNameFromFirestore(tName);
-    } catch (err: any) {
-      console.warn(`[Storage] Firestore delete error for fileName ${tName}:`, err?.message);
+    for (const tName of targetFileNames) {
+      try {
+        await deleteJobByFileNameFromFirestore(tName);
+      } catch (err: any) {
+        console.warn(`[Storage] Firestore delete error for fileName ${tName}:`, err?.message);
+      }
     }
-  }
+  })().catch((err) => {
+    console.warn("[Storage] Background Firestore cleanup error:", err?.message);
+  });
 }
 
 function setJobForSession(sessionId: string, job: CloudJob | null) {

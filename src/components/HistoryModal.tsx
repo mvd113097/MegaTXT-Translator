@@ -102,12 +102,18 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
   if (!isOpen) return null;
 
   const handleDeleteHistoryItem = (item: ReadingHistoryItem, e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
-    const updated = removeReadingHistoryItem(item.id);
-    setReadingHistory(updated);
+    const targetKey = item.id || item.title;
+    const updated = removeReadingHistoryItem(targetKey);
+    setReadingHistory([...updated]);
   };
 
-  const handleClearAllHistory = () => {
+  const handleClearAllHistory = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     if (readingHistory.length === 0) return;
     const confirmClear = window.confirm(
       "Are you sure you want to delete ALL novels from your reading history?"
@@ -150,9 +156,23 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     );
     if (!confirmDelete) return;
 
-    setDeletingId(novel.id);
+    const deleteKey = novel.id || novel.fileName;
+    setDeletingId(deleteKey);
+
+    // Optimistically remove from UI list immediately
+    setNovels((prev) =>
+      prev.filter(
+        (n) =>
+          n.fileName.toLowerCase() !== novel.fileName.toLowerCase() &&
+          n.id !== novel.id
+      )
+    );
+
     try {
       const headers = getAuthHeaders ? getAuthHeaders() : {};
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
       await fetch("/api/cloud-job/delete", {
         method: "POST",
         headers: {
@@ -164,10 +184,11 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
           fileName: novel.fileName,
           jobId: novel.id,
         }),
+        signal: controller.signal,
+      }).catch((err) => {
+        console.warn("Delete request warning:", err);
       });
-
-      // Update local list
-      setNovels((prev) => prev.filter((n) => n.fileName.toLowerCase() !== novel.fileName.toLowerCase() && n.id !== novel.id));
+      clearTimeout(timeoutId);
 
       // If this was the active session, clear it from view as well
       if (session && session.fileName.toLowerCase() === novel.fileName.toLowerCase()) {
@@ -175,7 +196,6 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
       }
     } catch (err) {
       console.error("Failed to delete novel:", err);
-      alert("Failed to delete novel. Please check your connection.");
     } finally {
       setDeletingId(null);
     }
@@ -188,8 +208,13 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     if (!confirmClear) return;
 
     setIsClearingAll(true);
+    setNovels([]);
+
     try {
       const headers = getAuthHeaders ? getAuthHeaders() : {};
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
       await fetch("/api/cloud-job/delete", {
         method: "POST",
         headers: {
@@ -199,13 +224,16 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
         body: JSON.stringify({
           clearAll: true,
         }),
+        signal: controller.signal,
+      }).catch((err) => {
+        console.warn("Clear all request warning:", err);
       });
-      setNovels([]);
+      clearTimeout(timeoutId);
+
       onReset();
       onClose();
     } catch (err) {
       console.error("Failed to clear all:", err);
-      alert("Failed to clear all novels.");
     } finally {
       setIsClearingAll(false);
     }
@@ -409,7 +437,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
                 const percent = novel.totalChunks > 0 ? Math.round((novel.completedChunks / novel.totalChunks) * 100) : 0;
                 const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks === novel.totalChunks);
                 const isRunning = novel.status === "running";
-                const isDeleting = deletingId === novel.id;
+                const isDeleting = deletingId === novel.id || deletingId === novel.fileName;
 
                 return (
                   <div

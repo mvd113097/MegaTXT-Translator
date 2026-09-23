@@ -563,9 +563,11 @@ export function addReadingHistory(
 }
 
 export function removeReadingHistoryItem(idOrTitle: string): ReadingHistoryItem[] {
+  if (!idOrTitle) return getReadingHistory();
   const list = getReadingHistory();
+  const target = idOrTitle.trim().toLowerCase();
   const nextList = list.filter(
-    (h) => h.id !== idOrTitle && h.title !== idOrTitle
+    (h) => h.id !== idOrTitle && h.title !== idOrTitle && h.title.trim().toLowerCase() !== target
   );
   saveReadingHistory(nextList);
   return nextList;
