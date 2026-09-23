@@ -366,22 +366,35 @@ export default function App() {
   const currentSessionReaderChunks = useMemo(() => {
     if (!session || !session.chunks || session.chunks.length === 0) return undefined;
     const finished = session.chunks
-      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
       .sort((a, b) => a.index - b.index);
     return finished.length > 0 ? finished : session.chunks;
   }, [session]);
 
-  const handleOpenCurrentSessionReader = () => {
+  const handleOpenCurrentSessionReader = async () => {
     if (!session || !session.chunks || session.chunks.length === 0) return;
     const cleanTitle = session.fileName.replace(/\.txt$/i, "");
 
-    // Extract all finished chapters translated by Gemini in order 1, 2, 3, 4, 5...
-    const finishedChunks = session.chunks
-      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+    // 1. Sync full translated chapter texts from server if needed (cloud mode or missing text)
+    let currentChunks = chunksRef.current.length > 0 ? chunksRef.current : session.chunks;
+    if (
+      mode === "cloud" ||
+      currentChunks.length === 0 ||
+      currentChunks.some((c) => c.status === "completed" && (!c.englishText || !c.englishText.trim()))
+    ) {
+      const synced = await syncCompletedTexts(true);
+      if (synced && synced.length > 0) {
+        currentChunks = synced;
+      }
+    }
+
+    // 2. Extract all finished chapters translated by Gemini in order 1, 2, 3, 4, 5...
+    const finishedChunks = currentChunks
+      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
       .sort((a, b) => a.index - b.index);
 
-    // If translation just began and no chunks are finished yet, fallback gracefully to initial chunks
-    const activeChunks = finishedChunks.length > 0 ? finishedChunks : session.chunks;
+    // If translation just began and no chunks have finished English yet, fallback gracefully to initial chunks
+    const activeChunks = finishedChunks.length > 0 ? finishedChunks : currentChunks;
 
     // Strict in-order chapters 1.2.3.4.5...
     const allChapters = activeChunks.map((c, idx) => ({
@@ -417,7 +430,7 @@ export default function App() {
     if (!isSameNovel(session.fileName, readerNovel.novelTitle)) return;
 
     const finished = session.chunks
-      .filter((c) => c.status === "completed" || (Boolean(c.englishText) && c.englishText.trim().length > 0))
+      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
       .sort((a, b) => a.index - b.index);
 
     if (finished.length === 0) return;
