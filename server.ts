@@ -116,7 +116,12 @@ async function translateWithDecomposition(
         );
         sentenceTranslations.push(res.text.trim());
       } catch (subErr) {
-        sentenceTranslations.push("[Scene narrative continues naturally...]");
+        try {
+          const gTrans = await translateWithGoogle(sent.trim(), "zh-CN", "en");
+          sentenceTranslations.push(gTrans || "[Scene narrative continues naturally...]");
+        } catch {
+          sentenceTranslations.push("[Scene narrative continues naturally...]");
+        }
       }
     }
     return { text: sentenceTranslations.join(" "), modelUsed: "gemini-decomposed-sentence", projectUsed: "auto" };
@@ -185,7 +190,14 @@ Translate directly into fluent English prose:`;
           if (sRes.text && sRes.text.trim()) {
             sentResults.push(sRes.text.trim());
           }
-        } catch {}
+        } catch {
+          try {
+            const gTrans = await translateWithGoogle(sent.trim(), "zh-CN", "en");
+            if (gTrans && gTrans.trim()) {
+              sentResults.push(gTrans.trim());
+            }
+          } catch {}
+        }
       }
       translatedBatches[i] = sentResults.join(" ");
     }
@@ -196,8 +208,22 @@ Translate directly into fluent English prose:`;
     await Promise.all(chunk);
   }
 
+  const finalJoinedText = translatedBatches.filter(Boolean).join("\n\n");
+  if (!finalJoinedText || finalJoinedText.trim().length === 0) {
+    try {
+      const gChapter = await translateChapterWithGoogle(rawText);
+      if (gChapter && gChapter.trim().length > 0) {
+        return {
+          text: gChapter.trim(),
+          modelUsed: "google-translate-fallback",
+          projectUsed: "engine",
+        };
+      }
+    } catch {}
+  }
+
   return {
-    text: translatedBatches.filter(Boolean).join("\n\n"),
+    text: finalJoinedText || "[Translation continues...]",
     modelUsed: "gemini-decomposed-fallback",
     projectUsed: "pool"
   };
@@ -1485,39 +1511,67 @@ async function startCloudWorkerLoop() {
       let firstChunk: ServerTextChunk | null = null;
 
       // Find the next available non-completed chunk across all running jobs
+      // PASS 1: Prioritize fresh / pending chunks (never attempted or status !== "error") to prevent Head-of-Line stalls
       for (const job of runningJobs) {
-        const candidate = job.chunks.find((c) => {
+        const freshCandidate = job.chunks.find((c) => {
           if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
             return false;
           }
           if (inFlightChunkIds.has(c.id)) {
             return false;
           }
-          if (c.status === "error" && c.lastErrorAt && now < c.lastErrorAt + 8000) {
+          if (c.status === "error" || (c.attempts && c.attempts > 0)) {
             return false;
           }
           return true;
         });
 
-        if (candidate) {
+        if (freshCandidate) {
           targetJob = job;
-          firstChunk = candidate;
+          firstChunk = freshCandidate;
           break;
-        } else {
-          // Check if this job has completed all its chunks
-          const expectedTotal = (job as any).totalChunks || job.chunks.length;
-          const allCompleted = expectedTotal > 0 &&
-            job.chunks.length >= expectedTotal &&
-            job.chunks.every(
-              (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
-            );
-          if (allCompleted && job.status === "running") {
-            console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) completed!`);
-            job.status = "completed";
-            job.lastActiveAt = Date.now();
-            saveJobToDisk(job.sessionId || "legacy_default", job);
-            if (!isSyntheticOrTestJob(job)) {
-              sendTelegramNotification(formatCompletionTelegramMessage(job));
+        }
+      }
+
+      // PASS 2: If no fresh pending chunk is available, look for error chunks whose exponential backoff has elapsed
+      if (!targetJob || !firstChunk) {
+        for (const job of runningJobs) {
+          const retryCandidate = job.chunks.find((c) => {
+            if (c.status === "completed" && c.englishText && c.englishText.trim().length > 0) {
+              return false;
+            }
+            if (inFlightChunkIds.has(c.id)) {
+              return false;
+            }
+            const attempts = c.attempts || 1;
+            // Exponential backoff: 8s for 1 attempt, 16s for 2, 32s for 3, 60s for 4+, capped at 120s
+            const requiredDelay = Math.min(8000 * Math.pow(1.5, Math.max(0, attempts - 1)), 120000);
+            if (c.status === "error" && c.lastErrorAt && now < c.lastErrorAt + requiredDelay) {
+              return false;
+            }
+            return true;
+          });
+
+          if (retryCandidate) {
+            targetJob = job;
+            firstChunk = retryCandidate;
+            break;
+          } else {
+            // Check if this job has completed all its chunks
+            const expectedTotal = (job as any).totalChunks || job.chunks.length;
+            const allCompleted = expectedTotal > 0 &&
+              job.chunks.length >= expectedTotal &&
+              job.chunks.every(
+                (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+              );
+            if (allCompleted && job.status === "running") {
+              console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) completed!`);
+              job.status = "completed";
+              job.lastActiveAt = Date.now();
+              saveJobToDisk(job.sessionId || "legacy_default", job);
+              if (!isSyntheticOrTestJob(job)) {
+                sendTelegramNotification(formatCompletionTelegramMessage(job));
+              }
             }
           }
         }
@@ -1755,11 +1809,32 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 // Opportunistic cloud backup
                 saveChunkToFirestore(targetJob.id, single).catch(() => {});
               } else {
-                single.status = "error";
-                single.errorMessage = "Empty translation response received.";
-                single.lastErrorAt = Date.now();
-                single.durationMs = Date.now() - startBatchTime;
-                invalidCount = 1;
+                // Secondary Fallback: Google Translation Engine
+                try {
+                  const googleTrans = await translateChapterWithGoogle(single.chineseText);
+                  if (googleTrans && googleTrans.trim().length > 0) {
+                    single.englishText = googleTrans.trim();
+                    single.durationMs = Date.now() - startBatchTime;
+                    single.errorMessage = undefined;
+                    single.lastErrorAt = undefined;
+                    single.status = "completed";
+                    inFlightChunkIds.delete(single.id);
+                    validCount = 1;
+                    saveChunkToFirestore(targetJob.id, single).catch(() => {});
+                  } else {
+                    single.status = "error";
+                    single.errorMessage = "Empty translation response received.";
+                    single.lastErrorAt = Date.now();
+                    single.durationMs = Date.now() - startBatchTime;
+                    invalidCount = 1;
+                  }
+                } catch {
+                  single.status = "error";
+                  single.errorMessage = "Empty translation response received.";
+                  single.lastErrorAt = Date.now();
+                  single.durationMs = Date.now() - startBatchTime;
+                  invalidCount = 1;
+                }
               }
             }
           } else {
@@ -1786,6 +1861,7 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
               } else {
                 console.log(`[Cloud Worker #${workerId}] Batch parsing fallback: translating chunk #${chunk.index + 1} individually...`);
+                let recovered = false;
                 try {
                   const singlePrompt = `${contextBlock ? contextBlock + "\n" : ""}${
                     targetJob.customInstructions ? `Special Instructions: ${targetJob.customInstructions}\n\n` : ""
@@ -1820,6 +1896,7 @@ Translation Guidelines:
                     chunk.status = "completed";
                     inFlightChunkIds.delete(chunk.id);
                     validCount++;
+                    recovered = true;
 
                     // Opportunistic cloud backup
                     saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
@@ -1827,6 +1904,24 @@ Translation Guidelines:
                   }
                 } catch (singleErr: any) {
                   console.warn(`[Cloud Worker #${workerId}] Individual translation fallback failed for chunk #${chunk.index + 1}:`, singleErr.message);
+                }
+
+                if (!recovered) {
+                  try {
+                    const gTrans = await translateChapterWithGoogle(chunk.chineseText);
+                    if (gTrans && gTrans.trim().length > 0) {
+                      chunk.englishText = gTrans.trim();
+                      chunk.durationMs = Date.now() - startBatchTime;
+                      chunk.errorMessage = undefined;
+                      chunk.lastErrorAt = undefined;
+                      chunk.status = "completed";
+                      inFlightChunkIds.delete(chunk.id);
+                      validCount++;
+                      recovered = true;
+                      saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                      continue;
+                    }
+                  } catch {}
                 }
 
                 chunk.status = "error";
@@ -1884,7 +1979,25 @@ Translation Guidelines:
             }
           }
 
+          // If repeated attempts fail on this batch, rescue with Google Translate fallback so job never gets stuck
           for (const chunk of batchChunks) {
+            if (attemptCount >= MAX_ATTEMPTS_PER_PASS || (chunk.attempts && chunk.attempts >= 2)) {
+              try {
+                const gTrans = await translateChapterWithGoogle(chunk.chineseText);
+                if (gTrans && gTrans.trim().length > 0) {
+                  chunk.englishText = gTrans.trim();
+                  chunk.durationMs = Date.now() - startBatchTime;
+                  chunk.errorMessage = undefined;
+                  chunk.lastErrorAt = undefined;
+                  chunk.status = "completed";
+                  inFlightChunkIds.delete(chunk.id);
+                  saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                  console.log(`[Cloud Worker #${workerId}] Chunk #${chunk.index + 1} rescued via fallback translation engine!`);
+                  continue;
+                }
+              } catch {}
+            }
+
             chunk.status = "error";
             chunk.attempts = (chunk.attempts || 0) + 1;
             chunk.errorMessage = `Attempt ${chunk.attempts}: ${cleanErr}. Auto-retrying...`;
