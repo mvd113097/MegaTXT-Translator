@@ -722,39 +722,23 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
     });
   };
 
-  // Sync initial content, english translation, or chapter list when props update
-  useEffect(() => {
-    if (initialChapterIndex) {
-      setCurrentChapterIndex(initialChapterIndex);
-    }
-    if (allChapters && allChapters.length > 0) {
-      setChapterList(cleanAndDeduplicateChapterList(allChapters));
-    }
-    if (initialContent) {
-      setChineseContent(initialContent);
-    }
-    if (initialEnglishContent) {
-      setEnglishContent(initialEnglishContent);
-    }
-  }, [initialChapterIndex, allChapters, initialContent, initialEnglishContent]);
-
   // Keep active reader chapter content live-synced when background translation completes
   useEffect(() => {
-    if (cleanedSessionChunks && cleanedSessionChunks.length > 0 && currentChapterIndex >= 1 && currentChapterIndex <= cleanedSessionChunks.length) {
-      const activeChunk = cleanedSessionChunks[currentChapterIndex - 1];
-      if (activeChunk && activeChunk.englishText && activeChunk.englishText !== englishContent) {
+    if (sessionChunks && sessionChunks.length > 0) {
+      const activeChunk = sessionChunks.find((c) => c.index === currentChapterIndex - 1) || sessionChunks[currentChapterIndex - 1];
+      if (activeChunk && activeChunk.englishText && activeChunk.englishText.trim().length > 0 && activeChunk.englishText !== englishContent) {
         const finalEng = applyGlossaryToText(activeChunk.englishText, novelGlossaryRef.current);
         setEnglishContent(finalEng);
         if (activeChunk.chineseText && (!chineseContent || chineseContent !== activeChunk.chineseText)) {
           setChineseContent(activeChunk.chineseText);
         }
-        const title = activeChunk.chapterTitle || `Chapter ${currentChapterIndex}`;
+        const title = activeChunk.chapterTitle || (chapterList[currentChapterIndex - 1]?.title) || `Chapter ${currentChapterIndex}`;
         setChapterTitle(title);
-        setChapterTitleZh(activeChunk.chapterTitle || `Chapter ${currentChapterIndex}`);
+        setChapterTitleZh(activeChunk.chapterTitle || title);
         setChapterTitleEn(title.startsWith("Chapter") ? title : `Chapter ${currentChapterIndex}`);
       }
     }
-  }, [cleanedSessionChunks, currentChapterIndex]);
+  }, [sessionChunks, currentChapterIndex]);
 
   // Find the optimal Google US Female / Android voice
   const findGoogleUsFemaleVoice = useCallback((voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null => {
@@ -3537,6 +3521,10 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                 {filteredChapters.map((ch, idx) => {
                   const chIndex = ch.index || idx + 1;
                   const isCurrent = chIndex === currentChapterIndex;
+                  const sessionChunk = sessionChunks?.find((c) => c.index === chIndex - 1) || sessionChunks?.[chIndex - 1];
+                  const hasEnglish = Boolean(sessionChunk?.englishText?.trim());
+                  const isProcessing = sessionChunk?.status === "processing";
+
                   return (
                     <button
                       key={idx}
@@ -3551,8 +3539,25 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                           : "hover:bg-purple-500/10 opacity-90"
                       }`}
                     >
-                      <span className="truncate">{ch.title || `Chapter ${chIndex}`}</span>
-                      <span className="text-[10px] opacity-75 shrink-0">#{chIndex}</span>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <span className="truncate">{ch.title || `Chapter ${chIndex}`}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {hasEnglish ? (
+                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
+                            isCurrent ? "bg-white text-purple-700" : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                          }`}>
+                            EN
+                          </span>
+                        ) : isProcessing ? (
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full animate-pulse ${
+                            isCurrent ? "bg-white text-purple-700" : "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+                          }`}>
+                            Translating
+                          </span>
+                        ) : null}
+                        <span className={`text-[10px] ${isCurrent ? "text-white/80" : "opacity-60"}`}>#{chIndex}</span>
+                      </div>
                     </button>
                   );
                 })}

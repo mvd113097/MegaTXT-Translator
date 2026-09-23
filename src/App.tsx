@@ -46,8 +46,12 @@ import {
   saveSessionToIdb,
   clearSessionFromIdb,
   getLocalLibraryBooks,
+  removeBookFromLibrary,
+  removeReadingHistoryItem,
+  clearReadingHistory,
   addReadingHistory,
 } from "./utils/indexedDbStorage";
+import { isSameNovel } from "./utils/chunkCleaner";
 import {
   PagodaHeaderIllustration,
   SakuraFooterDecoration,
@@ -87,12 +91,6 @@ import {
 } from "lucide-react";
 
 const STORAGE_KEY = "megatext_translator_session_v1";
-
-const isSameNovel = (name1: string | undefined, name2: string | undefined) => {
-  if (!name1 || !name2) return false;
-  const norm = (s: string) => s.replace(/\.txt$/i, "").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
-  return norm(name1) === norm(name2);
-};
 
 export default function App() {
   // Theme state
@@ -362,13 +360,10 @@ export default function App() {
     setIsReaderMinimized(true);
   };
 
-  // Memoized finished session chunks for active reader, sorted strictly in order 1, 2, 3, 4, 5...
+  // Memoized session chunks for active reader (includes both finished English translations and processing chunks)
   const currentSessionReaderChunks = useMemo(() => {
     if (!session || !session.chunks || session.chunks.length === 0) return undefined;
-    const finished = session.chunks
-      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
-      .sort((a, b) => a.index - b.index);
-    return finished.length > 0 ? finished : session.chunks;
+    return session.chunks;
   }, [session]);
 
   const handleOpenCurrentSessionReader = async () => {
@@ -388,35 +383,37 @@ export default function App() {
       }
     }
 
-    // 2. Extract all finished chapters translated by Gemini in order 1, 2, 3, 4, 5...
-    const finishedChunks = currentChunks
-      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
-      .sort((a, b) => a.index - b.index);
+    // 2. All chunks sorted strictly by index 0, 1, 2, 3...
+    const sortedChunks = [...currentChunks].sort((a, b) => a.index - b.index);
 
-    // If translation just began and no chunks have finished English yet, fallback gracefully to initial chunks
-    const activeChunks = finishedChunks.length > 0 ? finishedChunks : currentChunks;
+    // 3. Finished chapters translated by Gemini in order
+    const finishedChunks = sortedChunks.filter(
+      (c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim())
+    );
 
-    // Strict in-order chapters 1.2.3.4.5...
-    const allChapters = activeChunks.map((c, idx) => ({
-      title: c.chapterTitle || `Chapter ${idx + 1}`,
+    // Map full novel chapter list
+    const allChapters = sortedChunks.map((c) => ({
+      title: c.chapterTitle || `Chapter ${c.index + 1}`,
       url: "",
-      index: idx + 1,
+      index: c.index + 1,
       originalIndex: c.index + 1,
     }));
 
-    // Find starting chapter index: preserve existing progress if within valid range, else start at Chapter 1
+    // Find starting chapter index: preserve existing progress if within valid range, else start at first translated chapter
     let targetIdx = 1;
     if (readerNovel && isSameNovel(readerNovel.novelTitle, cleanTitle)) {
-      if (readerNovel.chapterIndex && readerNovel.chapterIndex >= 1 && readerNovel.chapterIndex <= activeChunks.length) {
+      if (readerNovel.chapterIndex && readerNovel.chapterIndex >= 1 && readerNovel.chapterIndex <= sortedChunks.length) {
         targetIdx = readerNovel.chapterIndex;
       }
+    } else if (finishedChunks.length > 0) {
+      targetIdx = finishedChunks[0].index + 1;
     }
 
-    const selectedChunk = activeChunks[targetIdx - 1] || activeChunks[0];
+    const selectedChunk = sortedChunks.find((c) => c.index === targetIdx - 1) || finishedChunks[0] || sortedChunks[0];
 
     handleOpenReader({
       novelTitle: cleanTitle,
-      totalChapters: activeChunks.length,
+      totalChapters: sortedChunks.length,
       chapterIndex: targetIdx,
       allChapters,
       content: selectedChunk?.chineseText || "",
@@ -429,23 +426,19 @@ export default function App() {
     if (!session || !session.chunks || !readerNovel) return;
     if (!isSameNovel(session.fileName, readerNovel.novelTitle)) return;
 
-    const finished = session.chunks
-      .filter((c) => (c.status === "completed" || Boolean(c.englishText?.trim())) && Boolean(c.englishText?.trim()))
-      .sort((a, b) => a.index - b.index);
+    const total = session.chunks.length;
+    if (total === 0) return;
 
-    if (finished.length === 0) return;
-
-    const newTotal = finished.length;
-    if (readerNovel.totalChapters !== newTotal || (readerNovel.allChapters && readerNovel.allChapters.length !== newTotal)) {
+    if (readerNovel.totalChapters !== total || !readerNovel.allChapters || readerNovel.allChapters.length !== total) {
       setReaderNovel((prev) => {
         if (!prev) return null;
         return {
           ...prev,
-          totalChapters: newTotal,
-          allChapters: finished.map((c, idx) => ({
-            title: c.chapterTitle || `Chapter ${idx + 1}`,
+          totalChapters: total,
+          allChapters: session.chunks.map((c) => ({
+            title: c.chapterTitle || `Chapter ${c.index + 1}`,
             url: "",
-            index: idx + 1,
+            index: c.index + 1,
             originalIndex: c.index + 1,
           })),
         };
@@ -477,6 +470,22 @@ export default function App() {
   // Metrics
   const [startTime, setStartTime] = useState<number | null>(null);
   const [charsTranslatedInRun, setCharsTranslatedInRun] = useState(0);
+
+  // Quota & Cooldown status tracking
+  const [firestoreStatus, setFirestoreStatus] = useState<{
+    isQuotaExhausted: boolean;
+    isAvailable: boolean;
+  }>({ isQuotaExhausted: false, isAvailable: true });
+  const [aiCooldownSec, setAiCooldownSec] = useState<number>(0);
+
+  // Automatic 1-second countdown for live rate-limit cooldown display
+  useEffect(() => {
+    if (aiCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setAiCooldownSec((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [aiCooldownSec]);
 
   // Refs for queue management
   const userHasResetRef = useRef(false);
@@ -648,16 +657,38 @@ export default function App() {
       const data = await res.json();
       const elapsedMs = Math.round(performance.now() - startTimeMs);
 
+      if (data.firestoreStatus) {
+        setFirestoreStatus(data.firestoreStatus);
+      }
+      if (data.projectsSummary && typeof data.projectsSummary.nextAvailableInSeconds === "number") {
+        setAiCooldownSec(data.projectsSummary.nextAvailableInSeconds);
+      }
+
       if (data.hasJob && data.job) {
         if (userHasResetRef.current && !explicitNovelFileName) {
           // User intentionally reset or deleted their translation; do not auto-resurrect unwanted novels
           return;
         }
         const sJob = data.job;
+
+        // CRITICAL FIX: If the user currently has a newly imported or unstarted novel loaded in the workspace,
+        // and its filename does NOT match the server job, DO NOT clobber the user's workspace
+        // unless they explicitly asked to switch novels (explicitNovelFileName was provided).
+        if (
+          session &&
+          session.fileName &&
+          !isSameNovel(session.fileName, sJob.fileName) &&
+          !explicitNovelFileName
+        ) {
+          // Keep serverCloudJob reference in state for history drawer, but do NOT replace the active session!
+          setServerCloudJob(sJob);
+          return;
+        }
+
         setServerCloudJob(sJob);
 
         // If this is a lightweight summary update and we already have the novel session loaded
-        if (sJob.isSummary && session && session.fileName === sJob.fileName) {
+        if (sJob.isSummary && session && isSameNovel(session.fileName, sJob.fileName)) {
           setSession((prev) => {
             if (!prev) return prev;
             return {
@@ -673,7 +704,7 @@ export default function App() {
           const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
 
           setSession((prev) => {
-            if (!prev || prev.fileName !== sJob.fileName) {
+            if (!prev || !isSameNovel(prev.fileName, sJob.fileName)) {
               return {
                 fileName: sJob.fileName,
                 fileSizeBytes: sJob.fileSizeBytes || 0,
@@ -950,7 +981,8 @@ export default function App() {
     text: string,
     fileName: string,
     targetChunkChars: number,
-    splitByChapters: boolean
+    splitByChapters: boolean,
+    autoStart: boolean = false
   ) => {
     const rawChunks = chunkChineseText(text, {
       targetChunkChars,
@@ -973,40 +1005,98 @@ export default function App() {
     };
 
     userHasResetRef.current = false;
+    setServerCloudJob(null);
     setSession(newSession);
     chunksRef.current = rawChunks;
     setIsRunning(false);
     setIsPaused(false);
     setStartTime(null);
     setCharsTranslatedInRun(0);
+    saveSessionToIdb(newSession).catch(() => {});
+
+    if (autoStart) {
+      setTimeout(() => {
+        startCloudTranslation(newSession);
+      }, 150);
+    }
   };
 
   // Reset workspace / permanently delete novel translation
-  const handleReset = async (novelNameToDelete?: string) => {
+  const handleReset = async (novelNameToDelete?: string, clearAll: boolean = false) => {
     if (
       isRunning &&
       !window.confirm("Translation is in progress. Are you sure you want to stop and delete?")
     ) {
       return;
     }
+
+    if (clearAll) {
+      userHasResetRef.current = true;
+      stopRequestedRef.current = true;
+      setIsRunning(false);
+      setIsPaused(false);
+      setSession(null);
+      setServerCloudJob(null);
+      setReaderNovel(null);
+      chunksRef.current = [];
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem("megatext_user_library_v1");
+      clearReadingHistory();
+      clearSessionFromIdb().catch(() => {});
+
+      try {
+        await fetch("/api/cloud-job/delete", {
+          method: "POST",
+          headers: {
+            ...getAuthHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ clearAll: true }),
+        });
+        setToastData({
+          message: "All translations and records permanently cleared.",
+          type: "success",
+        });
+      } catch {}
+      return;
+    }
+
     const targetNovel = novelNameToDelete || session?.fileName || serverCloudJob?.fileName;
     const targetJobId = serverCloudJob?.id;
 
-    userHasResetRef.current = true;
-    stopRequestedRef.current = true;
-    setIsRunning(false);
-    setIsPaused(false);
-    setSession(null);
-    setServerCloudJob(null);
-    chunksRef.current = [];
-    localStorage.removeItem(STORAGE_KEY);
-    clearSessionFromIdb().catch(() => {});
+    const isResettingCurrentSession =
+      !novelNameToDelete ||
+      (session && isSameNovel(session.fileName, novelNameToDelete));
+
+    if (isResettingCurrentSession) {
+      userHasResetRef.current = true;
+      stopRequestedRef.current = true;
+      setIsRunning(false);
+      setIsPaused(false);
+      setSession(null);
+      chunksRef.current = [];
+      localStorage.removeItem(STORAGE_KEY);
+      clearSessionFromIdb().catch(() => {});
+    }
+
+    if (!novelNameToDelete || (serverCloudJob && isSameNovel(serverCloudJob.fileName, novelNameToDelete))) {
+      setServerCloudJob(null);
+    }
+
+    if (targetNovel) {
+      removeBookFromLibrary(targetNovel);
+      removeReadingHistoryItem(targetNovel);
+      if (readerNovel && isSameNovel(readerNovel.novelTitle, targetNovel)) {
+        setReaderNovel(null);
+      }
+    }
 
     try {
       await fetch("/api/cloud-job/delete", {
         method: "POST",
         headers: {
           ...getAuthHeaders(),
+          "Content-Type": "application/json",
           ...(targetNovel ? { "x-novel-filename": encodeURIComponent(targetNovel) } : {}),
         },
         body: JSON.stringify({
@@ -1024,13 +1114,18 @@ export default function App() {
   };
 
   // Start cloud translation on server
-  const startCloudTranslation = async () => {
-    if (!session) return;
+  const startCloudTranslation = async (customSession?: TranslationSession) => {
+    const targetSession = customSession || session;
+    if (!targetSession) return;
     setIsStarting(true);
 
     try {
       // 1. Try lightweight resume first ONLY if the server already has a job for this exact same novel
-      if (serverCloudJob && serverCloudJob.fileName === session.fileName && serverCloudJob.status !== "completed") {
+      if (
+        serverCloudJob &&
+        isSameNovel(serverCloudJob.fileName, targetSession.fileName) &&
+        serverCloudJob.status !== "completed"
+      ) {
         const resumeRes = await fetch("/api/cloud-job/resume", {
           method: "POST",
           headers: getAuthHeaders(),
@@ -1051,18 +1146,21 @@ export default function App() {
         }
       }
 
-      // 2. Launch full job payload to server (with all 561 chunks)
+      // 2. Launch full job payload to server (with all chunks)
       const res = await fetch("/api/cloud-job/start", {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: {
+          ...getAuthHeaders(),
+          "x-novel-filename": encodeURIComponent(targetSession.fileName),
+        },
         body: JSON.stringify({
-          fileName: session.fileName,
-          fileSizeBytes: session.fileSizeBytes,
-          totalChineseChars: session.totalChineseChars,
-          chunks: session.chunks,
-          style,
-          customInstructions,
-          glossary,
+          fileName: targetSession.fileName,
+          fileSizeBytes: targetSession.fileSizeBytes,
+          totalChineseChars: targetSession.totalChineseChars,
+          chunks: targetSession.chunks,
+          style: targetSession.style || style,
+          customInstructions: targetSession.customInstructions || customInstructions,
+          glossary: targetSession.glossary || glossary,
           concurrency,
         }),
       });
@@ -1771,14 +1869,16 @@ Export Timestamp: ${new Date().toLocaleString()}
                 setStoreSearchTrigger({ query: book.title, site: "all", timestamp: Date.now() });
                 setActiveNavTab("store");
               }}
+              onDeleteNovel={(novelTitle) => handleReset(novelTitle)}
+              getAuthHeaders={getAuthHeaders}
             />
           </div>
 
           {/* Store Tab View */}
           <div className={activeNavTab === "store" ? "block" : "hidden"}>
             <StoreView
-              onImportNovel={(title, rawText) => {
-                handleLoadText(rawText, title, 3000, true);
+              onImportNovel={(title, rawText, autoStart) => {
+                handleLoadText(rawText, title, 3000, true, autoStart);
                 setActiveNavTab("home");
               }}
               getAuthHeaders={getAuthHeaders}
@@ -1790,8 +1890,8 @@ Export Timestamp: ${new Date().toLocaleString()}
           {/* Explore & Leaderboards Tab View */}
           <div className={activeNavTab === "explore" ? "block" : "hidden"}>
             <ExploreView
-              onImportNovel={(title, rawText) => {
-                handleLoadText(rawText, title, 3000, true);
+              onImportNovel={(title, rawText, autoStart) => {
+                handleLoadText(rawText, title, 3000, true, autoStart);
                 setActiveNavTab("home");
               }}
               getAuthHeaders={getAuthHeaders}
@@ -1812,6 +1912,11 @@ Export Timestamp: ${new Date().toLocaleString()}
               onLoadText={handleLoadText}
               serverJob={serverCloudJob}
               onLoadServerJob={handleLoadServerJob}
+              onDeleteServerJob={() => {
+                if (serverCloudJob) {
+                  handleReset(serverCloudJob.fileName);
+                }
+              }}
             />
           ) : isCompleted ? (
             /* Screen 3: Dedicated Translation Complete Screen (Reference Screen 3) */
@@ -1878,6 +1983,8 @@ Export Timestamp: ${new Date().toLocaleString()}
               onSyncProgress={() => syncCloudProgress(false, true)}
               isSyncing={isSyncingProgress}
               onOpenReader={handleOpenCurrentSessionReader}
+              firestoreStatus={firestoreStatus}
+              aiCooldownSecondsRemaining={aiCooldownSec}
             />
           )}
         </div>

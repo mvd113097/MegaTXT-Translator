@@ -9,6 +9,7 @@ import {
   FileCode,
   Zap,
   BookCheck,
+  Trash2,
 } from "lucide-react";
 import { countChineseCharacters } from "../utils/chunker";
 import { SAMPLE_CHINESE_NOVEL } from "../data/sampleNovel";
@@ -17,12 +18,14 @@ interface UploadSectionProps {
   onLoadText: (text: string, fileName: string, targetChunkChars: number, splitByChapters: boolean) => void;
   serverJob?: any | null;
   onLoadServerJob?: () => void;
+  onDeleteServerJob?: () => void;
 }
 
 export const UploadSection: React.FC<UploadSectionProps> = ({
   onLoadText,
   serverJob,
   onLoadServerJob,
+  onDeleteServerJob,
 }) => {
   const [activeTab, setActiveTab] = useState<"file" | "paste">("file");
   const [dragActive, setDragActive] = useState(false);
@@ -160,17 +163,35 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
               </div>
             </div>
 
-            {onLoadServerJob && (
-              <button
-                type="button"
-                id="resume-server-job-btn"
-                onClick={onLoadServerJob}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-700 active:scale-95 transition cursor-pointer shrink-0"
-              >
-                <BookCheck className="h-4 w-4" />
-                <span>{serverJob.status === "completed" ? "Open & Download Completed Novel" : "Open Cloud Job"}</span>
-              </button>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {onLoadServerJob && (
+                <button
+                  type="button"
+                  id="resume-server-job-btn"
+                  onClick={onLoadServerJob}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-700 active:scale-95 transition cursor-pointer shrink-0"
+                >
+                  <BookCheck className="h-4 w-4" />
+                  <span>{serverJob.status === "completed" ? "Open & Download" : "Open Cloud Job"}</span>
+                </button>
+              )}
+              {onDeleteServerJob && (
+                <button
+                  type="button"
+                  id="delete-server-job-banner-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (window.confirm(`Permanently delete "${serverJob.fileName}" translation from the server?`)) {
+                      onDeleteServerJob();
+                    }
+                  }}
+                  title="Permanently delete this translation from server"
+                  className="inline-flex items-center justify-center p-2.5 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition active:scale-95 cursor-pointer"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

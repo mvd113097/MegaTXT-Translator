@@ -103,7 +103,7 @@ export function formatCleanSiteName(siteId?: string, siteName?: string): string 
 }
 
 interface ExploreViewProps {
-  onImportNovel: (title: string, rawText: string) => void;
+  onImportNovel: (title: string, rawText: string, autoStart?: boolean) => void;
   getAuthHeaders: () => Record<string, string>;
   onSearchStore?: (keyword: string, site?: string) => void;
   onOpenReader?: (novel: {

@@ -85,7 +85,7 @@ export function formatCleanSiteName(siteId?: string, siteName?: string): string 
 }
 
 interface StoreViewProps {
-  onImportNovel: (title: string, rawText: string) => void;
+  onImportNovel: (title: string, rawText: string, autoStart?: boolean) => void;
   getAuthHeaders: () => Record<string, string>;
   externalSearchTrigger?: { query: string; site?: string; timestamp: number } | null;
   onOpenReader?: (novel: {
@@ -460,11 +460,15 @@ export const StoreView: React.FC<StoreViewProps> = ({
   };
 
   // Import novel chapters into translation queue
-  const handleStartImport = async () => {
+  const handleStartImport = async (autoStartTranslation: boolean = false) => {
     if (!selectedNovel) return;
 
     setIsScraping(true);
-    setScrapeProgress("Fetching and compiling raw Chinese text chapters...");
+    setScrapeProgress(
+      autoStartTranslation
+        ? "Fetching chapters & queuing instant 1-click cloud translation..."
+        : "Fetching and compiling raw Chinese text chapters..."
+    );
 
     try {
       const res = await fetch("/api/store/import-novel", {
@@ -491,7 +495,8 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
       onImportNovel(
         `${selectedNovel.title}_Ch${startChapter}_to_${endChapter}.txt`,
-        data.rawText
+        data.rawText,
+        autoStartTranslation
       );
     } catch (err: any) {
       console.error("Import error:", err);
@@ -1238,25 +1243,34 @@ export const StoreView: React.FC<StoreViewProps> = ({
                     type="button"
                     onClick={() => setSelectedNovel(null)}
                     disabled={isScraping}
-                    className="rounded-xl px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 transition"
+                    className="rounded-xl px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 transition cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     type="button"
-                    onClick={handleStartImport}
+                    onClick={() => handleStartImport(false)}
                     disabled={isScraping}
-                    className="inline-flex items-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-700 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:shadow-purple-500/25 active:scale-95 transition"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-purple-950/40 px-3.5 py-2.5 text-xs font-bold text-purple-700 dark:text-purple-300 shadow-xs active:scale-95 transition cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Import to Workspace</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStartImport(true)}
+                    disabled={isScraping}
+                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:shadow-purple-500/25 active:scale-95 transition cursor-pointer"
                   >
                     {isScraping ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>{scrapeProgress || "Compiling text..."}</span>
+                        <span>{scrapeProgress || "Compiling & starting..."}</span>
                       </>
                     ) : (
                       <>
-                        <Download className="h-4 w-4" />
-                        <span>Import {Math.max(0, endChapter - startChapter + 1)} Chapters Now</span>
+                        <Sparkles className="h-4 w-4 text-amber-300" />
+                        <span>⚡ Translate Now (1-Click)</span>
                       </>
                     )}
                   </button>

@@ -18,6 +18,7 @@ import { LibraryBook } from "../types";
 import {
   getLocalLibraryBooks,
   removeBookFromLibrary,
+  removeReadingHistoryItem,
   getAllNovelCachedChapterCounts,
 } from "../utils/indexedDbStorage";
 
@@ -33,12 +34,16 @@ interface LibraryViewProps {
   }) => void;
   onSearchStore?: (keyword: string, site?: string) => void;
   onTranslateWholeBook?: (book: LibraryBook) => void;
+  onDeleteNovel?: (novelTitle: string) => void;
+  getAuthHeaders?: () => Record<string, string>;
 }
 
 export const LibraryView: React.FC<LibraryViewProps> = ({
   onOpenReader,
   onSearchStore,
   onTranslateWholeBook,
+  onDeleteNovel,
+  getAuthHeaders,
 }) => {
   const [books, setBooks] = useState<LibraryBook[]>(() => getLocalLibraryBooks());
   const [searchQuery, setSearchQuery] = useState("");
@@ -62,8 +67,36 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
   const handleRemove = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    const book = books.find((b) => b.id === id);
+    if (!book) return;
+    if (!window.confirm(`Delete "${book.title}" from your library and delete its translations from the server?`)) {
+      return;
+    }
+
     const updated = removeBookFromLibrary(id);
     setBooks(updated);
+    removeReadingHistoryItem(id);
+    removeReadingHistoryItem(book.title);
+
+    try {
+      const headers = getAuthHeaders ? getAuthHeaders() : {};
+      fetch("/api/cloud-job/delete", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+          "x-novel-filename": encodeURIComponent(book.title),
+        },
+        body: JSON.stringify({
+          fileName: book.title,
+          jobId: book.id,
+        }),
+      }).catch(() => {});
+    } catch {}
+
+    if (onDeleteNovel) {
+      onDeleteNovel(book.title);
+    }
   };
 
   const filteredBooks = useMemo(() => {

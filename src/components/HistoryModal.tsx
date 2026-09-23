@@ -20,8 +20,10 @@ import {
   getReadingHistory,
   removeReadingHistoryItem,
   clearReadingHistory,
+  removeBookFromLibrary,
   ReadingHistoryItem,
 } from "../utils/indexedDbStorage";
+import { isSameNovel } from "../utils/chunkCleaner";
 
 interface StoredNovel {
   id: string;
@@ -40,7 +42,7 @@ interface HistoryModalProps {
   onClose: () => void;
   session: TranslationSession | null;
   onDownloadProgress: (format?: "epub" | "txt") => void;
-  onReset: (novelName?: string) => void;
+  onReset: (novelName?: string, clearAll?: boolean) => void;
   getAuthHeaders?: () => Record<string, string>;
   onSelectNovel?: (fileName: string) => void;
   onOpenReader?: (novel: {
@@ -163,10 +165,16 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     setNovels((prev) =>
       prev.filter(
         (n) =>
-          n.fileName.toLowerCase() !== novel.fileName.toLowerCase() &&
+          !isSameNovel(n.fileName, novel.fileName) &&
           n.id !== novel.id
       )
     );
+
+    // Clean up local library and reading history
+    removeReadingHistoryItem(novel.id);
+    removeReadingHistoryItem(novel.fileName);
+    removeBookFromLibrary(novel.id);
+    removeBookFromLibrary(novel.fileName);
 
     try {
       const headers = getAuthHeaders ? getAuthHeaders() : {};
@@ -190,10 +198,8 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
       });
       clearTimeout(timeoutId);
 
-      // If this was the active session, clear it from view as well
-      if (session && session.fileName.toLowerCase() === novel.fileName.toLowerCase()) {
-        onReset(novel.fileName);
-      }
+      // Tell parent to reset session if it matches this novel
+      onReset(novel.fileName);
     } catch (err) {
       console.error("Failed to delete novel:", err);
     } finally {
@@ -209,6 +215,11 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
 
     setIsClearingAll(true);
     setNovels([]);
+
+    clearReadingHistory();
+    try {
+      localStorage.removeItem("megatext_user_library_v1");
+    } catch {}
 
     try {
       const headers = getAuthHeaders ? getAuthHeaders() : {};
@@ -230,7 +241,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
       });
       clearTimeout(timeoutId);
 
-      onReset();
+      onReset(undefined, true);
       onClose();
     } catch (err) {
       console.error("Failed to clear all:", err);

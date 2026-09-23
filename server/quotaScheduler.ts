@@ -558,10 +558,12 @@ export class QuotaAwareKeyScheduler {
     totalConfigured: number;
     availableCount: number;
     coolingDownCount: number;
+    nextAvailableInSeconds: number;
   } {
     const now = Date.now();
     let availableCount = 0;
     let coolingDownCount = 0;
+    let minWaitMs = Infinity;
 
     for (const p of this.projects.values()) {
       if (p.status === "disabled") continue;
@@ -569,8 +571,14 @@ export class QuotaAwareKeyScheduler {
         availableCount++;
       } else {
         coolingDownCount++;
+        minWaitMs = Math.min(minWaitMs, p.cooldownUntil - now);
       }
     }
+
+    const nextAvailableInSeconds =
+      availableCount === 0 && coolingDownCount > 0 && minWaitMs !== Infinity
+        ? Math.ceil(minWaitMs / 1000)
+        : 0;
 
     const activeProject = this.lastSelectedProjectId
       ? this.projects.get(this.lastSelectedProjectId)
@@ -582,6 +590,7 @@ export class QuotaAwareKeyScheduler {
       totalConfigured: this.projects.size,
       availableCount,
       coolingDownCount,
+      nextAvailableInSeconds,
     };
   }
 }

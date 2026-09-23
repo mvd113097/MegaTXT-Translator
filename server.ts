@@ -23,6 +23,7 @@ import {
   deleteJobByFileNameFromFirestore,
   deleteAllJobsFromFirestore,
   mergeMonotonicJob,
+  getFirestoreQuotaStatus,
 } from "./server/firestoreStorage";
 import { generateServerEpubBuffer } from "./server/epubServer";
 import { cleanAndDeduplicateChunks } from "./src/utils/chunkCleaner";
@@ -625,60 +626,81 @@ function getSessionId(req: express.Request): string {
   return "legacy_default";
 }
 
+export function isSameNovel(name1?: string, name2?: string): boolean {
+  if (!name1 || !name2) return false;
+  const norm = (s: string) =>
+    s
+      .replace(/\.(txt|epub|pdf|json)$/i, "")
+      .toLowerCase()
+      .replace(/[_ -]ch(?:apter)?\s*\d+.*$/i, "")
+      .replace(/\[.*?\]/g, "")
+      .replace(/【.*?】/g, "")
+      .replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
+  const n1 = norm(name1);
+  const n2 = norm(name2);
+  if (!n1 || !n2) return false;
+  return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+}
+
 function getJobForSession(req: express.Request): CloudJob | null {
   const sId = getSessionId(req);
   let job: CloudJob | null = null;
 
+  const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+  const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+  let targetNovelName = "";
+  if (rawNovelHeader && typeof rawNovelHeader === "string") {
+    try {
+      targetNovelName = decodeURIComponent(rawNovelHeader).trim();
+    } catch {
+      targetNovelName = rawNovelHeader.trim();
+    }
+  } else if (novelQuery && typeof novelQuery === "string") {
+    try {
+      targetNovelName = decodeURIComponent(novelQuery).trim();
+    } catch {
+      targetNovelName = novelQuery.trim();
+    }
+  }
+
+  // 1. If client specifically targeted a novel name:
+  if (targetNovelName) {
+    if (cloudJobs.has(sId)) {
+      const candidate = cloudJobs.get(sId)!;
+      if (isSameNovel(candidate.fileName, targetNovelName)) {
+        return candidate;
+      }
+    }
+    for (const j of cloudJobs.values()) {
+      if (isSameNovel(j.fileName, targetNovelName)) {
+        return j;
+      }
+    }
+    if (fs.existsSync(JOBS_DIR)) {
+      try {
+        const files = fs.readdirSync(JOBS_DIR);
+        for (const f of files) {
+          if (!f.endsWith(".json")) continue;
+          const fullPath = path.join(JOBS_DIR, f);
+          const content = fs.readFileSync(fullPath, "utf-8");
+          const parsed = JSON.parse(content);
+          if (parsed?.fileName && isSameNovel(parsed.fileName, targetNovelName)) {
+            cloudJobs.set(parsed.sessionId || sId, parsed);
+            return parsed;
+          }
+        }
+      } catch {}
+    }
+    // CRITICAL: When a specific novel was requested and not found, NEVER fall back to a random other novel!
+    return null;
+  }
+
+  // 2. If no specific novel was targeted, check session job
   if (cloudJobs.has(sId)) {
     job = cloudJobs.get(sId)!;
   }
 
-  // Match by novel name if passed in query or header
-  if (!job) {
-    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
-    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
-    let targetNovelName = "";
-    if (rawNovelHeader && typeof rawNovelHeader === "string") {
-      try {
-        targetNovelName = decodeURIComponent(rawNovelHeader).trim().toLowerCase();
-      } catch {
-        targetNovelName = rawNovelHeader.trim().toLowerCase();
-      }
-    } else if (novelQuery && typeof novelQuery === "string") {
-      try {
-        targetNovelName = decodeURIComponent(novelQuery).trim().toLowerCase();
-      } catch {
-        targetNovelName = novelQuery.trim().toLowerCase();
-      }
-    }
-
-    if (targetNovelName) {
-      for (const j of cloudJobs.values()) {
-        if (j.fileName && j.fileName.trim().toLowerCase() === targetNovelName) {
-          job = j;
-          break;
-        }
-      }
-      if (!job && fs.existsSync(JOBS_DIR)) {
-        try {
-          const files = fs.readdirSync(JOBS_DIR);
-          for (const f of files) {
-            if (!f.endsWith(".json")) continue;
-            const fullPath = path.join(JOBS_DIR, f);
-            const content = fs.readFileSync(fullPath, "utf-8");
-            const parsed = JSON.parse(content);
-            if (parsed?.fileName && parsed.fileName.trim().toLowerCase() === targetNovelName) {
-              job = parsed;
-              cloudJobs.set(parsed.sessionId || sId, parsed);
-              break;
-            }
-          }
-        } catch {}
-      }
-    }
-  }
-
-  // Match by explicit job id
+  // 3. Match by explicit job id
   if (!job) {
     const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
     if (jobId && typeof jobId === "string") {
@@ -691,7 +713,7 @@ function getJobForSession(req: express.Request): CloudJob | null {
     }
   }
 
-  // Check disk job file for sId if not in memory
+  // 4. Check disk job file for sId if not in memory
   if (!job) {
     const safeKey = sanitizeSessionKey(sId);
     const diskPath = path.join(JOBS_DIR, `job_${safeKey}.json`);
@@ -706,9 +728,9 @@ function getJobForSession(req: express.Request): CloudJob | null {
     }
   }
 
-  // Fallbacks: Check legacy_default or any real job (completed or running)
+  // 5. Fallbacks: Check legacy_default or any real job (completed or running) ONLY if allowFallback is explicitly requested and no specific target novel was requested
   if (!job) {
-    const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
+    const allowFallback = req.query.allowFallback === "true" || req.headers["x-allow-fallback"] === "true";
     if (allowFallback) {
       if (cloudJobs.has("legacy_default") && !isSyntheticOrTestJob(cloudJobs.get("legacy_default")!)) {
         job = cloudJobs.get("legacy_default")!;
@@ -828,6 +850,10 @@ function ensureCloudKeepAliveRunning() {
 
 function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
   try {
+    if (job && (job as any).isDeleted) {
+      console.log(`[Storage] Refusing to write deleted job "${job.fileName}" (${job.id}) to disk.`);
+      return;
+    }
     const safeKey = sanitizeSessionKey(sessionId);
     const jobFilePath = path.join(JOBS_DIR, `job_${safeKey}.json`);
     if (job) {
@@ -867,6 +893,10 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
 function mergeMonotonicCloudJobs(jobA: CloudJob, jobB: CloudJob): CloudJob {
   if (!jobA) return jobB;
   if (!jobB) return jobA;
+  if (!isSameNovel(jobA.fileName, jobB.fileName)) {
+    // Safety guard: NEVER cross-contaminate chunks of two different novels!
+    return (jobB.lastActiveAt || 0) >= (jobA.lastActiveAt || 0) ? jobB : jobA;
+  }
 
   const chunkMapA = new Map((jobA.chunks || []).map((c) => [c.index, c]));
   const chunkMapB = new Map((jobB.chunks || []).map((c) => [c.index, c]));
@@ -972,9 +1002,14 @@ async function deleteJobCompletely(
   if (clearAll) {
     console.log("[Storage] Authoritative clearAll requested: obliterating all cloud jobs and archives.");
     for (const j of cloudJobs.values()) {
+      (j as any).isDeleted = true;
       j.status = "idle";
+      for (const c of j.chunks || []) {
+        inFlightChunkIds.delete(c.id);
+      }
     }
     cloudJobs.clear();
+    inFlightChunkIds.clear();
     try {
       if (fs.existsSync(CLOUD_JOB_FILE)) fs.unlinkSync(CLOUD_JOB_FILE);
     } catch {}
@@ -1001,16 +1036,23 @@ async function deleteJobCompletely(
   if (jobToDelete?.id) targetIds.add(jobToDelete.id.trim());
   if (explicitJobId && typeof explicitJobId === "string" && explicitJobId.trim()) targetIds.add(explicitJobId.trim());
 
-  if (jobToDelete?.fileName) targetFileNames.add(jobToDelete.fileName.trim().toLowerCase());
+  if (jobToDelete?.fileName) {
+    targetFileNames.add(jobToDelete.fileName.trim().toLowerCase());
+    targetFileNames.add(jobToDelete.fileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+  }
   if (explicitFileName && typeof explicitFileName === "string" && explicitFileName.trim()) {
     targetFileNames.add(explicitFileName.trim().toLowerCase());
+    targetFileNames.add(explicitFileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
   }
 
   // Also check if sessionId in cloudJobs has a job
   if (sessionId && cloudJobs.has(sessionId)) {
     const sj = cloudJobs.get(sessionId)!;
     if (sj.id) targetIds.add(sj.id.trim());
-    if (sj.fileName) targetFileNames.add(sj.fileName.trim().toLowerCase());
+    if (sj.fileName) {
+      targetFileNames.add(sj.fileName.trim().toLowerCase());
+      targetFileNames.add(sj.fileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+    }
   }
 
   console.log(`[Storage] Deleting job completely. Target IDs: [${Array.from(targetIds).join(", ")}], FileNames: [${Array.from(targetFileNames).join(", ")}], SessionId: ${sessionId || "none"}`);
@@ -1019,17 +1061,29 @@ async function deleteJobCompletely(
   for (const [sKey, j] of Array.from(cloudJobs.entries())) {
     const jName = (j.fileName || "").trim().toLowerCase();
     const isIdMatch = targetIds.has(j.id);
-    const isNameMatch = targetFileNames.has(jName);
+    const isNameMatch = Array.from(targetFileNames).some((t) => isSameNovel(t, jName));
     const isSessionMatch = sessionId && sKey === sessionId;
 
     if (isIdMatch || isNameMatch || isSessionMatch) {
+      (j as any).isDeleted = true;
       j.status = "idle";
+      for (const c of j.chunks || []) {
+        inFlightChunkIds.delete(c.id);
+      }
       cloudJobs.delete(sKey);
       saveJobToDisk(sKey, null);
     }
   }
 
   if (sessionId) {
+    if (cloudJobs.has(sessionId)) {
+      const sj = cloudJobs.get(sessionId)!;
+      (sj as any).isDeleted = true;
+      sj.status = "idle";
+      for (const c of sj.chunks || []) {
+        inFlightChunkIds.delete(c.id);
+      }
+    }
     cloudJobs.delete(sessionId);
     saveJobToDisk(sessionId, null);
   }
@@ -1038,8 +1092,12 @@ async function deleteJobCompletely(
   if (cloudJobs.has("legacy_default")) {
     const leg = cloudJobs.get("legacy_default")!;
     const legName = (leg.fileName || "").trim().toLowerCase();
-    if (targetIds.has(leg.id) || targetFileNames.has(legName)) {
+    if (targetIds.has(leg.id) || Array.from(targetFileNames).some((t) => isSameNovel(t, legName))) {
+      (leg as any).isDeleted = true;
       leg.status = "idle";
+      for (const c of leg.chunks || []) {
+        inFlightChunkIds.delete(c.id);
+      }
       cloudJobs.delete("legacy_default");
       saveJobToDisk("legacy_default", null);
     }
@@ -1051,7 +1109,7 @@ async function deleteJobCompletely(
       const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
       const parsed = JSON.parse(data);
       const pName = (parsed?.fileName || "").trim().toLowerCase();
-      if (!parsed || (parsed.id && targetIds.has(parsed.id)) || (pName && targetFileNames.has(pName))) {
+      if (!parsed || (parsed.id && targetIds.has(parsed.id)) || Array.from(targetFileNames).some((t) => isSameNovel(t, pName))) {
         fs.unlinkSync(CLOUD_JOB_FILE);
       }
     } catch {
@@ -1067,44 +1125,51 @@ async function deleteJobCompletely(
         if (!f.endsWith(".json")) continue;
         const fullPath = path.join(JOBS_DIR, f);
 
-        // Check archive files matching target novel
-        let matchedArchive = false;
+        let shouldDelete = false;
+
+        // Check if filename itself contains safe novel name
         for (const tName of targetFileNames) {
           const safeNovel = sanitizeSessionKey(tName);
-          if (f === `archive_${safeNovel}.json`) {
-            try { fs.unlinkSync(fullPath); } catch {}
-            matchedArchive = true;
-            console.log(`[Storage] Unlinked archive file: ${f}`);
+          if (safeNovel && f.toLowerCase().includes(safeNovel.toLowerCase())) {
+            shouldDelete = true;
             break;
           }
         }
-        if (matchedArchive) continue;
 
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8");
-          let shouldDelete = false;
-
-          for (const tid of targetIds) {
-            if (content.includes(tid)) {
-              shouldDelete = true;
-              break;
-            }
-          }
-          if (!shouldDelete) {
-            const lower = content.toLowerCase();
-            for (const tName of targetFileNames) {
-              if (lower.includes(tName)) {
+        if (!shouldDelete) {
+          try {
+            const content = fs.readFileSync(fullPath, "utf-8");
+            for (const tid of targetIds) {
+              if (content.includes(tid)) {
                 shouldDelete = true;
                 break;
               }
             }
-          }
+            if (!shouldDelete) {
+              let parsed: any = null;
+              try { parsed = JSON.parse(content); } catch {}
+              if (parsed?.fileName && Array.from(targetFileNames).some((t) => isSameNovel(t, parsed.fileName))) {
+                shouldDelete = true;
+              }
+            }
+            if (!shouldDelete) {
+              const lower = content.toLowerCase();
+              for (const tName of targetFileNames) {
+                if (lower.includes(tName.toLowerCase())) {
+                  shouldDelete = true;
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
 
-          if (shouldDelete) {
+        if (shouldDelete) {
+          try {
             fs.unlinkSync(fullPath);
             console.log(`[Storage] Unlinked job file: ${f}`);
-          }
-        } catch {}
+          } catch {}
+        }
       }
     }
   } catch (err) {
@@ -1137,10 +1202,18 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
   if (job) {
     job.sessionId = sessionId;
     let existing: CloudJob | null = cloudJobs.get(sessionId) || null;
+
+    // Guard: If session currently holds a DIFFERENT novel, do NOT merge them!
+    if (existing && !isSameNovel(existing.fileName, job.fileName)) {
+      console.log(`[Storage] Session ${sessionId} switching from novel "${existing.fileName}" to new novel "${job.fileName}". Archiving previous novel.`);
+      existing.status = "idle";
+      saveJobToDisk(sessionId, null);
+      existing = null;
+    }
+
     if (!existing && job.fileName) {
-      const targetName = job.fileName.trim().toLowerCase();
       for (const j of cloudJobs.values()) {
-        if (j.fileName && j.fileName.trim().toLowerCase() === targetName) {
+        if (isSameNovel(j.fileName, job.fileName)) {
           existing = j;
           break;
         }
@@ -1151,7 +1224,10 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
         const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
         if (fs.existsSync(archivePath)) {
           try {
-            existing = JSON.parse(fs.readFileSync(archivePath, "utf-8"));
+            const parsed = JSON.parse(fs.readFileSync(archivePath, "utf-8"));
+            if (isSameNovel(parsed?.fileName, job.fileName)) {
+              existing = parsed;
+            }
           } catch {}
         }
       }
@@ -1205,14 +1281,14 @@ async function loadCloudJobsFromDisk() {
       fs.mkdirSync(JOBS_DIR, { recursive: true });
     }
 
-    // 1. Attempt to load authoritative state from cloud Firestore database
+    // 1. Attempt to load authoritative state from cloud Firestore database (low-read summary only)
     let firestoreJobs = new Map<string, CloudJob>();
     let firestoreLoadedSuccessfully = false;
     try {
-      firestoreJobs = await loadAllJobsFromFirestore();
+      firestoreJobs = await loadAllJobsFromFirestore(false);
       firestoreLoadedSuccessfully = true;
     } catch (fsErr: any) {
-      console.error("[Startup] CRITICAL: Notice loading from cloud Firestore:", fsErr.message);
+      console.error("[Startup] Notice loading from cloud Firestore:", fsErr.message);
       firestoreLoadedSuccessfully = false;
     }
 
@@ -1278,15 +1354,16 @@ async function loadCloudJobsFromDisk() {
 
         let reconciled: CloudJob;
         if (fsJob) {
-          reconciled = reconcileAuthoritativeJob(fsJob, dJob);
+          if (dJob && (dJob.chunks?.length || 0) > (fsJob.chunks?.length || 0)) {
+            reconciled = reconcileAuthoritativeJob(fsJob, dJob);
+          } else if (dJob) {
+            reconciled = reconcileAuthoritativeJob(fsJob, dJob);
+          } else {
+            reconciled = fsJob;
+          }
         } else {
           reconciled = dJob!;
-          saveJobToFirestore(reconciled).catch((err) => {
-            console.warn(`[Startup] Initial Firestore sync for new disk job ${reconciled.id}:`, err.message);
-          });
-          saveChunksBatchToFirestore(reconciled.id, reconciled.chunks).catch((err) => {
-            console.warn(`[Startup] Initial Firestore chunks sync for new disk job ${reconciled.id}:`, err.message);
-          });
+          saveJobToFirestore(reconciled).catch(() => {});
         }
 
         const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
@@ -1631,6 +1708,14 @@ Translate all chapters above into English, returning each inside its exact <<<CH
             4000,
             batchChunks.map((c) => c.chineseText).join("\n")
           );
+
+          if ((targetJob as any).isDeleted || targetJob.status !== "running") {
+            for (const chunk of batchChunks) {
+              inFlightChunkIds.delete(chunk.id);
+            }
+            console.log(`[Cloud Background Worker] Aborted saving batch because job "${targetJob.fileName}" was deleted/cancelled.`);
+            break;
+          }
 
           let validCount = 0;
           let invalidCount = 0;
@@ -2226,8 +2311,16 @@ app.post("/api/telegram-settings", express.json(), (req, res) => {
 // Get status & progress of cloud job for current session (Data-saving lightweight mode by default)
 app.get("/api/cloud-job/status", (req, res) => {
   const targetJob = getJobForSession(req);
+  const firestoreStatus = getFirestoreQuotaStatus();
+  const projectsSummary = quotaScheduler.getActiveProjectSummary();
+
   if (!targetJob) {
-    res.json({ hasJob: false, job: null });
+    res.json({
+      hasJob: false,
+      job: null,
+      firestoreStatus,
+      projectsSummary,
+    });
     return;
   }
 
@@ -2316,10 +2409,13 @@ app.get("/api/cloud-job/status", (req, res) => {
       aheadCompletedCount,
       completedEnglishWords,
       completedChars,
-      projectsSummary: quotaScheduler.getActiveProjectSummary(),
+      projectsSummary,
+      firestoreStatus,
       chunks: isSummaryOnly ? undefined : chunksData,
       isSummary: isSummaryOnly,
     },
+    firestoreStatus,
+    projectsSummary,
   });
 });
 
@@ -2486,6 +2582,16 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, (req, res) => {
 
     const sessionId = getSessionId(req);
     const jobId = "cloud_job_" + Date.now();
+
+    // When starting a new cloud job on a session, ensure any previous running job with a DIFFERENT novel
+    // is set to idle so it stops running in background workers
+    for (const [sKey, j] of cloudJobs.entries()) {
+      if ((sKey === sessionId || sKey === "legacy_default") && !isSameNovel(j.fileName, fileName)) {
+        console.log(`[Storage] Setting previous different novel "${j.fileName}" to idle before starting "${fileName}"`);
+        j.status = "idle";
+        saveJobToDisk(sKey, null);
+      }
+    }
 
     const newJob: CloudJob = {
       id: jobId,
@@ -2768,25 +2874,18 @@ app.post("/api/cloud-job/update-chunk", requireAuthMiddleware, async (req, res) 
   targetJob.lastActiveAt = Date.now();
 
   try {
-    // Await authoritative persistence to Firestore before returning success
     const saved = await saveChunkToFirestore(targetJob.id, chunk);
     if (!saved) {
-      // Revert in-memory modification on persistence failure
-      chunk.englishText = prevEnglish;
-      chunk.status = prevStatus;
-      chunk.edited = prevEdited;
-      res.status(500).json({ error: "Failed to persist chunk edit to Firestore database." });
-      return;
+      console.warn(`[Storage] Cloud Firestore write throttled or unavailable; saved chunk #${chunk.index} edit directly to local disk cache.`);
     }
 
-    await saveJobToFirestore(targetJob);
+    saveJobToFirestore(targetJob).catch(() => {});
     saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
-    res.json({ success: true });
+    res.json({ success: true, cloudSynced: saved });
   } catch (err: any) {
-    chunk.englishText = prevEnglish;
-    chunk.status = prevStatus;
-    chunk.edited = prevEdited;
-    res.status(500).json({ error: `Failed to persist chunk edit: ${err.message}` });
+    console.warn(`[Storage] Notice persisting chunk edit to Firestore: ${err.message}. Saved to local disk.`);
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+    res.json({ success: true, cloudSynced: false });
   }
 });
 

@@ -22,6 +22,7 @@ import {
   Search,
   ExternalLink,
   ListOrdered,
+  Cloud,
 } from "lucide-react";
 import {
   TranslationSession,
@@ -60,6 +61,8 @@ interface ActiveTranslationViewProps {
   onSyncProgress?: () => void;
   isSyncing?: boolean;
   onOpenReader?: () => void;
+  firestoreStatus?: { isQuotaExhausted: boolean; isAvailable: boolean };
+  aiCooldownSecondsRemaining?: number;
 }
 
 function formatDuration(seconds: number): string {
@@ -102,6 +105,8 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
   onSyncProgress,
   isSyncing = false,
   onOpenReader,
+  firestoreStatus,
+  aiCooldownSecondsRemaining = 0,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "processing" | "pending">("all");
@@ -197,6 +202,55 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* AI Free-Tier Rate Limit Cooldown Countdown Banner */}
+      {aiCooldownSecondsRemaining > 0 && (
+        <div className="rounded-2xl border border-amber-300 dark:border-amber-700/80 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/30 p-3.5 text-amber-900 dark:text-amber-200 flex items-center justify-between gap-3 shadow-sm shadow-amber-500/5">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-600 dark:text-amber-300">
+              <Clock className="h-5 w-5 animate-pulse" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-900 dark:text-amber-100">
+                  AI Rate Limit Cooldown Active
+                </span>
+                <span className="rounded-md bg-amber-200/80 dark:bg-amber-900/80 px-1.5 py-0.5 font-mono text-[10px] font-extrabold text-amber-950 dark:text-amber-100">
+                  Auto-resuming in {aiCooldownSecondsRemaining}s
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 truncate">
+                Respecting Google Gemini free tier rate limit. Translation will automatically continue — no need to click pause or resume!
+              </p>
+            </div>
+          </div>
+          <div className="shrink-0 font-mono text-base font-extrabold px-3 py-1.5 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300">
+            {aiCooldownSecondsRemaining}s
+          </div>
+        </div>
+      )}
+
+      {/* Local Disk Storage Mode Badge (Firestore Free-Tier Quota Limit) */}
+      {firestoreStatus?.isQuotaExhausted && (
+        <div className="rounded-2xl border border-sky-200 dark:border-sky-800/70 bg-gradient-to-r from-sky-50 to-indigo-50 dark:from-sky-950/30 dark:to-indigo-950/20 p-3 text-sky-900 dark:text-sky-200 flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-100 dark:bg-sky-900/60 text-sky-600 dark:text-sky-300">
+              <Cloud className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-sky-900 dark:text-sky-100">
+                Operating in Local Disk Mode
+              </p>
+              <p className="text-[11px] text-sky-700/90 dark:text-sky-300/80 truncate">
+                Cloud sync daily free read limit reached. All translations & chapters are safely protected and stored directly on disk and in your browser.
+              </p>
+            </div>
+          </div>
+          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg bg-sky-100 dark:bg-sky-900/80 text-sky-800 dark:text-sky-200 border border-sky-300/60 dark:border-sky-700/60">
+            Protected
+          </span>
+        </div>
+      )}
 
       {/* 2. Big Circular Progress Card (Reference Screen 2) */}
       <div className="relative rounded-3xl border border-purple-100/80 dark:border-purple-900/40 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-md shadow-purple-500/5 transition-colors">

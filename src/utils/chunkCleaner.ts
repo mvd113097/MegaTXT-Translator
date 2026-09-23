@@ -330,3 +330,27 @@ export function cleanAndDeduplicateChapterList(
 
   return result;
 }
+
+/**
+ * Checks if two novel titles refer to the same novel, accounting for:
+ * - .txt / .epub / .pdf / .json extensions
+ * - Chapter range suffixes like _Ch1_to_50, _ch1-100, -1-50
+ * - Bracket markers like 【...】 or [...]
+ * - Punctuation, casing, and whitespace normalization
+ * - Substring containment (e.g. base title vs full chapter filename)
+ */
+export function isSameNovel(name1?: string, name2?: string): boolean {
+  if (!name1 || !name2) return false;
+  const norm = (s: string) =>
+    s
+      .replace(/\.(txt|epub|pdf|json)$/i, "")
+      .toLowerCase()
+      .replace(/[_ -]ch(?:apter)?\s*\d+.*$/i, "")
+      .replace(/\[.*?\]/g, "")
+      .replace(/【.*?】/g, "")
+      .replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
+  const n1 = norm(name1);
+  const n2 = norm(name2);
+  if (!n1 || !n2) return false;
+  return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+}
