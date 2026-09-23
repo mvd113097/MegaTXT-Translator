@@ -467,6 +467,110 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
     }
   }, [isMinimized, isOpen, isTtsPlaying, isTtsPaused, currentChapterIndex, sessionChunks]);
 
+  // Mobile Back Gesture & Hardware Back Button Integration:
+  // When reader is in full-screen mode, back gesture minimizes the reader instead of closing the tab.
+  const isReaderActiveRef = useRef({
+    isOpen,
+    isMinimized,
+    showChapterDrawer,
+    showSettingsMenu,
+    showTopMoreMenu,
+    showTranslateModal,
+    showSleepTimerPopup,
+    showTtsSpeedPopup,
+  });
+
+  useEffect(() => {
+    isReaderActiveRef.current = {
+      isOpen,
+      isMinimized,
+      showChapterDrawer,
+      showSettingsMenu,
+      showTopMoreMenu,
+      showTranslateModal,
+      showSleepTimerPopup,
+      showTtsSpeedPopup,
+    };
+  }, [
+    isOpen,
+    isMinimized,
+    showChapterDrawer,
+    showSettingsMenu,
+    showTopMoreMenu,
+    showTranslateModal,
+    showSleepTimerPopup,
+    showTtsSpeedPopup,
+  ]);
+
+  useEffect(() => {
+    if (!isOpen || isMinimized) return;
+
+    // Push history state entry representing the active reader modal
+    const stateKey = `reader_modal_${Date.now()}`;
+    try {
+      window.history.pushState({ readerOpen: true, key: stateKey }, "");
+    } catch {}
+
+    const handlePopState = (e: PopStateEvent) => {
+      const state = isReaderActiveRef.current;
+      if (!state.isOpen) return;
+
+      // 1. If any drawer / popup menu is open inside reader, close the topmost menu first
+      if (state.showTranslateModal) {
+        setShowTranslateModal(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+      if (state.showChapterDrawer) {
+        setShowChapterDrawer(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+      if (state.showSettingsMenu) {
+        setShowSettingsMenu(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+      if (state.showTopMoreMenu) {
+        setShowTopMoreMenu(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+      if (state.showSleepTimerPopup) {
+        setShowSleepTimerPopup(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+      if (state.showTtsSpeedPopup) {
+        setShowTtsSpeedPopup(false);
+        try {
+          window.history.pushState({ readerOpen: true, key: stateKey }, "");
+        } catch {}
+        return;
+      }
+
+      // 2. If reader itself is open in full view, minimize it to floating pill!
+      if (!state.isMinimized) {
+        onToggleMinimize();
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [isOpen, isMinimized, onToggleMinimize]);
+
   // Load preferences from IndexedDB on mount
   useEffect(() => {
     getReaderPreferences().then((saved) => {
