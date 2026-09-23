@@ -1,0 +1,28 @@
+{
+  "id": "cloud_job_1789494345884",
+  "sessionId": "test_sess_1",
+  "fileName": "test.txt",
+  "fileSizeBytes": 100,
+  "totalChineseChars": 50,
+  "chunks": [
+    {
+      "id": "chunk_0",
+      "index": 0,
+      "chapterTitle": "",
+      "chineseText": "你好世界",
+      "englishText": "Hello, world.",
+      "charCount": 4,
+      "status": "completed",
+      "attempts": 1,
+      "edited": false,
+      "durationMs": 3787
+    }
+  ],
+  "style": "xianxia",
+  "customInstructions": "",
+  "glossary": [],
+  "concurrency": 1,
+  "status": "completed",
+  "startedAt": 1789494345884,
+  "lastActiveAt": 1790074259453
+}

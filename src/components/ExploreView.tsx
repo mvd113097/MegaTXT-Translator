@@ -1916,8 +1916,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                           </span>
                           <span>•</span>
                           <span>{item.orientationLabel}</span>
-                          <span>•</span>
-                          <span>{item.year}</span>
+                          {(item.year || (item.dateStr && /^\d{4}/.test(item.dateStr))) && (
+                            <>
+                              <span>•</span>
+                              <span>{item.year || item.dateStr?.slice(0, 4)}</span>
+                            </>
+                          )}
                           {item.fileSize && (
                             <>
                               <span>•</span>
@@ -2135,9 +2139,11 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                       </span>
                     )}
 
-                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-[10px] font-semibold text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/40">
-                      📅 {item.year}
-                    </span>
+                    {(item.year || (item.dateStr && /^\d{4}/.test(item.dateStr))) && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-[10px] font-semibold text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/40">
+                        📅 {item.year || item.dateStr?.slice(0, 4)}
+                      </span>
+                    )}
 
                     {/* Metric Badges */}
                     {item.rating !== undefined && item.rating > 0 && (
