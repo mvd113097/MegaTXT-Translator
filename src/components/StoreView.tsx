@@ -320,9 +320,10 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
   // Chapter range selection
   const [startChapter, setStartChapter] = useState<number>(savedState.startChapter || 1);
-  const [endChapter, setEndChapter] = useState<number>(savedState.endChapter || 100);
+  const [endChapter, setEndChapter] = useState<number>(savedState.endChapter || 30);
   const [isScraping, setIsScraping] = useState(false);
   const [scrapeProgress, setScrapeProgress] = useState<string | null>(null);
+  const [scrapePercentage, setScrapePercentage] = useState<number>(0);
   const [scrapeElapsedSec, setScrapeElapsedSec] = useState(0);
   const activeAbortControllerRef = React.useRef<AbortController | null>(null);
 
@@ -333,6 +334,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
     }
     setIsScraping(false);
     setScrapeProgress(null);
+    setScrapePercentage(0);
     setSelectedNovel(null);
   };
 
@@ -466,7 +468,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
       setSelectedNovel(resolvedDetail);
       setStartChapter(1);
-      setEndChapter(resolvedChapters.length > 0 ? resolvedChapters.length : 100);
+      setEndChapter(resolvedChapters.length > 0 ? Math.min(30, resolvedChapters.length) : 30);
     } catch (err: any) {
       console.error("Fetch TOC error:", err);
       setSelectedNovel({
@@ -481,13 +483,13 @@ export const StoreView: React.FC<StoreViewProps> = ({
         chapters: [],
       });
       setStartChapter(1);
-      setEndChapter(100);
+      setEndChapter(30);
     } finally {
       setIsLoadingDetail(false);
     }
   };
 
-  // Import novel chapters into translation queue
+  // Import novel chapters into translation queue with progressive batching
   const handleStartImport = async (autoStartTranslation: boolean = false) => {
     if (!selectedNovel) return;
 
@@ -498,39 +500,84 @@ export const StoreView: React.FC<StoreViewProps> = ({
     activeAbortControllerRef.current = controller;
 
     setIsScraping(true);
-    setScrapeProgress(
-      autoStartTranslation
-        ? "Fetching chapters & queuing instant 1-click cloud translation..."
-        : "Fetching and compiling raw Chinese text chapters..."
-    );
+    setScrapePercentage(5);
+    setScrapeProgress("Preparing chapter download queue...");
 
     try {
-      const res = await fetch("/api/store/import-novel", {
-        method: "POST",
-        headers: getAuthHeaders(),
-        signal: controller.signal,
-        body: JSON.stringify({
-          novelUrl: selectedNovel.novelUrl,
-          siteId: selectedNovel.siteId,
-          title: selectedNovel.title,
-          startChapter,
-          endChapter,
-          chapters: selectedNovel.chapters,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Import failed with status ${res.status}`);
+      const CHUNK_SIZE = 15;
+      const slices: { start: number; end: number }[] = [];
+      for (let s = startChapter; s <= endChapter; s += CHUNK_SIZE) {
+        slices.push({
+          start: s,
+          end: Math.min(endChapter, s + CHUNK_SIZE - 1),
+        });
       }
 
-      const data = await res.json();
-      if (!data.rawText || !data.rawText.trim()) {
-        throw new Error("No readable raw text found in selected chapters.");
+      const collectedTexts: string[] = [];
+
+      for (let i = 0; i < slices.length; i++) {
+        const currentSlice = slices[i];
+        const percent = Math.max(5, Math.round((i / slices.length) * 100));
+        setScrapePercentage(percent);
+        setScrapeProgress(
+          `Importing chapters ${currentSlice.start}–${currentSlice.end} of ${endChapter} (${percent}%)...`
+        );
+
+        let sliceSuccess = false;
+        let lastSliceErr: any = null;
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            if (attempt > 0) {
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            const res = await fetch("/api/store/import-novel", {
+              method: "POST",
+              headers: getAuthHeaders(),
+              signal: controller.signal,
+              body: JSON.stringify({
+                novelUrl: selectedNovel.novelUrl,
+                siteId: selectedNovel.siteId,
+                title: selectedNovel.title,
+                startChapter: currentSlice.start,
+                endChapter: currentSlice.end,
+                chapters: selectedNovel.chapters,
+              }),
+            });
+
+            if (!res.ok) {
+              throw new Error(`Batch failed with status ${res.status}`);
+            }
+
+            const data = await res.json();
+            if (data.rawText && data.rawText.trim()) {
+              collectedTexts.push(data.rawText.trim());
+              sliceSuccess = true;
+              break;
+            } else {
+              throw new Error("Empty batch text received.");
+            }
+          } catch (err: any) {
+            lastSliceErr = err;
+            if (err?.name === "AbortError") throw err;
+          }
+        }
+
+        if (!sliceSuccess) {
+          console.warn(`Could not import batch ${currentSlice.start}-${currentSlice.end}:`, lastSliceErr?.message);
+        }
       }
 
+      setScrapePercentage(100);
+
+      if (collectedTexts.length === 0) {
+        throw new Error("No readable chapters could be retrieved from this source. The site may be rate-limiting or anti-bot protected. Try selecting fewer chapters or another novel.");
+      }
+
+      const fullRawText = collectedTexts.join("\n\n\n");
       onImportNovel(
         `${selectedNovel.title}_Ch${startChapter}_to_${endChapter}.txt`,
-        data.rawText,
+        fullRawText,
         autoStartTranslation
       );
     } catch (err: any) {
@@ -542,6 +589,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
       setErrorMessage(err.message || "Failed to import novel chapters.");
     } finally {
       setIsScraping(false);
+      setScrapePercentage(0);
       activeAbortControllerRef.current = null;
     }
   };
@@ -1320,23 +1368,26 @@ export const StoreView: React.FC<StoreViewProps> = ({
                   </div>
                 </div>
 
-                {/* Active Scraping Progress Card with Live Timer */}
+                {/* Active Scraping Progress Card with Live Timer & Percentage */}
                 {isScraping && (
                   <div className="rounded-2xl border border-purple-200 dark:border-purple-800 bg-purple-50/70 dark:bg-purple-950/40 p-3.5 space-y-2 animate-in fade-in">
                     <div className="flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2 font-bold text-purple-700 dark:text-purple-300">
                         <Loader2 className="h-4 w-4 animate-spin text-purple-600 shrink-0" />
-                        <span>Fetching chapters ({startChapter}–{endChapter})...</span>
+                        <span>{scrapeProgress || `Fetching chapters (${startChapter}–${endChapter})...`}</span>
                       </div>
                       <span className="font-mono text-[11px] font-semibold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded-full">
-                        {scrapeElapsedSec}s elapsed • working normally
+                        {scrapePercentage > 0 ? `${scrapePercentage}% • ` : ""}{scrapeElapsedSec}s elapsed
                       </span>
                     </div>
-                    <div className="w-full bg-purple-100 dark:bg-purple-900/50 h-1.5 rounded-full overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 animate-pulse rounded-full w-full" />
+                    <div className="w-full bg-purple-100 dark:bg-purple-900/50 h-2 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 transition-all duration-300 rounded-full"
+                        style={{ width: `${Math.max(5, scrapePercentage)}%` }}
+                      />
                     </div>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
-                      Compiling raw Chinese text from remote source into your translation workspace. This usually takes 3–15 seconds depending on chapter count.
+                      Downloaded in fast parallel slices to guarantee zero gateway timeouts. Translation starts automatically as soon as downloads complete.
                     </p>
                   </div>
                 )}

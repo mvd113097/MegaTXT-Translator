@@ -3799,27 +3799,27 @@ app.post("/api/store/import-novel", requireAuthMiddleware, async (req, res) => {
       return;
     }
 
-    // Fetch chapter contents with gentle batch concurrency (3 at a time with 60ms delay)
+    // Fetch chapter contents with balanced batch concurrency (5 at a time with 30ms delay)
     const chapterTexts: string[] = [];
-    const BATCH_SIZE = 3;
+    const BATCH_SIZE = 5;
 
     for (let i = 0; i < selected.length; i += BATCH_SIZE) {
       const batch = selected.slice(i, i + BATCH_SIZE);
       const fetched = await Promise.all(
         batch.map(async (item: any) => {
           let body = await fetchChapterText(item.url);
-          // If empty, do a short retry
+          // If empty, do a short retry with a tiny delay
           if (!body || body.trim().length < 15) {
-            await new Promise((r) => setTimeout(r, 300));
+            await new Promise((r) => setTimeout(r, 150));
             body = await fetchChapterText(item.url);
           }
           const chHeader = item.title ? `${item.title}\n\n` : `第${item.index}章\n\n`;
-          return `${chHeader}${body || ""}`;
+          return `${chHeader}${body || "[Content from this chapter could not be retrieved from source site]"}`;
         })
       );
       chapterTexts.push(...fetched);
       if (i + BATCH_SIZE < selected.length) {
-        await new Promise((r) => setTimeout(r, 60));
+        await new Promise((r) => setTimeout(r, 30));
       }
     }
 

@@ -279,43 +279,51 @@ const ROTATING_USER_AGENTS = [
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 ];
 
-// Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8) and robust retry
-async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
+// Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8) and robust fast retry
+async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<string> {
   const isCzbooks = url.includes("czbooks");
-  const maxRetries = isCzbooks ? 4 : 2;
+  const maxRetries = 2;
+
+  // Derive smart referer for czbooks chapters
+  let czReferer = "https://czbooks.net/";
+  if (isCzbooks && url.includes("/n/")) {
+    const parts = url.split("/");
+    if (parts.length >= 6) {
+      czReferer = parts.slice(0, 5).join("/");
+    }
+  }
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
+        await new Promise((r) => setTimeout(r, 150));
       }
-      const ua = ROTATING_USER_AGENTS[attempt % ROTATING_USER_AGENTS.length];
+      const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
       const defaultHeaders: Record<string, string> = {
         "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": isCzbooks ? "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7" : "zh-CN,zh;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "Sec-Ch-Ua": '"Chromium";v="129", "Not=A?Brand";v="24", "Google Chrome";v="129"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
+        ...(isCzbooks ? { Referer: czReferer } : {}),
         ...headers,
       };
 
       const response = await axios.get(url, {
         responseType: "arraybuffer",
-        timeout: timeoutMs,
+        timeout: Math.min(timeoutMs, 8000),
         httpsAgent: sslAgent,
         headers: defaultHeaders,
       });
 
       const buffer = Buffer.from(response.data);
       const contentType = (response.headers["content-type"] as string) || "";
+
+      // Detect Cloudflare Challenge page early
+      const sampleText = buffer.toString("binary", 0, Math.min(buffer.length, 1024)).toLowerCase();
+      if (sampleText.includes("challenges.cloudflare.com") || sampleText.includes("just a moment...")) {
+        throw new Error("CLOUDFLARE_CHALLENGE: Site is currently guarded by Cloudflare bot protection.");
+      }
 
       let encoding = "utf-8";
       if (
@@ -2165,12 +2173,12 @@ export function cleanChapterContent(raw: string): string {
  * Fetch raw chapter text and extract clean content with proper paragraph spacing
  */
 export async function fetchChapterText(chapterUrl: string): Promise<string> {
-  const maxRetries = 3;
+  const maxRetries = 2;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
+        await new Promise((r) => setTimeout(r, 100));
       }
 
       // Handle direct TXT line pointers
@@ -2239,9 +2247,14 @@ export async function fetchChapterText(chapterUrl: string): Promise<string> {
       if (cleaned.length > 20 || attempt === maxRetries - 1) {
         return cleaned;
       }
-    } catch (e) {
+    } catch (e: any) {
+      const errMsg = e?.message || "";
+      if (errMsg.includes("CLOUDFLARE_CHALLENGE") || e?.response?.status === 403 || e?.response?.status === 429) {
+        console.warn(`Protected or rate-limited chapter ${chapterUrl}: ${errMsg}`);
+        return "";
+      }
       if (attempt === maxRetries - 1) {
-        console.warn(`Failed to fetch chapter ${chapterUrl}:`, (e as Error).message);
+        console.warn(`Failed to fetch chapter ${chapterUrl}:`, errMsg);
         return "";
       }
     }
