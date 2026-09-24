@@ -81,7 +81,9 @@ export interface NovelReaderModalProps {
   onUpdateChapterIndex?: (
     chapterIndex: number,
     chapterTitle: string,
-    allChapters?: Array<{ title: string; url: string; index?: number }>
+    allChapters?: Array<{ title: string; url: string; index?: number }>,
+    content?: string,
+    englishContent?: string
   ) => void;
 }
 
@@ -1207,11 +1209,12 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
       // 1. Check current session chunks (e.g., active translation session)
       if (!forceNetwork && sessionChunks && sessionChunks.length > 0) {
-        const sessionChunk = sessionChunks[targetIndex - 1];
+        const sessionChunk = sessionChunks.find((c) => c.index === targetIndex - 1) || sessionChunks[targetIndex - 1];
         if (sessionChunk) {
+          const title = sessionChunk.chapterTitle || (chapterList[targetIndex - 1]?.title) || `Chapter ${targetIndex}`;
+
           if (sessionChunk.englishText && sessionChunk.englishText.trim().length > 0) {
             const finalEng = applyGlossaryToText(sessionChunk.englishText, novelGlossaryRef.current);
-            const title = sessionChunk.chapterTitle || (chapterList[targetIndex - 1]?.title) || `Chapter ${targetIndex}`;
             setCurrentChapterIndex(targetIndex);
             setChapterTitle(title);
             setChapterTitleZh(sessionChunk.chapterTitle || title);
@@ -1220,7 +1223,10 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
             setEnglishContent(finalEng);
             setIsLoadingChapter(false);
             setIsDataSavedFromCache(true);
-            onUpdateChapterIndex?.(targetIndex, title);
+            onUpdateChapterIndex?.(targetIndex, title, chapterList, sessionChunk.chineseText || "", finalEng);
+            if (readerBodyRef.current) {
+              readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
+            }
             if (pendingTtsStartRef.current) {
               pendingTtsStartRef.current = false;
               const newParas = cleanReaderParagraphs(
@@ -1231,9 +1237,6 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
               ttsParagraphsRef.current = newParas;
               setIsTtsPlaying(true);
               setIsTtsPaused(false);
-              if (readerBodyRef.current) {
-                readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
-              }
               setTimeout(() => speakParagraphAtIndexRef.current(0), 120);
             }
             return;
@@ -1242,35 +1245,41 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
           // If sessionChunk does not have englishText loaded locally, fetch from cloud job on demand
           try {
             const chunkRes = await fetch(`/api/cloud-job/chunk/${sessionChunk.index}`, {
-              headers: getAuthHeaders(),
+              headers: {
+                ...getAuthHeaders(),
+                "x-novel-filename": encodeURIComponent(novelTitle),
+              },
             });
             if (chunkRes.ok) {
               const chunkData = await chunkRes.json();
-              if (chunkData.success && chunkData.chunk?.englishText?.trim()) {
-                const finalEng = applyGlossaryToText(chunkData.chunk.englishText, novelGlossaryRef.current);
-                const title = chunkData.chunk.chapterTitle || sessionChunk.chapterTitle || (chapterList[targetIndex - 1]?.title) || `Chapter ${targetIndex}`;
+              if (chunkData.success && chunkData.chunk) {
+                const finalEng = chunkData.chunk.englishText?.trim()
+                  ? applyGlossaryToText(chunkData.chunk.englishText, novelGlossaryRef.current)
+                  : "";
+                const finalZh = chunkData.chunk.chineseText || sessionChunk.chineseText || "";
+                const fetchedTitle = chunkData.chunk.chapterTitle || sessionChunk.chapterTitle || (chapterList[targetIndex - 1]?.title) || `Chapter ${targetIndex}`;
                 setCurrentChapterIndex(targetIndex);
-                setChapterTitle(title);
-                setChapterTitleZh(chunkData.chunk.chapterTitle || sessionChunk.chapterTitle || title);
-                setChapterTitleEn(title.startsWith("Chapter") ? title : `Chapter ${targetIndex}`);
-                setChineseContent(chunkData.chunk.chineseText || sessionChunk.chineseText || "");
+                setChapterTitle(fetchedTitle);
+                setChapterTitleZh(fetchedTitle);
+                setChapterTitleEn(fetchedTitle.startsWith("Chapter") ? fetchedTitle : `Chapter ${targetIndex}`);
+                setChineseContent(finalZh);
                 setEnglishContent(finalEng);
                 setIsLoadingChapter(false);
                 setIsDataSavedFromCache(true);
-                onUpdateChapterIndex?.(targetIndex, title);
+                onUpdateChapterIndex?.(targetIndex, fetchedTitle, chapterList, finalZh, finalEng);
+                if (readerBodyRef.current) {
+                  readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
+                }
                 if (pendingTtsStartRef.current) {
                   pendingTtsStartRef.current = false;
                   const newParas = cleanReaderParagraphs(
                     prefs.bilingualMode === "chinese"
-                      ? chunkData.chunk.chineseText || sessionChunk.chineseText || ""
-                      : (finalEng || chunkData.chunk.chineseText || sessionChunk.chineseText || "")
+                      ? finalZh
+                      : (finalEng || finalZh)
                   );
                   ttsParagraphsRef.current = newParas;
                   setIsTtsPlaying(true);
                   setIsTtsPaused(false);
-                  if (readerBodyRef.current) {
-                    readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
-                  }
                   setTimeout(() => speakParagraphAtIndexRef.current(0), 120);
                 }
                 return;
@@ -1278,6 +1287,22 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
             }
           } catch (fetchErr) {
             console.warn("Could not fetch translated chunk on demand:", fetchErr);
+          }
+
+          // If raw Chinese text is present in sessionChunk even if translation is still pending
+          if (sessionChunk.chineseText && sessionChunk.chineseText.trim().length > 0) {
+            setCurrentChapterIndex(targetIndex);
+            setChapterTitle(title);
+            setChapterTitleZh(sessionChunk.chapterTitle || title);
+            setChapterTitleEn(title.startsWith("Chapter") ? title : `Chapter ${targetIndex}`);
+            setChineseContent(sessionChunk.chineseText);
+            setEnglishContent(sessionChunk.englishText || "");
+            setIsLoadingChapter(false);
+            onUpdateChapterIndex?.(targetIndex, title, chapterList, sessionChunk.chineseText, sessionChunk.englishText || "");
+            if (readerBodyRef.current) {
+              readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
+            }
+            return;
           }
         }
       }
@@ -1481,18 +1506,12 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         loadChapter(targetIndex);
       }
     } else {
-      // Re-sync content when props update with newly translated text
-      if (initialEnglishContent && initialEnglishContent !== englishContent) {
-        setEnglishContent(initialEnglishContent);
-      }
-      if (initialContent && initialContent !== chineseContent) {
-        setChineseContent(initialContent);
-      }
+      // If chapter list was expanded in parent
       if (allChapters && allChapters.length > 0 && allChapters.length !== chapterList.length) {
         setChapterList(allChapters);
       }
     }
-  }, [siteId, novelTitle, novelUrl, initialChapterIndex, initialContent, initialEnglishContent, allChapters, loadChapter, englishContent, chineseContent, chapterList.length]);
+  }, [siteId, novelTitle, novelUrl, initialChapterIndex, initialContent, initialEnglishContent, allChapters, loadChapter, chapterList.length]);
 
   // Load initial chapter if needed
   useEffect(() => {
@@ -1630,8 +1649,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
     try {
       // 1. Session chunk?
-      if (sessionChunks && sessionChunks[nextIdx - 1]) {
-        const chunk = sessionChunks[nextIdx - 1];
+      const chunk = sessionChunks && (sessionChunks.find((c) => c.index === nextIdx - 1) || sessionChunks[nextIdx - 1]);
+      if (chunk) {
         let rawEng = chunk.englishText || "";
         let rawZh = chunk.chineseText || "";
         let rawTitle = chunk.chapterTitle || `Chapter ${nextIdx}`;
@@ -1639,7 +1658,10 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         if (!rawEng.trim()) {
           try {
             const chunkRes = await fetch(`/api/cloud-job/chunk/${chunk.index}`, {
-              headers: getAuthHeaders(),
+              headers: {
+                ...getAuthHeaders(),
+                "x-novel-filename": encodeURIComponent(novelTitle),
+              },
             });
             if (chunkRes.ok) {
               const chunkData = await chunkRes.json();

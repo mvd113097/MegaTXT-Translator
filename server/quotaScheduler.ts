@@ -352,25 +352,39 @@ export class QuotaAwareKeyScheduler {
     // If all eligible projects were excluded in this turn, clear exclusion to prevent complete blockage
     const pool = eligibleProjects.length > 0 ? eligibleProjects : enabledProjects;
 
-    // 1. Filter ready projects that are not currently executing another request (activeRequestCount === 0)
-    const readyProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) < 1);
+    // 1. Prioritize completely idle ready projects (activeRequestCount === 0)
+    const idleProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) === 0);
 
-    if (readyProjects.length > 0) {
+    if (idleProjects.length > 0) {
       // Pick the least recently used ready project (lowest lastUsedAt)
-      readyProjects.sort((a, b) => {
+      idleProjects.sort((a, b) => {
         if (a.consecutiveErrors !== b.consecutiveErrors) {
           return a.consecutiveErrors - b.consecutiveErrors;
         }
         return a.lastUsedAt - b.lastUsedAt;
       });
 
-      const selected = readyProjects[0];
+      const selected = idleProjects[0];
       this.lastSelectedProjectId = selected.id;
       return { project: selected, waitMs: 0 };
     }
 
-    // 2. If projects are ready but currently processing another request, wait briefly for in-flight request to release key
-    const readyButBusy = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) >= 1);
+    // 2. If all projects are busy, allow a second concurrent slot (activeRequestCount < 2) to prevent serialization stalls
+    const lightlyLoadedProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) < 2);
+    if (lightlyLoadedProjects.length > 0) {
+      lightlyLoadedProjects.sort((a, b) => {
+        if (a.consecutiveErrors !== b.consecutiveErrors) {
+          return a.consecutiveErrors - b.consecutiveErrors;
+        }
+        return (a.activeRequestCount || 0) - (b.activeRequestCount || 0);
+      });
+      const selected = lightlyLoadedProjects[0];
+      this.lastSelectedProjectId = selected.id;
+      return { project: selected, waitMs: 0 };
+    }
+
+    // 3. If projects are ready but currently at max capacity (activeRequestCount >= 2), wait briefly for an in-flight request to release key
+    const readyButBusy = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) >= 2);
     if (readyButBusy.length > 0) {
       readyButBusy.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
       const busiest = readyButBusy[0];

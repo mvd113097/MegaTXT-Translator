@@ -323,6 +323,23 @@ export const StoreView: React.FC<StoreViewProps> = ({
   const [endChapter, setEndChapter] = useState<number>(savedState.endChapter || 100);
   const [isScraping, setIsScraping] = useState(false);
   const [scrapeProgress, setScrapeProgress] = useState<string | null>(null);
+  const [scrapeElapsedSec, setScrapeElapsedSec] = useState(0);
+
+  // Live timer during chapter download to reassure user it is actively progressing
+  useEffect(() => {
+    let timer: any = null;
+    if (isScraping) {
+      setScrapeElapsedSec(0);
+      timer = setInterval(() => {
+        setScrapeElapsedSec((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setScrapeElapsedSec(0);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isScraping]);
 
   // Persist state across tab navigation
   useEffect(() => {
@@ -1127,7 +1144,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
       {/* Novel Detail & Chapter Range Modal */}
       {(selectedNovel || isLoadingDetail) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-lg rounded-3xl border border-purple-100 dark:border-purple-900 bg-white dark:bg-slate-900 p-6 shadow-2xl flex flex-col gap-4 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-xl rounded-3xl border border-purple-100 dark:border-purple-900 bg-white dark:bg-slate-900 p-6 shadow-2xl flex flex-col gap-4 max-h-[92vh] overflow-y-auto">
             {isLoadingDetail ? (
               <div className="flex flex-col items-center justify-center py-12 gap-3">
                 <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
@@ -1135,26 +1152,44 @@ export const StoreView: React.FC<StoreViewProps> = ({
               </div>
             ) : selectedNovel ? (
               <>
+                {/* Header */}
                 <div className="flex items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div>
-                    <span className="text-[10px] font-bold text-purple-600 uppercase tracking-wider">
-                      {selectedNovel.siteName}
-                    </span>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-                      {selectedNovel.title}
-                    </h3>
-                    <p className="text-xs text-slate-500">Author: {selectedNovel.author}</p>
+                  <div className="flex items-start gap-3 min-w-0">
+                    {selectedNovel.coverUrl ? (
+                      <img
+                        src={selectedNovel.coverUrl}
+                        alt={selectedNovel.title}
+                        className="w-12 h-16 object-cover rounded-xl border border-black/10 shrink-0 shadow-xs"
+                      />
+                    ) : null}
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider">
+                        {selectedNovel.siteName || "Novel Store"}
+                      </span>
+                      <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 line-clamp-2">
+                        {selectedNovel.title}
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Author: {selectedNovel.author || "Unknown"}
+                      </p>
+                    </div>
                   </div>
                   <button
-                    onClick={() => setSelectedNovel(null)}
-                    className="rounded-full p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                    type="button"
+                    onClick={() => {
+                      if (!isScraping) setSelectedNovel(null);
+                    }}
+                    disabled={isScraping}
+                    className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition shrink-0 cursor-pointer disabled:opacity-40"
+                    title="Close"
                   >
                     <X className="h-5 w-5" />
                   </button>
                 </div>
 
+                {/* Synopsis */}
                 {selectedNovel.intro && (
-                  <div className="rounded-2xl bg-purple-50/50 dark:bg-slate-800/50 p-3 text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-h-40 overflow-y-auto whitespace-pre-line">
+                  <div className="rounded-2xl bg-purple-50/50 dark:bg-slate-800/50 p-3 text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-h-36 overflow-y-auto whitespace-pre-line border border-purple-100/50 dark:border-purple-900/30">
                     {selectedNovel.intro}
                   </div>
                 )}
@@ -1165,14 +1200,65 @@ export const StoreView: React.FC<StoreViewProps> = ({
                     <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
                       Select Chapter Range to Import:
                     </span>
-                    <span className="text-xs font-semibold text-purple-600">
-                      Total Chapters Found: {selectedNovel.chapters.length || "100+"}
+                    <span className="text-xs font-semibold text-purple-600 dark:text-purple-400">
+                      Total Chapters: {selectedNovel.chapters.length || "100+"}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  {/* Quick Preset Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="text-slate-400 font-medium mr-1">Presets:</span>
+                    <button
+                      type="button"
+                      disabled={isScraping}
+                      onClick={() => {
+                        setStartChapter(1);
+                        setEndChapter(Math.min(20, selectedNovel.chapters.length || 20));
+                      }}
+                      className="px-2.5 py-1 rounded-lg border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-900 hover:bg-purple-50 dark:hover:bg-purple-950/50 font-bold text-purple-700 dark:text-purple-300 transition cursor-pointer text-xs"
+                    >
+                      First 20 Ch
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isScraping}
+                      onClick={() => {
+                        setStartChapter(1);
+                        setEndChapter(Math.min(50, selectedNovel.chapters.length || 50));
+                      }}
+                      className="px-2.5 py-1 rounded-lg border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-900 hover:bg-purple-50 dark:hover:bg-purple-950/50 font-bold text-purple-700 dark:text-purple-300 transition cursor-pointer text-xs"
+                    >
+                      First 50 Ch
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isScraping}
+                      onClick={() => {
+                        setStartChapter(1);
+                        setEndChapter(Math.min(100, selectedNovel.chapters.length || 100));
+                      }}
+                      className="px-2.5 py-1 rounded-lg border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-900 hover:bg-purple-50 dark:hover:bg-purple-950/50 font-bold text-purple-700 dark:text-purple-300 transition cursor-pointer text-xs"
+                    >
+                      First 100 Ch
+                    </button>
+                    {selectedNovel.chapters.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isScraping}
+                        onClick={() => {
+                          setStartChapter(1);
+                          setEndChapter(selectedNovel.chapters.length);
+                        }}
+                        className="px-2.5 py-1 rounded-lg border border-purple-200 dark:border-purple-800/80 bg-white dark:bg-slate-900 hover:bg-purple-50 dark:hover:bg-purple-950/50 font-bold text-purple-700 dark:text-purple-300 transition cursor-pointer text-xs"
+                      >
+                        All ({selectedNovel.chapters.length} Ch)
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-1">
                     <div>
-                      <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                      <label className="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">
                         Start Chapter
                       </label>
                       <input
@@ -1180,12 +1266,13 @@ export const StoreView: React.FC<StoreViewProps> = ({
                         min={1}
                         max={selectedNovel.chapters.length || 1000}
                         value={startChapter}
+                        disabled={isScraping}
                         onChange={(e) => setStartChapter(Math.max(1, parseInt(e.target.value) || 1))}
-                        className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100"
+                        className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 disabled:opacity-60"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                      <label className="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">
                         End Chapter
                       </label>
                       <input
@@ -1193,87 +1280,119 @@ export const StoreView: React.FC<StoreViewProps> = ({
                         min={startChapter}
                         max={selectedNovel.chapters.length || 1000}
                         value={endChapter}
+                        disabled={isScraping}
                         onChange={(e) =>
                           setEndChapter(
                             Math.max(startChapter, parseInt(e.target.value) || startChapter)
                           )
                         }
-                        className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100"
+                        className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 disabled:opacity-60"
                       />
                     </div>
                   </div>
 
-                  <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
                     <span>
-                      Will compile chapters {startChapter} to {endChapter} (
+                      Will download chapters {startChapter} through {endChapter} (
                       {Math.max(0, endChapter - startChapter + 1)} chapters)
                     </span>
                   </div>
                 </div>
 
-                {/* Import Action Buttons */}
-                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                  {onOpenReader && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onOpenReader({
-                          novelTitle: selectedNovel.title,
-                          author: selectedNovel.author,
-                          coverUrl: selectedNovel.coverUrl,
-                          novelUrl: selectedNovel.novelUrl,
-                          siteId: selectedNovel.siteId,
-                          chapterIndex: startChapter,
-                          totalChapters: selectedNovel.chapters.length,
-                          allChapters: selectedNovel.chapters.map((c, i) => ({
-                            title: c.title,
-                            url: c.url,
-                            index: i + 1,
-                          })),
-                        });
-                        setSelectedNovel(null);
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/80 dark:bg-purple-950/50 px-4 py-2 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 transition cursor-pointer"
-                    >
-                      <BookOpen className="h-4 w-4" />
-                      <span>Read in Reader Mode</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setSelectedNovel(null)}
-                    disabled={isScraping}
-                    className="rounded-xl px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 transition cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleStartImport(false)}
-                    disabled={isScraping}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-purple-950/40 px-3.5 py-2.5 text-xs font-bold text-purple-700 dark:text-purple-300 shadow-xs active:scale-95 transition cursor-pointer"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>Import to Workspace</span>
-                  </button>
+                {/* Active Scraping Progress Card with Live Timer */}
+                {isScraping && (
+                  <div className="rounded-2xl border border-purple-200 dark:border-purple-800 bg-purple-50/70 dark:bg-purple-950/40 p-3.5 space-y-2 animate-in fade-in">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2 font-bold text-purple-700 dark:text-purple-300">
+                        <Loader2 className="h-4 w-4 animate-spin text-purple-600 shrink-0" />
+                        <span>Fetching chapters ({startChapter}–{endChapter})...</span>
+                      </div>
+                      <span className="font-mono text-[11px] font-semibold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded-full">
+                        {scrapeElapsedSec}s elapsed • working normally
+                      </span>
+                    </div>
+                    <div className="w-full bg-purple-100 dark:bg-purple-900/50 h-1.5 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 animate-pulse rounded-full w-full" />
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
+                      Compiling raw Chinese text from remote source into your translation workspace. This usually takes 3–15 seconds depending on chapter count.
+                    </p>
+                  </div>
+                )}
+
+                {/* Import Action Buttons - Stacked Cleanly so no button is cut off */}
+                <div className="flex flex-col gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  {/* Primary 1-Click Action */}
                   <button
                     type="button"
                     onClick={() => handleStartImport(true)}
                     disabled={isScraping}
-                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:shadow-purple-500/25 active:scale-95 transition cursor-pointer"
+                    className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 px-5 py-3 text-sm font-extrabold text-white shadow-md hover:shadow-purple-500/25 active:scale-98 transition cursor-pointer disabled:opacity-60"
                   >
                     {isScraping ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>{scrapeProgress || "Compiling & starting..."}</span>
+                        <span>Compiling & Starting Instant Translation ({scrapeElapsedSec}s)...</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="h-4 w-4 text-amber-300" />
-                        <span>⚡ Translate Now (1-Click)</span>
+                        <span>⚡ Translate Now (1-Click Instant Start)</span>
                       </>
                     )}
                   </button>
+
+                  {/* Secondary Actions Row */}
+                  <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedNovel(null)}
+                      disabled={isScraping}
+                      className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      {onOpenReader && (
+                        <button
+                          type="button"
+                          disabled={isScraping}
+                          onClick={() => {
+                            onOpenReader({
+                              novelTitle: selectedNovel.title,
+                              author: selectedNovel.author,
+                              coverUrl: selectedNovel.coverUrl,
+                              novelUrl: selectedNovel.novelUrl,
+                              siteId: selectedNovel.siteId,
+                              chapterIndex: startChapter,
+                              totalChapters: selectedNovel.chapters.length,
+                              allChapters: selectedNovel.chapters.map((c, i) => ({
+                                title: c.title,
+                                url: c.url,
+                                index: i + 1,
+                              })),
+                            });
+                            setSelectedNovel(null);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/70 dark:bg-purple-950/40 px-3.5 py-2 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/60 transition cursor-pointer disabled:opacity-50 shadow-2xs"
+                        >
+                          <BookOpen className="h-3.5 w-3.5" />
+                          <span>Read in Reader</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleStartImport(false)}
+                        disabled={isScraping}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/60 px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer disabled:opacity-50 shadow-2xs"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Import Raw Text</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </>
             ) : null}

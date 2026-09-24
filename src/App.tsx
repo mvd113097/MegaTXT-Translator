@@ -554,7 +554,19 @@ export default function App() {
       if (session?.fileName) {
         headers["x-novel-filename"] = encodeURIComponent(session.fileName);
       }
-      const res = await fetch("/api/cloud-job/sync-texts?completedOnly=true", {
+
+      const baseChunks = chunksRef.current.length > 0 ? chunksRef.current : (session?.chunks || []);
+      const missingIndices = baseChunks
+        .filter((c) => !c.englishText || !c.englishText.trim())
+        .map((c) => c.index);
+
+      // High-efficiency delta sync: only download the newly translated chunk indices instead of all 500+ chapters
+      let syncUrl = "/api/cloud-job/sync-texts?completedOnly=true";
+      if (baseChunks.length > 0 && missingIndices.length > 0 && missingIndices.length < baseChunks.length) {
+        syncUrl = `/api/cloud-job/sync-texts?indices=${missingIndices.slice(0, 40).join(",")}`;
+      }
+
+      const res = await fetch(syncUrl, {
         headers,
       });
       const data = await res.json();
@@ -646,10 +658,10 @@ export default function App() {
       }
       // Use summary mode by default for ultra-low data consumption (~350 bytes per sync)
       const url = forceFullText
-        ? "/api/cloud-job/status?full=true"
+        ? "/api/cloud-job/status?full=true&allowFallback=true"
         : (session?.chunks && session.chunks.length > 0)
-        ? "/api/cloud-job/status?summary=true"
-        : "/api/cloud-job/status";
+        ? "/api/cloud-job/status?summary=true&allowFallback=true"
+        : "/api/cloud-job/status?allowFallback=true";
 
       const res = await fetch(url, {
         headers,
@@ -689,22 +701,34 @@ export default function App() {
 
         // If this is a lightweight summary update and we already have the novel session loaded
         if (sJob.isSummary && session && isSameNovel(session.fileName, sJob.fileName)) {
+          const totalExpected = Math.max(session.chunks?.length || 0, sJob.totalChunks || 0);
+          const isAllCompleted = (sJob.completedChunks === totalExpected && totalExpected > 0) || sJob.status === "completed";
+          const finalJobStatus = isAllCompleted ? "completed" : sJob.status;
+
           setSession((prev) => {
             if (!prev) return prev;
             return {
               ...prev,
-              status: (sJob.completedChunks === (prev.chunks?.length || 0) && (prev.chunks?.length || 0) > 0) ? "completed" : sJob.status,
+              status: finalJobStatus,
               completedEnglishWords: sJob.completedEnglishWords,
               completedChars: sJob.completedChars,
               lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
           });
+
+          // Check if local chunks are missing translated English texts or completed status
+          const localDoneCount = (session.chunks || []).filter(c => c.status === "completed" && !!c.englishText?.trim()).length;
+          if (sJob.completedChunks > localDoneCount || isAllCompleted || forceFullText) {
+            syncCompletedTexts(true);
+          }
         } else {
           // Full structure or novel change
           const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
 
           setSession((prev) => {
             if (!prev || !isSameNovel(prev.fileName, sJob.fileName)) {
+              const totalExpected = Math.max(sortedChunks.length, sJob.totalChunks || 0);
+              const isAllDone = (sJob.completedChunks === totalExpected && totalExpected > 0) || sJob.status === "completed";
               return {
                 fileName: sJob.fileName,
                 fileSizeBytes: sJob.fileSizeBytes || 0,
@@ -727,7 +751,7 @@ export default function App() {
                 customInstructions: sJob.customInstructions || "",
                 glossary: sJob.glossary || [],
                 mode: "cloud",
-                status: sJob.status,
+                status: isAllDone ? "completed" : sJob.status,
                 createdAt: sJob.startedAt,
                 lastUpdated: sJob.lastActiveAt,
                 completedEnglishWords: sJob.completedEnglishWords,
@@ -790,7 +814,7 @@ export default function App() {
 
             const totalExpected = Math.max(prevChunks.length, sJob.totalChunks || 0, merged.length);
             const completedCount = merged.filter((c: any) => c.status === "completed").length;
-            const allDone = totalExpected > 0 && merged.length >= totalExpected && completedCount === totalExpected;
+            const allDone = (totalExpected > 0 && merged.length >= totalExpected && completedCount === totalExpected) || sJob.status === "completed";
             const finalStatus = allDone ? "completed" : (sJob.status === "completed" && !allDone ? "running" : sJob.status);
 
             chunksRef.current = merged;
@@ -803,6 +827,11 @@ export default function App() {
               lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
           });
+
+          // If no chunks were returned or summary had missing text, automatically sync texts
+          if (sortedChunks.length === 0 || forceFullText || sJob.status === "completed") {
+            syncCompletedTexts(true);
+          }
         }
 
         if (typeof sJob.concurrency === "number" && sJob.concurrency >= 1 && sJob.concurrency <= 5) {
@@ -1450,12 +1479,18 @@ export default function App() {
   };
 
   // Pause translation
-  const handlePause = async () => {
-    if (mode === "cloud") {
+  const handlePause = async (novelFileName?: string) => {
+    const targetNovel = novelFileName || session?.fileName;
+    if (mode === "cloud" || targetNovel) {
       try {
+        const headers: Record<string, string> = { ...getAuthHeaders() };
+        if (targetNovel) {
+          headers["x-novel-filename"] = encodeURIComponent(targetNovel);
+        }
         await fetch("/api/cloud-job/pause", {
           method: "POST",
-          headers: getAuthHeaders(),
+          headers,
+          body: JSON.stringify({ fileName: targetNovel }),
         });
       } catch {}
     }
@@ -1465,19 +1500,77 @@ export default function App() {
   };
 
   // Resume translation
-  const handleResume = async () => {
-    if (mode === "cloud") {
+  const handleResume = async (novelFileName?: string) => {
+    const targetNovel = novelFileName || session?.fileName;
+    if (mode === "cloud" || targetNovel) {
       try {
+        const headers: Record<string, string> = { ...getAuthHeaders() };
+        if (targetNovel) {
+          headers["x-novel-filename"] = encodeURIComponent(targetNovel);
+        }
         await fetch("/api/cloud-job/resume", {
           method: "POST",
-          headers: getAuthHeaders(),
+          headers,
+          body: JSON.stringify({ fileName: targetNovel }),
         });
       } catch {}
       setIsPaused(false);
       setIsRunning(true);
+      setTimeout(() => {
+        syncCloudProgress(true, false, targetNovel);
+      }, 500);
     } else {
       pauseRequestedRef.current = false;
       runBrowserBatch();
+    }
+  };
+
+  // Translate New Novel (Pause and preserve current novel progress in Cloud History, clear workspace for a new novel)
+  const handleTranslateNewNovel = async () => {
+    if (session) {
+      const curFileName = session.fileName;
+      // 1. Pause on server
+      try {
+        const headers: Record<string, string> = { ...getAuthHeaders() };
+        if (curFileName) {
+          headers["x-novel-filename"] = encodeURIComponent(curFileName);
+        }
+        await fetch("/api/cloud-job/pause", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ fileName: curFileName }),
+        });
+      } catch (err) {
+        console.warn("Pause cloud job error:", err);
+      }
+
+      // 2. Persist paused state into IndexedDB storage so no chapters are lost
+      const pausedSession: TranslationSession = {
+        ...session,
+        status: session.status === "completed" ? "completed" : "paused",
+        lastUpdated: Date.now(),
+      };
+      await saveSessionToIdb(pausedSession).catch(() => {});
+
+      // 3. Clear workspace without deleting from history
+      pauseRequestedRef.current = true;
+      setIsRunning(false);
+      setIsPaused(true);
+      setSession(null);
+      setServerCloudJob(null);
+      chunksRef.current = [];
+      userHasResetRef.current = true;
+
+      // 4. Navigate to home / upload screen
+      setActiveNavTab("home");
+
+      // 5. Toast notification
+      setToastData({
+        message: `"${curFileName}" progress was saved to Cloud History. You can start translating a new novel or resume anytime!`,
+        type: "success",
+      });
+    } else {
+      setActiveNavTab("home");
     }
   };
 
@@ -1978,6 +2071,7 @@ Export Timestamp: ${new Date().toLocaleString()}
               onDownloadProgress={handleDownloadProgress}
               onTranslateChunk={handleTranslateSpecificChunk}
               onReset={handleReset}
+              onTranslateNewNovel={handleTranslateNewNovel}
               completedEnglishWords={completedEnglishWords}
               lastDownloadedWords={lastDownloadedWordCount}
               onSyncProgress={() => syncCloudProgress(false, true)}
@@ -2012,7 +2106,20 @@ Export Timestamp: ${new Date().toLocaleString()}
           onDownloadProgress={handleDownloadProgress}
           onReset={handleReset}
           getAuthHeaders={getAuthHeaders}
-          onSelectNovel={(fileName) => syncCloudProgress(true, true, fileName)}
+          onSelectNovel={async (fileName, autoResume) => {
+            userHasResetRef.current = false;
+            await syncCloudProgress(true, true, fileName);
+            setActiveNavTab("home");
+            if (autoResume) {
+              setTimeout(() => {
+                handleResume(fileName);
+                setToastData({
+                  message: `Resumed translation of "${fileName}".`,
+                  type: "success",
+                });
+              }, 400);
+            }
+          }}
           onOpenReader={handleOpenReader}
         />
 
@@ -2057,13 +2164,15 @@ Export Timestamp: ${new Date().toLocaleString()}
             isMinimized={isReaderMinimized}
             onClose={handleCloseReader}
             onToggleMinimize={() => setIsReaderMinimized((prev) => !prev)}
-            onUpdateChapterIndex={(chapterIndex, chapterTitle, allChapters) => {
+            onUpdateChapterIndex={(chapterIndex, chapterTitle, allChapters, content, englishContent) => {
               setReaderNovel((prev) => {
                 if (!prev) return null;
                 return {
                   ...prev,
                   chapterIndex,
                   ...(allChapters && allChapters.length > 0 ? { allChapters } : {}),
+                  ...(content ? { content } : {}),
+                  ...(englishContent !== undefined ? { englishContent } : {}),
                 };
               });
             }}

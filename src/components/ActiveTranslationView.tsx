@@ -23,6 +23,7 @@ import {
   ExternalLink,
   ListOrdered,
   Cloud,
+  PlusCircle,
 } from "lucide-react";
 import {
   TranslationSession,
@@ -56,6 +57,7 @@ interface ActiveTranslationViewProps {
   onDownloadProgress: (format?: "epub" | "txt") => void;
   onTranslateChunk: (chunkId: string) => void;
   onReset: () => void;
+  onTranslateNewNovel?: () => void;
   completedEnglishWords: number;
   lastDownloadedWords: number;
   onSyncProgress?: () => void;
@@ -100,6 +102,7 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
   onDownloadProgress,
   onTranslateChunk,
   onReset,
+  onTranslateNewNovel,
   completedEnglishWords,
   lastDownloadedWords,
   onSyncProgress,
@@ -491,14 +494,15 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
           <span className="truncate">Download Current EPUB</span>
         </button>
 
-        {/* Delete Translation Button */}
+        {/* Translate New Novel Button */}
         <button
-          id="active-reset-book-btn"
-          onClick={onReset}
-          className="flex items-center justify-center gap-2 rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/60 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/40 py-3 px-3 text-xs font-extrabold text-rose-700 dark:text-rose-300 transition active:scale-98 cursor-pointer shadow-2xs"
+          id="active-translate-new-novel-btn"
+          onClick={onTranslateNewNovel || onReset}
+          className="flex items-center justify-center gap-2 rounded-2xl border border-purple-200 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 py-3 px-3 text-xs font-extrabold text-purple-700 dark:text-purple-300 transition active:scale-98 cursor-pointer shadow-2xs"
+          title="Pause current novel, save progress to Cloud History, and translate a new novel"
         >
-          <Trash2 className="h-4 w-4 text-rose-500" />
-          <span className="truncate">Delete Translation</span>
+          <PlusCircle className="h-4 w-4 text-purple-600 dark:text-purple-400" />
+          <span className="truncate">Translate New Novel</span>
         </button>
       </div>
 

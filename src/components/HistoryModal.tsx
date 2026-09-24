@@ -44,7 +44,7 @@ interface HistoryModalProps {
   onDownloadProgress: (format?: "epub" | "txt") => void;
   onReset: (novelName?: string, clearAll?: boolean) => void;
   getAuthHeaders?: () => Record<string, string>;
-  onSelectNovel?: (fileName: string) => void;
+  onSelectNovel?: (fileName: string, autoResume?: boolean) => void;
   onOpenReader?: (novel: {
     novelTitle: string;
     author?: string;
@@ -515,17 +515,38 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
                     {/* Actions */}
                     <div className="flex flex-wrap items-center gap-2 pt-1">
                       {!isCurrentSession && onSelectNovel && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectNovel(novel.fileName);
-                            onClose();
-                          }}
-                          className="inline-flex items-center justify-center gap-1 rounded-xl bg-purple-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-2xs hover:bg-purple-700 active:scale-95 transition cursor-pointer"
-                        >
-                          <Play className="h-3 w-3 fill-current" />
-                          <span>Open Novel</span>
-                        </button>
+                        novel.completedChunks < novel.totalChunks && novel.totalChunks > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectNovel(novel.fileName, true);
+                              onClose();
+                            }}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-purple-600 px-3 py-1.5 text-xs font-bold text-white shadow-2xs hover:bg-purple-700 active:scale-95 transition cursor-pointer"
+                            title="Resume translation on server and continue progress"
+                          >
+                            <Play className="h-3 w-3 fill-current text-white" />
+                            <span>Resume Translation</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectNovel(novel.fileName, false);
+                              onClose();
+                            }}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-purple-600 px-3 py-1.5 text-xs font-bold text-white shadow-2xs hover:bg-purple-700 active:scale-95 transition cursor-pointer"
+                          >
+                            <BookOpen className="h-3 w-3 text-white" />
+                            <span>Open Novel</span>
+                          </button>
+                        )
+                      )}
+
+                      {isCurrentSession && (
+                        <span className="inline-flex items-center gap-1 rounded-xl bg-purple-50 dark:bg-purple-950/60 border border-purple-200 dark:border-purple-800/80 px-2.5 py-1 text-xs font-bold text-purple-700 dark:text-purple-300">
+                          Active in Workspace
+                        </span>
                       )}
 
                       {isCurrentSession && novel.completedChunks > 0 && (
