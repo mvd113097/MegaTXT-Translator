@@ -674,6 +674,15 @@ function getJobForSession(req: express.Request): CloudJob | null {
     }
   }
 
+  // Prevent JavaScript object stringification or invalid placeholders from corrupting novel search
+  if (
+    targetNovelName === "[object Object]" ||
+    targetNovelName === "undefined" ||
+    targetNovelName === "null"
+  ) {
+    targetNovelName = "";
+  }
+
   // 1. If client specifically targeted a novel name:
   if (targetNovelName) {
     if (cloudJobs.has(sId)) {
@@ -861,7 +870,7 @@ function ensureCloudKeepAliveRunning() {
 
 const pendingDiskWrites = new Map<string, NodeJS.Timeout>();
 
-function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
+function saveJobToDisk(sessionId: string, job?: CloudJob | null, immediate: boolean = false) {
   try {
     if (job && (job as any).isDeleted) {
       console.log(`[Storage] Refusing to write deleted job "${job.fileName}" (${job.id}) to disk.`);
@@ -870,44 +879,56 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null) {
     const safeKey = sanitizeSessionKey(sessionId);
     const jobFilePath = path.join(JOBS_DIR, `job_${safeKey}.json`);
     if (job) {
-      // Debounce disk writes by 200ms so parallel worker chunk completions coalesce into non-blocking writes
+      const isUrgent = immediate || job.status === "paused" || job.status === "completed";
       const existing = pendingDiskWrites.get(jobFilePath);
-      if (existing) clearTimeout(existing);
+      if (existing) {
+        clearTimeout(existing);
+        pendingDiskWrites.delete(jobFilePath);
+      }
 
-      pendingDiskWrites.set(
-        jobFilePath,
-        setTimeout(async () => {
-          pendingDiskWrites.delete(jobFilePath);
-          try {
-            // Compact JSON reduces size by ~40% and cuts CPU serialization time by >60%
-            const dataStr = JSON.stringify(job);
-            await fs.promises.writeFile(jobFilePath, dataStr, "utf-8");
+      const executeWrite = async () => {
+        try {
+          // Compact JSON reduces size by ~40% and cuts CPU serialization time by >60%
+          const dataStr = JSON.stringify(job);
+          await fs.promises.writeFile(jobFilePath, dataStr, "utf-8");
 
-            // Permanently archive completed novels so they are never lost or overwritten
-            const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
-            const isAllDone =
-              expectedTotal > 0 &&
-              (job.chunks?.length || 0) >= expectedTotal &&
-              (job.chunks || []).every((c) => c.status === "completed" && !!c.englishText?.trim());
+          // Permanently archive completed novels so they are never lost or overwritten
+          const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
+          const isAllDone =
+            expectedTotal > 0 &&
+            (job.chunks?.length || 0) >= expectedTotal &&
+            (job.chunks || []).every((c) => c.status === "completed" && !!c.englishText?.trim());
 
-            if (job.status === "completed" || isAllDone) {
-              const safeNovel = sanitizeSessionKey(job.fileName || "novel");
-              const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
-              await fs.promises.writeFile(archivePath, dataStr, "utf-8").catch(() => {});
-            }
-
-            // Keep legacy root file synced if this is the legacy or default job
-            if (sessionId === "legacy_default" || cloudJobs.size === 1) {
-              await fs.promises.writeFile(CLOUD_JOB_FILE, dataStr, "utf-8").catch(() => {});
-            }
-          } catch (err) {
-            console.error(`Async save to disk error for ${sessionId}:`, err);
+          if (job.status === "completed" || isAllDone) {
+            const safeNovel = sanitizeSessionKey(job.fileName || "novel");
+            const archivePath = path.join(JOBS_DIR, `archive_${safeNovel}.json`);
+            await fs.promises.writeFile(archivePath, dataStr, "utf-8").catch(() => {});
           }
-        }, 200)
-      );
 
-      // Asynchronously mirror authoritative state to Firestore with debouncing to respect rate limits
-      scheduleDebouncedFirestoreJobSync(job);
+          // Keep legacy root file synced if this is the legacy or default job
+          if (sessionId === "legacy_default" || cloudJobs.size === 1) {
+            await fs.promises.writeFile(CLOUD_JOB_FILE, dataStr, "utf-8").catch(() => {});
+          }
+        } catch (err) {
+          console.error(`Async save to disk error for ${sessionId}:`, err);
+        }
+      };
+
+      if (isUrgent) {
+        // Urgent state transition (e.g. Pause, Complete): Flush immediately
+        executeWrite().catch(() => {});
+        scheduleDebouncedFirestoreJobSync(job, true);
+      } else {
+        // Routine chunk translation progress: Debounce by 200ms to keep Node loop smooth
+        pendingDiskWrites.set(
+          jobFilePath,
+          setTimeout(async () => {
+            pendingDiskWrites.delete(jobFilePath);
+            await executeWrite();
+          }, 200)
+        );
+        scheduleDebouncedFirestoreJobSync(job, false);
+      }
     } else {
       const existing = pendingDiskWrites.get(jobFilePath);
       if (existing) {
@@ -1453,15 +1474,16 @@ async function loadCloudJobsFromDisk() {
       }
     }
 
-    // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs
+    // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs with chunks present
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
       if (j.status !== "running") return false;
       if (isSyntheticOrTestJob(j)) return false;
+      if (!j.chunks || j.chunks.length === 0) return false;
       const expectedTotal = (j as any).totalChunks || j.chunks.length;
       const allDone = expectedTotal > 0 && j.chunks.length >= expectedTotal && j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
       if (allDone) {
         j.status = "completed";
-        saveJobToDisk(j.sessionId || "legacy_default", j);
+        saveJobToDisk(j.sessionId || "legacy_default", j, true);
         return false;
       }
       return true;
@@ -1500,7 +1522,9 @@ async function startCloudWorkerLoop() {
 
   const runWorkerTask = async (workerId: number) => {
     while (isCloudWorkerRunning) {
-      const runningJobs = Array.from(cloudJobs.values()).filter((j) => j.status === "running");
+      const runningJobs = Array.from(cloudJobs.values()).filter(
+        (j) => j.status === "running" && j.chunks && j.chunks.length > 0
+      );
       if (runningJobs.length === 0) {
         if (inFlightChunkIds.size === 0) {
           isCloudWorkerRunning = false;
@@ -2802,18 +2826,70 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, (req, res) => {
 // Pause cloud job
 app.post("/api/cloud-job/pause", requireAuthMiddleware, (req, res) => {
   const sessionId = getSessionId(req);
-  const targetJob = getJobForSession(req);
+  let targetJob = getJobForSession(req);
+
+  // If not matched by header/query, check for active or running jobs
+  if (!targetJob) {
+    if (cloudJobs.has(sessionId)) {
+      targetJob = cloudJobs.get(sessionId)!;
+    } else {
+      for (const j of cloudJobs.values()) {
+        if (j.status === "running") {
+          targetJob = j;
+          break;
+        }
+      }
+    }
+  }
+
   if (targetJob) {
     targetJob.status = "paused";
-    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+    targetJob.lastActiveAt = Date.now();
+    // Synchronize paused status across all session aliases for this novel in cloudJobs
+    for (const [sKey, j] of cloudJobs.entries()) {
+      if (isSameNovel(j.fileName, targetJob.fileName) || j.id === targetJob.id) {
+        j.status = "paused";
+        j.lastActiveAt = targetJob.lastActiveAt;
+        saveJobToDisk(sKey, j, true);
+      }
+    }
+    console.log(`[Cloud Job] Paused translation for novel "${targetJob.fileName}" (${targetJob.id}).`);
+  } else {
+    // Failsafe: Pause any running jobs in memory
+    for (const [sKey, j] of cloudJobs.entries()) {
+      if (j.status === "running") {
+        j.status = "paused";
+        saveJobToDisk(sKey, j, true);
+      }
+    }
   }
-  res.json({ success: true, status: "paused" });
+
+  res.json({
+    success: true,
+    status: "paused",
+    fileName: targetJob?.fileName,
+    jobId: targetJob?.id,
+  });
 });
 
 // Resume cloud job
 app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   const sessionId = getSessionId(req);
-  const targetJob = getJobForSession(req);
+  let targetJob = getJobForSession(req);
+
+  if (!targetJob) {
+    if (cloudJobs.has(sessionId)) {
+      targetJob = cloudJobs.get(sessionId)!;
+    } else {
+      for (const j of cloudJobs.values()) {
+        if (j.status === "paused" || j.status === "idle") {
+          targetJob = j;
+          break;
+        }
+      }
+    }
+  }
+
   if (!targetJob) {
     res.status(404).json({ success: false, error: "No active translation job found for this session." });
     return;
@@ -2831,7 +2907,7 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
 
   if (isFullyCompleted) {
     targetJob.status = "completed";
-    saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+    saveJobToDisk(targetJob.sessionId || sessionId, targetJob, true);
     res.status(400).json({
       success: false,
       error: "Job is already completed and locked.",
@@ -2843,9 +2919,22 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   }
 
   targetJob.status = "running";
-  saveJobToDisk(targetJob.sessionId || sessionId, targetJob);
+  targetJob.lastActiveAt = Date.now();
+  for (const [sKey, j] of cloudJobs.entries()) {
+    if (isSameNovel(j.fileName, targetJob.fileName) || j.id === targetJob.id) {
+      j.status = "running";
+      j.lastActiveAt = targetJob.lastActiveAt;
+      saveJobToDisk(sKey, j, true);
+    }
+  }
+
   startCloudWorkerLoop();
-  res.json({ success: true, status: "running" });
+  res.json({
+    success: true,
+    status: "running",
+    fileName: targetJob.fileName,
+    jobId: targetJob.id,
+  });
 });
 
 // Rehydrate missing chunks from client (automatically restores pending chunks if a server restarted with partial state)
@@ -2887,16 +2976,17 @@ app.post("/api/cloud-job/rehydrate-chunks", requireAuthMiddleware, (req, res) =>
       return;
     }
 
-    // Merge incoming full chunks with existing server job chunks, keeping any translated English text intact
+    // Preserve the current job status (e.g. if the user pressed paused, do NOT forcefully overwrite with running!)
+    const targetStatus = targetJob.status === "paused" ? "paused" : "running";
     const incomingJob: CloudJob = {
       ...targetJob,
       chunks,
-      status: "running",
+      status: targetStatus,
     };
 
     const merged = mergeMonotonicCloudJobs(targetJob, incomingJob);
     const completedCount = merged.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    merged.status = (completedCount === merged.chunks.length && merged.chunks.length > 0) ? "completed" : "running";
+    merged.status = (completedCount === merged.chunks.length && merged.chunks.length > 0) ? "completed" : targetStatus;
 
     setJobForSession(targetJob.sessionId || sessionId, merged);
     if (merged.status === "running") {

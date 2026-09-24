@@ -455,16 +455,16 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
         ) : isRunning ? (
           <button
             id="active-pause-btn"
-            onClick={onPause}
+            onClick={() => onPause()}
             className="flex w-full items-center justify-center gap-2.5 rounded-2xl bg-[#C084FC] hover:bg-[#A855F7] py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/15 active:scale-98 transition cursor-pointer"
           >
             <span className="font-mono text-base leading-none">❚❚</span>
             <span>Pause Translation</span>
           </button>
-        ) : isPaused || (metrics.completedChunks > 0 && metrics.completedChunks < metrics.totalChunks) ? (
+        ) : isPaused || (session?.status === "paused") || (metrics.completedChunks > 0 && metrics.completedChunks < metrics.totalChunks) ? (
           <button
             id="active-resume-btn"
-            onClick={isPaused ? onResume : onStart}
+            onClick={() => (isPaused || session?.status === "paused" ? onResume() : onStart())}
             className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer"
           >
             <Play className="h-4 w-4 fill-white" />
@@ -473,7 +473,7 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
         ) : (
           <button
             id="active-start-btn"
-            onClick={onStart}
+            onClick={() => onStart()}
             className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer"
           >
             <Play className="h-4 w-4 fill-white" />
@@ -497,7 +497,7 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
         {/* Translate New Novel Button */}
         <button
           id="active-translate-new-novel-btn"
-          onClick={onTranslateNewNovel || onReset}
+          onClick={() => (onTranslateNewNovel ? onTranslateNewNovel() : onReset())}
           className="flex items-center justify-center gap-2 rounded-2xl border border-purple-200 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 py-3 px-3 text-xs font-extrabold text-purple-700 dark:text-purple-300 transition active:scale-98 cursor-pointer shadow-2xs"
           title="Pause current novel, save progress to Cloud History, and translate a new novel"
         >

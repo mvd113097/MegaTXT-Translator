@@ -842,8 +842,11 @@ export default function App() {
         }
 
         if (sJob.status === "running") {
-          setIsRunning(true);
-          setIsPaused(false);
+          // If user just requested pause, do not allow an in-flight status poll to revert UI state
+          if (!pauseRequestedRef.current) {
+            setIsRunning(true);
+            setIsPaused(false);
+          }
         } else if (sJob.status === "paused") {
           setIsRunning(false);
           setIsPaused(true);
@@ -1051,13 +1054,18 @@ export default function App() {
   };
 
   // Reset workspace / permanently delete novel translation
-  const handleReset = async (novelNameToDelete?: string, clearAll: boolean = false) => {
+  const handleReset = async (novelNameToDelete?: any, clearAll: boolean = false) => {
     if (
       isRunning &&
       !window.confirm("Translation is in progress. Are you sure you want to stop and delete?")
     ) {
       return;
     }
+
+    const cleanNovelToDelete =
+      typeof novelNameToDelete === "string" && novelNameToDelete.trim()
+        ? novelNameToDelete.trim()
+        : undefined;
 
     if (clearAll) {
       userHasResetRef.current = true;
@@ -1090,12 +1098,12 @@ export default function App() {
       return;
     }
 
-    const targetNovel = novelNameToDelete || session?.fileName || serverCloudJob?.fileName;
+    const targetNovel = cleanNovelToDelete || session?.fileName || serverCloudJob?.fileName;
     const targetJobId = serverCloudJob?.id;
 
     const isResettingCurrentSession =
-      !novelNameToDelete ||
-      (session && isSameNovel(session.fileName, novelNameToDelete));
+      !cleanNovelToDelete ||
+      (session && isSameNovel(session.fileName, cleanNovelToDelete));
 
     if (isResettingCurrentSession) {
       userHasResetRef.current = true;
@@ -1108,7 +1116,7 @@ export default function App() {
       clearSessionFromIdb().catch(() => {});
     }
 
-    if (!novelNameToDelete || (serverCloudJob && isSameNovel(serverCloudJob.fileName, novelNameToDelete))) {
+    if (!cleanNovelToDelete || (serverCloudJob && isSameNovel(serverCloudJob.fileName, cleanNovelToDelete))) {
       setServerCloudJob(null);
     }
 
@@ -1479,48 +1487,65 @@ export default function App() {
   };
 
   // Pause translation
-  const handlePause = async (novelFileName?: string) => {
-    const targetNovel = novelFileName || session?.fileName;
-    if (mode === "cloud" || targetNovel) {
+  const handlePause = async (novelFileName?: any) => {
+    const cleanNovelName =
+      typeof novelFileName === "string" && novelFileName.trim()
+        ? novelFileName.trim()
+        : session?.fileName;
+
+    // Instantly transition UI to paused so button switches to Resume without lag
+    pauseRequestedRef.current = true;
+    setIsPaused(true);
+    setIsRunning(false);
+    setSession((prev) => (prev ? { ...prev, status: "paused", lastUpdated: Date.now() } : null));
+
+    if (mode === "cloud" || cleanNovelName) {
       try {
         const headers: Record<string, string> = { ...getAuthHeaders() };
-        if (targetNovel) {
-          headers["x-novel-filename"] = encodeURIComponent(targetNovel);
+        if (cleanNovelName) {
+          headers["x-novel-filename"] = encodeURIComponent(cleanNovelName);
         }
         await fetch("/api/cloud-job/pause", {
           method: "POST",
           headers,
-          body: JSON.stringify({ fileName: targetNovel }),
+          body: JSON.stringify({ fileName: cleanNovelName }),
         });
-      } catch {}
+      } catch (err) {
+        console.warn("Pause cloud job error:", err);
+      }
     }
-    pauseRequestedRef.current = true;
-    setIsPaused(true);
-    setIsRunning(false);
   };
 
   // Resume translation
-  const handleResume = async (novelFileName?: string) => {
-    const targetNovel = novelFileName || session?.fileName;
-    if (mode === "cloud" || targetNovel) {
+  const handleResume = async (novelFileName?: any) => {
+    const cleanNovelName =
+      typeof novelFileName === "string" && novelFileName.trim()
+        ? novelFileName.trim()
+        : session?.fileName;
+
+    pauseRequestedRef.current = false;
+    setIsPaused(false);
+    setIsRunning(true);
+    setSession((prev) => (prev ? { ...prev, status: "running", lastUpdated: Date.now() } : null));
+
+    if (mode === "cloud" || cleanNovelName) {
       try {
         const headers: Record<string, string> = { ...getAuthHeaders() };
-        if (targetNovel) {
-          headers["x-novel-filename"] = encodeURIComponent(targetNovel);
+        if (cleanNovelName) {
+          headers["x-novel-filename"] = encodeURIComponent(cleanNovelName);
         }
         await fetch("/api/cloud-job/resume", {
           method: "POST",
           headers,
-          body: JSON.stringify({ fileName: targetNovel }),
+          body: JSON.stringify({ fileName: cleanNovelName }),
         });
-      } catch {}
-      setIsPaused(false);
-      setIsRunning(true);
+      } catch (err) {
+        console.warn("Resume cloud job error:", err);
+      }
       setTimeout(() => {
-        syncCloudProgress(true, false, targetNovel);
-      }, 500);
+        syncCloudProgress(true, false, cleanNovelName);
+      }, 400);
     } else {
-      pauseRequestedRef.current = false;
       runBrowserBatch();
     }
   };
