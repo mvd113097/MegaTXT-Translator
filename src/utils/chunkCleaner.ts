@@ -215,17 +215,19 @@ export function cleanAndDeduplicateChunks<
       const nextKey = nextChunk ? extractChapterNormalizedKey(nextChunk.chapterTitle, nextChunk.index) : null;
       const prevKey = prevChunk ? extractChapterNormalizedKey(prevChunk.chapterTitle, prevChunk.index) : null;
 
-      // If next chunk or previous chunk is the real version of this chapter, drop this empty stub
+      // If next chunk or previous chunk is the real version of this chapter, drop this duplicate empty stub
       if (key && (key === nextKey || key === prevKey)) {
         continue;
       }
 
-      // If next chunk exists and has valid text, drop this stub anyway
-      if (nextChunk && !isStubOrEmptyChunk(nextChunk)) {
-        continue;
-      }
-
-      // If isolated stub with no real text, drop it so novel stays clean
+      // If the chunk has a distinct chapter title/number not already in result, preserve it with placeholder note
+      // so we never delete chapters 37-86 from the table of contents or file export
+      const cleanedTitle = cleanChapterTitle(chunk.chapterTitle) || chunk.chapterTitle || `Chapter ${chunk.index}`;
+      result.push({
+        ...chunk,
+        chapterTitle: cleanedTitle,
+        englishText: chunk.englishText || "[Content missing or omitted in source website]",
+      });
       continue;
     }
 

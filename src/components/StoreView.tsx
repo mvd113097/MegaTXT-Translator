@@ -324,6 +324,17 @@ export const StoreView: React.FC<StoreViewProps> = ({
   const [isScraping, setIsScraping] = useState(false);
   const [scrapeProgress, setScrapeProgress] = useState<string | null>(null);
   const [scrapeElapsedSec, setScrapeElapsedSec] = useState(0);
+  const activeAbortControllerRef = React.useRef<AbortController | null>(null);
+
+  const handleCancelScrape = () => {
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current = null;
+    }
+    setIsScraping(false);
+    setScrapeProgress(null);
+    setSelectedNovel(null);
+  };
 
   // Live timer during chapter download to reassure user it is actively progressing
   useEffect(() => {
@@ -480,6 +491,12 @@ export const StoreView: React.FC<StoreViewProps> = ({
   const handleStartImport = async (autoStartTranslation: boolean = false) => {
     if (!selectedNovel) return;
 
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    activeAbortControllerRef.current = controller;
+
     setIsScraping(true);
     setScrapeProgress(
       autoStartTranslation
@@ -491,6 +508,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
       const res = await fetch("/api/store/import-novel", {
         method: "POST",
         headers: getAuthHeaders(),
+        signal: controller.signal,
         body: JSON.stringify({
           novelUrl: selectedNovel.novelUrl,
           siteId: selectedNovel.siteId,
@@ -516,9 +534,15 @@ export const StoreView: React.FC<StoreViewProps> = ({
         autoStartTranslation
       );
     } catch (err: any) {
+      if (err.name === "AbortError") {
+        console.log("Import process aborted by user.");
+        return;
+      }
       console.error("Import error:", err);
       setErrorMessage(err.message || "Failed to import novel chapters.");
+    } finally {
       setIsScraping(false);
+      activeAbortControllerRef.current = null;
     }
   };
 
@@ -1176,12 +1200,9 @@ export const StoreView: React.FC<StoreViewProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => {
-                      if (!isScraping) setSelectedNovel(null);
-                    }}
-                    disabled={isScraping}
-                    className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition shrink-0 cursor-pointer disabled:opacity-40"
-                    title="Close"
+                    onClick={handleCancelScrape}
+                    className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition shrink-0 cursor-pointer"
+                    title="Close / Cancel Import"
                   >
                     <X className="h-5 w-5" />
                   </button>
@@ -1346,11 +1367,14 @@ export const StoreView: React.FC<StoreViewProps> = ({
                   <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() => setSelectedNovel(null)}
-                      disabled={isScraping}
-                      className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer disabled:opacity-50"
+                      onClick={handleCancelScrape}
+                      className={`px-4 py-2 text-xs font-bold rounded-xl transition cursor-pointer ${
+                        isScraping
+                          ? "bg-rose-100 hover:bg-rose-200 text-rose-700 dark:bg-rose-950/80 dark:hover:bg-rose-900 dark:text-rose-200 border border-rose-300 dark:border-rose-800 shadow-xs"
+                          : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      }`}
                     >
-                      Cancel
+                      {isScraping ? "Cancel Import" : "Cancel"}
                     </button>
 
                     <div className="flex items-center gap-2">

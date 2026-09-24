@@ -271,56 +271,91 @@ function encodeGBKHex(str: string): string {
   }
 }
 
-// Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8)
+const ROTATING_USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+];
+
+// Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8) and robust retry
 async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
   const isCzbooks = url.includes("czbooks");
-  const response = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: timeoutMs,
-    httpsAgent: sslAgent,
-    headers: {
-      "User-Agent": isCzbooks
-        ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
-        : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      "Accept-Language": isCzbooks ? "zh-TW,zh;q=0.9,en;q=0.8" : "zh-CN,zh;q=0.9,en;q=0.8",
-      ...headers,
-    },
-  });
+  const maxRetries = isCzbooks ? 4 : 2;
 
-  const buffer = Buffer.from(response.data);
-  const contentType = (response.headers["content-type"] as string) || "";
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
+      }
+      const ua = ROTATING_USER_AGENTS[attempt % ROTATING_USER_AGENTS.length];
+      const defaultHeaders: Record<string, string> = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": isCzbooks ? "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7" : "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Ch-Ua": '"Chromium";v="129", "Not=A?Brand";v="24", "Google Chrome";v="129"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        ...headers,
+      };
 
-  let encoding = "utf-8";
-  if (
-    url.includes("aiqu226") ||
-    url.includes("69shu") ||
-    url.includes("dmxs") ||
-    url.includes("ptwxz") ||
-    url.includes("jjwxc")
-  ) {
-    encoding = "gbk";
-  }
+      const response = await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: timeoutMs,
+        httpsAgent: sslAgent,
+        headers: defaultHeaders,
+      });
 
-  if (contentType.toLowerCase().includes("gbk") || contentType.toLowerCase().includes("gb2312")) {
-    encoding = "gbk";
-  } else if (contentType.toLowerCase().includes("utf-8")) {
-    encoding = "utf-8";
-  } else {
-    // Peek at HTML meta tag up to 4096 bytes
-    const sample = buffer.toString("binary", 0, Math.min(buffer.length, 4096)).toLowerCase();
-    if (
-      sample.includes("charset=gbk") ||
-      sample.includes("charset=\"gbk\"") ||
-      sample.includes("charset=gb2312") ||
-      sample.includes("charset=\"gb2312\"")
-    ) {
-      encoding = "gbk";
-    } else if (sample.includes("charset=utf-8") || sample.includes("charset=\"utf-8\"")) {
-      encoding = "utf-8";
+      const buffer = Buffer.from(response.data);
+      const contentType = (response.headers["content-type"] as string) || "";
+
+      let encoding = "utf-8";
+      if (
+        url.includes("aiqu226") ||
+        url.includes("69shu") ||
+        url.includes("dmxs") ||
+        url.includes("ptwxz") ||
+        url.includes("jjwxc")
+      ) {
+        encoding = "gbk";
+      }
+
+      if (contentType.toLowerCase().includes("gbk") || contentType.toLowerCase().includes("gb2312")) {
+        encoding = "gbk";
+      } else if (contentType.toLowerCase().includes("utf-8")) {
+        encoding = "utf-8";
+      } else {
+        // Peek at HTML meta tag up to 4096 bytes
+        const sample = buffer.toString("binary", 0, Math.min(buffer.length, 4096)).toLowerCase();
+        if (
+          sample.includes("charset=gbk") ||
+          sample.includes("charset=\"gbk\"") ||
+          sample.includes("charset=gb2312") ||
+          sample.includes("charset=\"gb2312\"")
+        ) {
+          encoding = "gbk";
+        } else if (sample.includes("charset=utf-8") || sample.includes("charset=\"utf-8\"")) {
+          encoding = "utf-8";
+        }
+      }
+
+      return iconv.decode(buffer, encoding);
+    } catch (err: any) {
+      if (attempt === maxRetries - 1) {
+        throw err;
+      }
     }
   }
 
-  return iconv.decode(buffer, encoding);
+  throw new Error(`Failed to fetch HTML after ${maxRetries} retries for ${url}`);
 }
 
 export function formatOrEstimateFileSize(
@@ -1170,59 +1205,112 @@ async function searchPtwxz(query: string): Promise<StoreSearchResult[]> {
 }
 
 /**
+ * Simplified to Traditional Chinese conversion mapping for web novel search queries
+ */
+const S2T_CHAR_MAP: Record<string, string> = {
+  "时": "時", "代": "代", "旧": "舊", "后": "後", "么": "麼", "这": "這", "个": "個", "来": "來",
+  "发": "發", "会": "會", "对": "對", "为": "為", "体": "體", "国": "國", "传": "傳", "说": "說",
+  "进": "進", "过": "過", "实": "實", "战": "戰", "点": "點", "头": "頭", "门": "門", "关": "關",
+  "长": "長", "见": "見", "边": "邊", "动": "動", "机": "機", "爱": "愛", "总": "總", "从": "從",
+  "经": "經", "书": "書", "开": "開", "问": "問", "间": "間", "归": "歸", "异": "異", "宝": "寶",
+  "绝": "絕", "响": "響", "声": "聲", "乐": "樂", "兽": "獸", "人": "人", "种": "種", "田": "田",
+  "修": "修", "仙": "仙", "侠": "俠", "神": "神", "话": "話", "魔": "魔", "穿": "穿", "越": "越",
+  "重": "重", "生": "生", "无": "無", "限": "限", "流": "流", "极": "極", "道": "道", "圣": "聖",
+  "皇": "皇", "帝": "帝", "霸": "霸", "剑": "劍", "刀": "刀", "录": "錄", "记": "記", "志": "誌",
+  "派": "派", "宗": "宗", "师": "師", "龙": "龍", "凤": "鳳", "图": "圖", "腾": "騰",
+  "石": "石", "器": "器", "原": "原", "始": "始", "社": "社", "酋": "酋", "基": "基",
+  "建": "建", "农": "農", "场": "場", "空": "空", "末": "末", "日": "日", "丧": "喪", "尸": "屍",
+  "变": "變", "化": "化", "网": "網", "游": "遊", "豪": "豪", "裁": "裁", "纯": "純",
+  "耽": "耽", "美": "美", "百": "百", "合": "合", "反": "反", "炮": "炮", "灰": "灰",
+  "甜": "甜", "爽": "爽", "快": "快", "医": "醫", "学": "學", "团": "團",
+  "宠": "寵", "娇": "嬌", "妻": "妻", "夫": "夫", "男": "男", "女": "女", "主": "主", "角": "角"
+};
+
+const T2S_CHAR_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(S2T_CHAR_MAP).map(([s, t]) => [t, s])
+);
+
+export function toTraditionalChinese(str: string): string {
+  return str.split("").map((ch) => S2T_CHAR_MAP[ch] || ch).join("");
+}
+
+export function toSimplifiedChinese(str: string): string {
+  return str.split("").map((ch) => T2S_CHAR_MAP[ch] || ch).join("");
+}
+
+/**
  * Expands English and romanized queries into relevant Chinese web novel genre/trope keywords
  */
 export function expandKeywordsForSearch(query: string): string[] {
   const clean = query.trim().toLowerCase();
   const queries = [query.trim()];
 
+  // Auto add Traditional Chinese and Simplified Chinese variants
+  const trad = toTraditionalChinese(query.trim());
+  if (!queries.includes(trad)) queries.push(trad);
+
+  const simp = toSimplifiedChinese(query.trim());
+  if (!queries.includes(simp)) queries.push(simp);
+
+  // Specific web novel title variants (e.g. 回到石器时代 <-> 回到舊石器時代 <-> 回到旧石器时代)
+  if (clean.includes("石器时代") || clean.includes("石器時代")) {
+    const v1 = query.trim().replace(/石器时代|石器時代/g, "舊石器時代");
+    const v2 = query.trim().replace(/石器时代|石器時代/g, "旧石器时代");
+    const v3 = query.trim().replace(/石器时代|石器時代/g, "原始社会");
+    const v4 = query.trim().replace(/石器时代|石器時代/g, "原始社會");
+    if (!queries.includes(v1)) queries.push(v1);
+    if (!queries.includes(v2)) queries.push(v2);
+    if (!queries.includes(v3)) queries.push(v3);
+    if (!queries.includes(v4)) queries.push(v4);
+  }
+
   const termMap: Record<string, string[]> = {
-    prehistoric: ["洪荒", "史前", "远古", "原始"],
+    prehistoric: ["洪荒", "史前", "远古", "原始", "舊石器時代", "石器時代"],
     honghuang: ["洪荒"],
-    primitive: ["原始", "原始社会", "远古"],
+    primitive: ["原始", "原始社会", "远古", "原始社會", "舊石器時代"],
     ancient: ["古代", "穿越古代", "古穿今"],
-    apocalypse: ["末世", "末日"],
+    apocalypse: ["末世", "末日", "末日"],
     apocalyptic: ["末世", "末日"],
     doomsday: ["末日", "末世"],
-    zombie: ["丧尸", "末世"],
-    zombies: ["丧尸", "末世"],
-    cultivation: ["修仙", "修真", "仙侠"],
+    zombie: ["丧尸", "末世", "喪屍"],
+    zombies: ["丧尸", "末世", "喪屍"],
+    cultivation: ["修仙", "修真", "仙侠", "仙俠"],
     cultivator: ["修仙", "修真"],
-    immortal: ["修仙", "仙侠"],
-    xianxia: ["仙侠", "修仙"],
-    wuxia: ["武侠"],
-    transmigration: ["穿书", "穿越", "快穿"],
-    transmigrate: ["穿书", "穿越"],
-    transmigrated: ["穿书", "穿越"],
-    "quick wear": ["快穿", "穿书"],
-    "quick transmigration": ["快穿", "穿书"],
+    immortal: ["修仙", "仙侠", "仙俠"],
+    xianxia: ["仙侠", "修仙", "仙俠"],
+    wuxia: ["武侠", "武俠"],
+    transmigration: ["穿书", "穿越", "快穿", "穿書"],
+    transmigrate: ["穿书", "穿越", "穿書"],
+    transmigrated: ["穿书", "穿越", "穿書"],
+    "quick wear": ["快穿", "穿书", "穿書"],
+    "quick transmigration": ["快穿", "穿书", "穿書"],
     qt: ["快穿"],
     reborn: ["重生"],
     rebirth: ["重生"],
-    interstellar: ["星际"],
-    farming: ["种田", "种田文"],
-    "infinite flow": ["无限流", "无限"],
-    infinite: ["无限流", "无限"],
-    entertainment: ["娱乐圈"],
-    showbiz: ["娱乐圈"],
-    "beast world": ["兽世", "兽人"],
-    beastman: ["兽世", "兽人"],
-    orc: ["兽世", "兽人"],
-    orcs: ["兽世", "兽人"],
+    interstellar: ["星际", "星際"],
+    farming: ["种田", "种田文", "種田"],
+    "infinite flow": ["无限流", "无限", "無限流"],
+    infinite: ["无限流", "无限", "無限流"],
+    entertainment: ["娱乐圈", "娛樂圈"],
+    showbiz: ["娱乐圈", "娛樂圈"],
+    "beast world": ["兽世", "兽人", "獸世", "獸人"],
+    beastman: ["兽世", "兽人", "獸世", "獸人"],
+    orc: ["兽世", "兽人", "獸世", "獸人"],
+    orcs: ["兽世", "兽人", "獸世", "獸人"],
     abo: ["ABO", "Omega", "Alpha"],
     omega: ["Omega", "ABO"],
     alpha: ["Alpha", "ABO"],
-    esports: ["电竞", "网游"],
-    "e-sports": ["电竞", "网游"],
-    gaming: ["电竞", "网游"],
-    campus: ["校园", "青春"],
-    school: ["校园", "青春"],
-    mecha: ["机甲"],
+    esports: ["电竞", "网游", "電競", "網遊"],
+    "e-sports": ["电竞", "网游", "電競", "網遊"],
+    gaming: ["电竞", "网游", "電競", "網遊"],
+    campus: ["校园", "青春", "校園"],
+    school: ["校园", "青春", "校園"],
+    mecha: ["机甲", "機甲"],
     magic: ["魔法", "西幻"],
     wizard: ["魔法", "西幻"],
-    system: ["系统"],
-    danmei: ["耽美", "纯爱"],
-    bl: ["耽美", "纯爱"],
+    system: ["系统", "系統"],
+    danmei: ["耽美", "纯爱", "純愛"],
+    bl: ["耽美", "纯爱", "純愛"],
     gl: ["百合"],
     yuri: ["百合"],
     villain: ["反派"],
@@ -1230,10 +1318,10 @@ export function expandKeywordsForSearch(query: string): string[] {
     "cannon fodder": ["炮灰"],
     sweet: ["甜文"],
     fluff: ["甜文"],
-    "secret love": ["暗恋"],
-    "childhood sweethearts": ["青梅竹马"],
-    ceo: ["总裁", "豪门"],
-    tycoon: ["豪门", "总裁"],
+    "secret love": ["暗恋", "暗戀"],
+    "childhood sweethearts": ["青梅竹马", "青梅竹馬"],
+    ceo: ["总裁", "豪门", "總裁", "豪門"],
+    tycoon: ["豪门", "总裁", "豪門", "總裁"],
     tribe: ["部落"],
     tribes: ["部落"],
     tribal: ["部落"],
@@ -2077,73 +2165,89 @@ export function cleanChapterContent(raw: string): string {
  * Fetch raw chapter text and extract clean content with proper paragraph spacing
  */
 export async function fetchChapterText(chapterUrl: string): Promise<string> {
-  try {
-    // Handle direct TXT line pointers
-    if (chapterUrl.startsWith("txt:")) {
-      const match = chapterUrl.match(/^txt:([^#]+)#(?:start:(\d+)&end:(\d+)|line:(\d+)(?:&end:(\d+))?)/);
-      if (match) {
-        const rawUrl = decodeURIComponent(match[1]);
-        const startLine = parseInt(match[2] || match[4] || "0", 10);
-        const endLine = match[3] || match[5] ? parseInt(match[3] || match[5], 10) : undefined;
-        const txt = await fetchTxtOrZipFileCached(rawUrl);
-        if (txt) {
-          const lines = txt.split(/\r\n|\n|\r/);
-          if (startLine >= 0 && startLine < lines.length) {
-            let chapterLines: string[] = [];
-            if (typeof endLine === "number" && endLine > startLine) {
-              // Exact slice bounded by next chapter start! Cap safely at max 800 lines for a chapter + preamble
-              chapterLines = lines.slice(startLine, Math.min(endLine, startLine + 800));
-            } else {
-              // Backward compatibility for legacy links with only startLine: scan up to next header or 350 lines
-              chapterLines.push(lines[startLine]);
-              for (let i = startLine + 1; i < Math.min(lines.length, startLine + 350); i++) {
-                const line = lines[i];
-                if (isAnyChapterHeader(line)) break;
-                chapterLines.push(line);
-              }
-            }
+  const maxRetries = 3;
 
-            // Return pristine sanitized paragraph lines preserving full synopsis and preamble
-            return cleanChapterContent(chapterLines.join("\n"));
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
+      }
+
+      // Handle direct TXT line pointers
+      if (chapterUrl.startsWith("txt:")) {
+        const match = chapterUrl.match(/^txt:([^#]+)#(?:start:(\d+)&end:(\d+)|line:(\d+)(?:&end:(\d+))?)/);
+        if (match) {
+          const rawUrl = decodeURIComponent(match[1]);
+          const startLine = parseInt(match[2] || match[4] || "0", 10);
+          const endLine = match[3] || match[5] ? parseInt(match[3] || match[5], 10) : undefined;
+          const txt = await fetchTxtOrZipFileCached(rawUrl);
+          if (txt) {
+            const lines = txt.split(/\r\n|\n|\r/);
+            if (startLine >= 0 && startLine < lines.length) {
+              let chapterLines: string[] = [];
+              if (typeof endLine === "number" && endLine > startLine) {
+                // Exact slice bounded by next chapter start! Cap safely at max 800 lines for a chapter + preamble
+                chapterLines = lines.slice(startLine, Math.min(endLine, startLine + 800));
+              } else {
+                // Backward compatibility for legacy links with only startLine: scan up to next header or 350 lines
+                chapterLines.push(lines[startLine]);
+                for (let i = startLine + 1; i < Math.min(lines.length, startLine + 350); i++) {
+                  const line = lines[i];
+                  if (isAnyChapterHeader(line)) break;
+                  chapterLines.push(line);
+                }
+              }
+
+              // Return pristine sanitized paragraph lines preserving full synopsis and preamble
+              const cleaned = cleanChapterContent(chapterLines.join("\n"));
+              if (cleaned.length > 0) return cleaned;
+            }
           }
         }
       }
+
+      const html = await fetchHtml(chapterUrl);
+      const $ = cheerio.load(html);
+
+      // Remove unwanted script tags, ads, forms, pagination elements, navigation, and reading controls
+      $(
+        "script, style, iframe, noscript, form, select, option, input, button, .ads, .ad, .header, .footer, .nav, .bdsharebuttonbox, .read-status, .bot_desc, .hotlist, .readNav, .head, .page_go, .page-box, .pagelist, .page_nav, .page-link, .pageIndex, #pageIndex, .jump, footer, #footer, .bottom, .bot, .copyright"
+      ).remove();
+
+      // Replace break and paragraph tags with explicit newlines before extracting text
+      $("br").replaceWith("\n");
+      $("p").each((_, el) => {
+        $(el).append("\n");
+      });
+      $("div").each((_, el) => {
+        $(el).append("\n");
+      });
+
+      // Select chapter content container
+      let content = "";
+      const container = $(
+        ".chapter-content, #chapter-content, .read_chapterDetail, .readDetail, .article-content, #content, #chaptercontent, .read-content, .txtcontent, .content, #txtcontent, #view, .box_con, #articlecontent"
+      ).first();
+
+      if (container.length > 0) {
+        content = container.text();
+      } else {
+        content = $("body").text();
+      }
+
+      const cleaned = cleanChapterContent(content);
+      if (cleaned.length > 20 || attempt === maxRetries - 1) {
+        return cleaned;
+      }
+    } catch (e) {
+      if (attempt === maxRetries - 1) {
+        console.warn(`Failed to fetch chapter ${chapterUrl}:`, (e as Error).message);
+        return "";
+      }
     }
-
-    const html = await fetchHtml(chapterUrl);
-    const $ = cheerio.load(html);
-
-    // Remove unwanted script tags, ads, forms, pagination elements, navigation, and reading controls
-    $(
-      "script, style, iframe, noscript, form, select, option, input, button, .ads, .ad, .header, .footer, .nav, .bdsharebuttonbox, .read-status, .bot_desc, .hotlist, .readNav, .head, .page_go, .page-box, .pagelist, .page_nav, .page-link, .pageIndex, #pageIndex, .jump, footer, #footer, .bottom, .bot, .copyright"
-    ).remove();
-
-    // Replace break and paragraph tags with explicit newlines before extracting text
-    $("br").replaceWith("\n");
-    $("p").each((_, el) => {
-      $(el).append("\n");
-    });
-    $("div").each((_, el) => {
-      $(el).append("\n");
-    });
-
-    // Select chapter content container
-    let content = "";
-    const container = $(
-      ".read_chapterDetail, .readDetail, .article-content, #content, #chaptercontent, .read-content, .txtcontent, .content, #txtcontent, #view, .box_con, #articlecontent"
-    ).first();
-
-    if (container.length > 0) {
-      content = container.text();
-    } else {
-      content = $("body").text();
-    }
-
-    return cleanChapterContent(content);
-  } catch (e) {
-    console.warn(`Failed to fetch chapter ${chapterUrl}:`, (e as Error).message);
-    return "";
   }
+
+  return "";
 }
 
 // ------------------------------------------------------------------

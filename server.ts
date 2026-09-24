@@ -3799,20 +3799,28 @@ app.post("/api/store/import-novel", requireAuthMiddleware, async (req, res) => {
       return;
     }
 
-    // Fetch chapter contents with batch concurrency (8 at a time for fast download)
+    // Fetch chapter contents with gentle batch concurrency (3 at a time with 60ms delay)
     const chapterTexts: string[] = [];
-    const BATCH_SIZE = 8;
+    const BATCH_SIZE = 3;
 
     for (let i = 0; i < selected.length; i += BATCH_SIZE) {
       const batch = selected.slice(i, i + BATCH_SIZE);
       const fetched = await Promise.all(
         batch.map(async (item: any) => {
-          const body = await fetchChapterText(item.url);
+          let body = await fetchChapterText(item.url);
+          // If empty, do a short retry
+          if (!body || body.trim().length < 15) {
+            await new Promise((r) => setTimeout(r, 300));
+            body = await fetchChapterText(item.url);
+          }
           const chHeader = item.title ? `${item.title}\n\n` : `第${item.index}章\n\n`;
-          return `${chHeader}${body}`;
+          return `${chHeader}${body || ""}`;
         })
       );
       chapterTexts.push(...fetched);
+      if (i + BATCH_SIZE < selected.length) {
+        await new Promise((r) => setTimeout(r, 60));
+      }
     }
 
     const fullRawText = chapterTexts.filter(Boolean).join("\n\n\n");
