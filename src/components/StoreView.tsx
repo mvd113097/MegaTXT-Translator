@@ -206,6 +206,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
   const [results, setResults] = useState<StoreSearchResult[]>(savedState.results || []);
   const [hasSearched, setHasSearched] = useState<boolean>(savedState.hasSearched || false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isExportingRaw, setIsExportingRaw] = useState(false);
 
   // Synopsis dropdown toggle state
   const [expandedSummaryIds, setExpandedSummaryIds] = useState<Record<string, boolean>>({});
@@ -334,6 +335,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
       activeAbortControllerRef.current = null;
     }
     setIsScraping(false);
+    setIsExportingRaw(false);
     setScrapeProgress(null);
     setScrapePercentage(0);
     setSelectedNovel(null);
@@ -500,6 +502,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
 
+    setIsExportingRaw(false);
     setIsScraping(true);
     setScrapePercentage(5);
     setScrapeProgress("Preparing chapter download queue...");
@@ -612,6 +615,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
 
+    setIsExportingRaw(true);
     setIsScraping(true);
     setScrapePercentage(5);
     setScrapeProgress("Preparing raw text download...");
@@ -714,6 +718,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
       console.error("Raw TXT Export error:", err);
       setErrorMessage(err.message || "Failed to export raw text.");
     } finally {
+      setIsExportingRaw(false);
       setIsScraping(false);
       setScrapePercentage(0);
       activeAbortControllerRef.current = null;
@@ -1513,7 +1518,9 @@ export const StoreView: React.FC<StoreViewProps> = ({
                       />
                     </div>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
-                      Downloaded in fast parallel slices to guarantee zero gateway timeouts. Translation starts automatically as soon as downloads complete.
+                      {isExportingRaw
+                        ? "Downloading raw Chinese text directly to your device as a .txt file. No translation will be started."
+                        : "Downloaded in fast parallel slices to guarantee zero gateway timeouts. Translation starts automatically as soon as downloads complete."}
                     </p>
                   </div>
                 )}
@@ -1527,7 +1534,12 @@ export const StoreView: React.FC<StoreViewProps> = ({
                     disabled={isScraping}
                     className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 px-5 py-3 text-sm font-extrabold text-white shadow-md hover:shadow-purple-500/25 active:scale-98 transition cursor-pointer disabled:opacity-60"
                   >
-                    {isScraping ? (
+                    {isExportingRaw ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Exporting Raw Chinese Text ({scrapeElapsedSec}s)...</span>
+                      </>
+                    ) : isScraping ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
                         <span>Compiling & Starting Instant Translation ({scrapeElapsedSec}s)...</span>
@@ -1551,7 +1563,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
                           : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
                       }`}
                     >
-                      {isScraping ? "Cancel Import" : "Cancel"}
+                      {isExportingRaw ? "Cancel Export" : isScraping ? "Cancel Import" : "Cancel"}
                     </button>
 
                     <div className="flex items-center gap-2">

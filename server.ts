@@ -3013,6 +3013,37 @@ app.post("/api/cloud-job/resume", requireAuthMiddleware, (req, res) => {
   });
 });
 
+// Archive active cloud job (marks job complete/paused, saves to history list, detaches active session pointer to stop background worker)
+app.post("/api/cloud-job/archive", requireAuthMiddleware, (req, res) => {
+  const sessionId = getSessionId(req);
+  const targetJob = getJobForSession(req);
+  const fileName = req.body?.fileName || targetJob?.fileName;
+
+  if (targetJob) {
+    const isAllDone = targetJob.chunks.length > 0 && targetJob.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+    targetJob.status = isAllDone ? "completed" : "paused";
+    targetJob.lastActiveAt = Date.now();
+    for (const [sKey, j] of cloudJobs.entries()) {
+      if (isSameNovel(j.fileName, targetJob.fileName) || j.id === targetJob.id) {
+        j.status = targetJob.status;
+        j.lastActiveAt = targetJob.lastActiveAt;
+        saveJobToDisk(sKey, j, true);
+      }
+    }
+    console.log(`[Cloud Job] Archived novel "${targetJob.fileName}" (status: ${targetJob.status}). Stopped active worker loop.`);
+  }
+
+  // Remove active session binding so home tab starts fresh
+  cloudJobs.delete(sessionId);
+  cloudJobs.delete("legacy_default");
+
+  res.json({
+    success: true,
+    message: "Novel successfully archived in history and cloud storage.",
+    fileName,
+  });
+});
+
 // Rehydrate missing chunks from client (automatically restores pending chunks if a server restarted with partial state)
 app.post("/api/cloud-job/rehydrate-chunks", requireAuthMiddleware, (req, res) => {
   try {

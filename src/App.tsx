@@ -1066,6 +1066,7 @@ export default function App() {
 
   // Safely archive completed novel in history & library, then return to home upload screen to translate another novel
   const handleTranslateAnother = async () => {
+    const novelName = session?.fileName || serverCloudJob?.fileName;
     if (session) {
       try {
         await saveSessionToIdb(session);
@@ -1080,20 +1081,38 @@ export default function App() {
       } catch (e) {
         console.warn("Error saving session to library before translating another:", e);
       }
-      setToastData({
-        message: `"${session.fileName.replace(/\.txt$/i, "")}" is saved in History & Cloud Translations! Ready for your next novel.`,
-        type: "success",
-      });
     }
 
-    userHasResetRef.current = false;
+    try {
+      await fetch("/api/cloud-job/archive", {
+        method: "POST",
+        headers: {
+          ...getAuthHeaders(),
+          "Content-Type": "application/json",
+          ...(novelName ? { "x-novel-filename": encodeURIComponent(novelName) } : {}),
+        },
+        body: JSON.stringify({ fileName: novelName }),
+      });
+    } catch (e) {
+      console.warn("Error archiving cloud job on server:", e);
+    }
+
+    userHasResetRef.current = true;
     stopRequestedRef.current = true;
     setIsRunning(false);
     setIsPaused(false);
     setSession(null);
+    setServerCloudJob(null);
     chunksRef.current = [];
     localStorage.removeItem(STORAGE_KEY);
     setActiveNavTab("home");
+
+    setToastData({
+      message: novelName
+        ? `"${novelName.replace(/\.txt$/i, "")}" is saved in History & Cloud Translations! Ready for your next novel.`
+        : "Ready to translate another novel.",
+      type: "success",
+    });
   };
 
   // Reset workspace / permanently delete novel translation
