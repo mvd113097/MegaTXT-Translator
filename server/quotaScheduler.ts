@@ -79,6 +79,44 @@ export function extractRetryDelayMs(err: any): number | null {
 }
 
 /**
+ * Detects if an error is an upstream 503 spike or temporary model demand overload.
+ */
+export function is503OrHighDemand(error: any): boolean {
+  if (!error) return false;
+  const status = error?.status || error?.statusCode || error?.code;
+  if (status === 503 || status === 502) return true;
+
+  const errStr = String(error?.message || "").toLowerCase();
+  const details = typeof error?.details === "string" ? error.details.toLowerCase() : "";
+  const combined = `${errStr} ${details}`;
+
+  try {
+    if (typeof error?.message === "string" && error.message.trim().startsWith("{")) {
+      const parsed = JSON.parse(error.message);
+      if (parsed?.error?.code === 503 || parsed?.error?.status === "UNAVAILABLE") {
+        return true;
+      }
+    }
+  } catch {}
+
+  return (
+    combined.includes("503") ||
+    combined.includes("high demand") ||
+    combined.includes("model is overloaded") ||
+    combined.includes("the model is currently overloaded") ||
+    combined.includes("upstream model experiences temporary high demand") ||
+    combined.includes("overloaded") ||
+    combined.includes("service unavailable") ||
+    combined.includes("temporarily unavailable") ||
+    combined.includes("temporary high demand") ||
+    combined.includes("capacity exceeded") ||
+    combined.includes("server is busy") ||
+    combined.includes("unavailable") ||
+    combined.includes("backend error")
+  );
+}
+
+/**
  * Clean human-readable error formatter (avoids raw JSON or token dumps)
  */
 export function formatCleanErrorMessage(rawErr: any): string {
@@ -296,6 +334,23 @@ export class QuotaAwareKeyScheduler {
   }
 
   /**
+   * Checks if there are other active (non-disabled) projects available
+   * that are not in the excludeProjectIds set.
+   */
+  public hasOtherActiveProjects(excludeProjectIds: Set<string> = new Set()): boolean {
+    const enabled = Array.from(this.projects.values()).filter((p) => p.status !== "disabled");
+    return enabled.some((p) => !excludeProjectIds.has(p.id));
+  }
+
+  /**
+   * Returns the count of active (non-disabled) projects not currently excluded.
+   */
+  public getAvailableProjectsCount(excludeProjectIds: Set<string> = new Set()): number {
+    const enabled = Array.from(this.projects.values()).filter((p) => p.status !== "disabled");
+    return enabled.filter((p) => !excludeProjectIds.has(p.id)).length;
+  }
+
+  /**
    * Intelligent Quota-Aware Selection.
    * Selects an available project key that is NOT in cooldown, prioritizing least-recently-used
    * to balance load without assuming rigid quotas.
@@ -352,7 +407,7 @@ export class QuotaAwareKeyScheduler {
     // If all eligible projects were excluded in this turn, clear exclusion to prevent complete blockage
     const pool = eligibleProjects.length > 0 ? eligibleProjects : enabledProjects;
 
-    // 1. Prioritize completely idle ready projects (activeRequestCount === 0)
+    // 1. Prioritize completely idle ready projects (activeRequestCount === 0 and cooldown expired)
     const idleProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) === 0);
 
     if (idleProjects.length > 0) {
@@ -369,7 +424,24 @@ export class QuotaAwareKeyScheduler {
       return { project: selected, waitMs: 0 };
     }
 
-    // 2. If all projects are busy, allow a second concurrent slot (activeRequestCount < 2) to prevent serialization stalls
+    // 2. Instant Failover Priority: Select any non-rate-limited project (not 429) with activeRequestCount === 0.
+    // This allows instant failover during 503 spikes without stalling the queue on brief transient cooldowns!
+    const nonRateLimitedIdle = pool.filter(
+      (p) => p.status !== "rate_limited" && (p.activeRequestCount || 0) === 0
+    );
+    if (nonRateLimitedIdle.length > 0) {
+      nonRateLimitedIdle.sort((a, b) => {
+        if (a.consecutiveErrors !== b.consecutiveErrors) {
+          return a.consecutiveErrors - b.consecutiveErrors;
+        }
+        return a.lastUsedAt - b.lastUsedAt;
+      });
+      const selected = nonRateLimitedIdle[0];
+      this.lastSelectedProjectId = selected.id;
+      return { project: selected, waitMs: 0 };
+    }
+
+    // 3. If all projects are busy, allow a second concurrent slot (activeRequestCount < 2) to prevent serialization stalls
     const lightlyLoadedProjects = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) < 2);
     if (lightlyLoadedProjects.length > 0) {
       lightlyLoadedProjects.sort((a, b) => {
@@ -383,7 +455,18 @@ export class QuotaAwareKeyScheduler {
       return { project: selected, waitMs: 0 };
     }
 
-    // 3. If projects are ready but currently at max capacity (activeRequestCount >= 2), wait briefly for an in-flight request to release key
+    // 4. Any non-rate-limited project with activeRequestCount < 2 (bypasses 503 transient cooldowns)
+    const nonRateLimitedLight = pool.filter(
+      (p) => p.status !== "rate_limited" && (p.activeRequestCount || 0) < 2
+    );
+    if (nonRateLimitedLight.length > 0) {
+      nonRateLimitedLight.sort((a, b) => (a.activeRequestCount || 0) - (b.activeRequestCount || 0));
+      const selected = nonRateLimitedLight[0];
+      this.lastSelectedProjectId = selected.id;
+      return { project: selected, waitMs: 0 };
+    }
+
+    // 5. If projects are ready but currently at max capacity (activeRequestCount >= 2), wait briefly for an in-flight request to release key
     const readyButBusy = pool.filter((p) => now >= p.cooldownUntil && (p.activeRequestCount || 0) >= 2);
     if (readyButBusy.length > 0) {
       readyButBusy.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
@@ -392,7 +475,7 @@ export class QuotaAwareKeyScheduler {
       return { project: busiest, waitMs: 150 };
     }
 
-    // 3. All active projects are currently in cooldown. Pick the one that will be ready soonest.
+    // 6. All active projects are currently in true rate limit cooldown. Pick the one that will be ready soonest.
     pool.sort((a, b) => a.cooldownUntil - b.cooldownUntil);
     const soonest = pool[0] || enabledProjects[0];
     const waitMs = Math.max(0, soonest.cooldownUntil - now);
@@ -413,6 +496,39 @@ export class QuotaAwareKeyScheduler {
     p.lastUsedAt = Date.now();
     p.cooldownUntil = 0;
     p.status = "available";
+  }
+
+  /**
+   * Records an upstream temporary high demand spike (503 Service Unavailable / Overloaded).
+   * Implements instant multi-project failover dynamics:
+   * - Increments total503Count and consecutive errors.
+   * - Sets a tiny micro-cooldown (500ms) only so sibling active projects take immediate precedence.
+   * - Returns delayMs: 0 and canInstantFailover so the scheduler immediately routes to other projects without stalling the queue.
+   */
+  public record503Spike(
+    projectId: string,
+    error?: any
+  ): { delayMs: number; canInstantFailover: boolean } {
+    const p = this.projects.get(projectId);
+    if (!p) {
+      return { delayMs: 0, canInstantFailover: false };
+    }
+
+    p.total503Count++;
+    p.consecutiveErrors++;
+    p.lastError = error ? formatCleanErrorMessage(error) : "Temporary high demand (503 spike)";
+    p.lastErrorAt = Date.now();
+    p.status = "cooling_down";
+    // Short micro-cooldown (500ms) to prioritize sibling active projects without stalling queue
+    p.cooldownUntil = Date.now() + 500;
+
+    const canInstantFailover = this.enabledProjectCount > 1;
+
+    console.warn(
+      `[Quota Scheduler] 503 Spike recorded on ${p.name} (${p.keyMask}). Total 503 spikes: ${p.total503Count}. Failover available: ${canInstantFailover}.`
+    );
+
+    return { delayMs: 0, canInstantFailover };
   }
 
   /**
@@ -464,7 +580,10 @@ export class QuotaAwareKeyScheduler {
           !errStr.includes("exceeded") &&
           !errStr.includes("resource")));
 
+    const is503 = is503OrHighDemand(error);
+
     const isTemporary =
+      is503 ||
       error?.status === 503 ||
       error?.status === 500 ||
       errStr.includes("503") ||
@@ -502,19 +621,28 @@ export class QuotaAwareKeyScheduler {
           delayMs / 1000
         )}s. Rotating to next project...`
       );
+    } else if (is503) {
+      p.total503Count++;
+      // Instant multi-project failover: do not stall with long cooldowns
+      delayMs = 0;
+      p.status = "cooling_down";
+      p.cooldownUntil = Date.now() + 500;
+
+      console.warn(
+        `[Quota Scheduler] ${p.name} (${p.keyMask}) temporary high demand spike (503). Micro-cooldown: 500ms. Instant routing enabled.`
+      );
     } else if (isTemporary) {
       p.total503Count++;
-      // Transient model overload shouldn't lock out the project key for long; model-level cooldown handles model switching
-      delayMs = 2000;
+      delayMs = 1000;
       p.status = "cooling_down";
       p.cooldownUntil = Date.now() + delayMs;
 
       console.warn(
-        `[Quota Scheduler] ${p.name} (${p.keyMask}) temporary server error (503/500). Short project cooldown: 2s.`
+        `[Quota Scheduler] ${p.name} (${p.keyMask}) temporary server error (500/transient). Cooldown: 1s.`
       );
     } else {
       // General error (e.g. invalid arguments or bad request)
-      delayMs = 3000;
+      delayMs = 2000;
       p.cooldownUntil = Date.now() + delayMs;
     }
 
@@ -573,14 +701,18 @@ export class QuotaAwareKeyScheduler {
     availableCount: number;
     coolingDownCount: number;
     nextAvailableInSeconds: number;
+    total503Spikes: number;
+    instantFailoverAvailable: boolean;
   } {
     const now = Date.now();
     let availableCount = 0;
     let coolingDownCount = 0;
     let minWaitMs = Infinity;
+    let total503Spikes = 0;
 
     for (const p of this.projects.values()) {
       if (p.status === "disabled") continue;
+      total503Spikes += p.total503Count || 0;
       if (p.cooldownUntil <= now) {
         availableCount++;
       } else {
@@ -605,6 +737,8 @@ export class QuotaAwareKeyScheduler {
       availableCount,
       coolingDownCount,
       nextAvailableInSeconds,
+      total503Spikes,
+      instantFailoverAvailable: this.enabledProjectCount > 1,
     };
   }
 }

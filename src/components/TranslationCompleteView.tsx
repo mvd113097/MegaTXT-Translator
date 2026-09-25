@@ -26,6 +26,7 @@ interface TranslationCompleteViewProps {
   onDownloadProgress: (format?: "epub" | "txt") => void | Promise<void>;
   onOpenExport: () => void;
   onReset: () => void;
+  onTranslateAnother?: () => void;
   onSyncProgress?: () => void;
   isSyncing?: boolean;
   onOpenReader?: () => void;
@@ -52,6 +53,7 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
   onDownloadProgress,
   onOpenExport,
   onReset,
+  onTranslateAnother,
   onSyncProgress,
   isSyncing = false,
   onOpenReader,
@@ -273,16 +275,16 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
         <StoryVignetteIllustration className="my-1" />
       </div>
 
-      {/* 6. Bottom Action Button (Delete Translation / Start Another) */}
+      {/* 6. Bottom Action Button (Translate Another Novel) */}
       <div className="pt-1">
         <button
-          id="complete-screen-reset-btn"
+          id="complete-screen-translate-another-btn"
           type="button"
-          onClick={onReset}
-          className="w-full flex items-center justify-center gap-2 rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/70 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-950/60 py-3 px-4 text-xs font-bold text-rose-700 dark:text-rose-300 active:scale-98 transition cursor-pointer"
+          onClick={onTranslateAnother || onReset}
+          className="w-full flex items-center justify-center gap-2.5 rounded-2xl border border-purple-200 dark:border-purple-800/80 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 py-3.5 px-5 text-sm font-extrabold text-white shadow-md hover:shadow-purple-500/25 active:scale-98 transition cursor-pointer"
         >
-          <Trash2 className="h-4 w-4" />
-          <span>Delete Translation / Translate Another Novel</span>
+          <BookOpen className="h-4 w-4" />
+          <span>Translate Another Book</span>
         </button>
       </div>
     </div>

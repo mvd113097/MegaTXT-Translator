@@ -492,6 +492,13 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
   const sleepTimerIdRef = useRef<any>(null);
   const pendingTtsStartRef = useRef(false);
   const ttsSessionIdRef = useRef<number>(0);
+  const currentChapterIndexRef = useRef<number>(initialChapterIndex || 1);
+  const ttsChapterIndexRef = useRef<number>(initialChapterIndex || 1);
+
+  // Keep refs synchronized with active current chapter
+  useEffect(() => {
+    currentChapterIndexRef.current = currentChapterIndex;
+  }, [currentChapterIndex]);
 
   // Draggable Floating Button Position State
   // Default: bottom: 92px (comfortably above bottom navigation bar's 64px), right: 16px
@@ -1187,6 +1194,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
   const loadChapter = useCallback(
     async (targetIndex: number, forceNetwork = false) => {
       if (targetIndex < 1) return;
+      currentChapterIndexRef.current = targetIndex;
+      ttsChapterIndexRef.current = targetIndex;
       setIsLoadingChapter(true);
       setChapterError(null);
       setIsDataSavedFromCache(false);
@@ -1291,6 +1300,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
           // If raw Chinese text is present in sessionChunk even if translation is still pending
           if (sessionChunk.chineseText && sessionChunk.chineseText.trim().length > 0) {
+            currentChapterIndexRef.current = targetIndex;
+            ttsChapterIndexRef.current = targetIndex;
             setCurrentChapterIndex(targetIndex);
             setChapterTitle(title);
             setChapterTitleZh(sessionChunk.chapterTitle || title);
@@ -1301,6 +1312,18 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
             onUpdateChapterIndex?.(targetIndex, title, chapterList, sessionChunk.chineseText, sessionChunk.englishText || "");
             if (readerBodyRef.current) {
               readerBodyRef.current.scrollTo({ top: 0, behavior: "instant" });
+            }
+            if (pendingTtsStartRef.current) {
+              pendingTtsStartRef.current = false;
+              const newParas = cleanReaderParagraphs(
+                prefs.bilingualMode === "chinese"
+                  ? sessionChunk.chineseText
+                  : (sessionChunk.englishText || sessionChunk.chineseText)
+              );
+              ttsParagraphsRef.current = newParas;
+              setIsTtsPlaying(true);
+              setIsTtsPaused(false);
+              setTimeout(() => speakParagraphAtIndexRef.current(0), 120);
             }
             return;
           }
@@ -1844,12 +1867,21 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
       if (activeIdx !== currentChapterIndex && activeIdx > 0) {
         setCurrentChapterIndex(activeIdx);
+        currentChapterIndexRef.current = activeIdx;
         const matched = flowingChapters.find((c) => c.index === activeIdx);
         if (matched) {
           setChapterTitle(matched.title);
           setChapterTitleZh(matched.titleZh || matched.title);
           setChapterTitleEn(matched.titleEn || matched.title);
           onUpdateChapterIndex?.(activeIdx, matched.title, chapterList);
+          // If TTS is not actively playing another chapter, keep ttsChapterIndexRef in sync with visible chapter
+          if (!isTtsPlaying || isTtsPaused) {
+            ttsChapterIndexRef.current = activeIdx;
+            const flowParas = prefs.bilingualMode === "chinese"
+              ? matched.chineseParagraphs
+              : (matched.englishParagraphs?.length ? matched.englishParagraphs : matched.chineseParagraphs);
+            ttsParagraphsRef.current = flowParas;
+          }
         }
       }
     }
@@ -1968,7 +2000,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
       utterance.onend = () => {
         if (sessionId !== ttsSessionIdRef.current) return;
-        speakParagraphAtIndex(index + 1);
+        speakParagraphAtIndexRef.current(index + 1);
       };
 
       utterance.onerror = (e) => {
@@ -1976,7 +2008,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         if (e.error !== "interrupted" && e.error !== "canceled") {
           console.warn("Browser Speech Synthesis Error:", e.error);
           // Advance gracefully to next paragraph if a paragraph fails
-          speakParagraphAtIndex(index + 1);
+          speakParagraphAtIndexRef.current(index + 1);
         }
       };
 
@@ -1995,7 +2027,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         window.speechSynthesis.speak(utterance);
       } catch (err) {
         console.warn("Direct speech synthesis speak error:", err);
-        speakParagraphAtIndex(index + 1);
+        speakParagraphAtIndexRef.current(index + 1);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2008,7 +2040,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
       if (chunkIdx >= chunks.length) {
         // Entire paragraph finished, advance to next paragraph seamlessly
-        speakParagraphAtIndex(paragraphIdx + 1);
+        speakParagraphAtIndexRef.current(paragraphIdx + 1);
         return;
       }
 
@@ -2042,7 +2074,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
             }
             ut.onend = () => {
               if (sessionId === ttsSessionIdRef.current) {
-                speakParagraphAtIndex(paragraphIdx + 1);
+                speakParagraphAtIndexRef.current(paragraphIdx + 1);
               }
             };
             window.speechSynthesis.speak(ut);
@@ -2077,6 +2109,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         return;
       }
 
+      const activeChapter = ttsChapterIndexRef.current || currentChapterIndexRef.current || currentChapterIndex || 1;
+
       if (index < 0 || index >= paragraphs.length) {
         // Reached end of current chapter
         if (sleepTimerMinutes === "end-of-chapter") {
@@ -2086,15 +2120,37 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         }
 
         // Auto-advance to next chapter smoothly without stopping (even if infinite page is off)
-        const nextIndex = currentChapterIndex + 1;
+        const nextIndex = activeChapter + 1;
         const maxChapters = chapterList.length || totalChapters;
         if (nextIndex <= maxChapters) {
+          // If flowing chapters continuous mode is active and next chapter is already loaded in DOM:
+          const existingNextFlowCh = flowingChapters.find((c) => c.index === nextIndex);
+          if (prefs.scrollMode === "continuous" && existingNextFlowCh) {
+            ttsChapterIndexRef.current = nextIndex;
+            currentChapterIndexRef.current = nextIndex;
+            setCurrentChapterIndex(nextIndex);
+            setChapterTitle(existingNextFlowCh.title);
+            setChapterTitleZh(existingNextFlowCh.titleZh || existingNextFlowCh.title);
+            setChapterTitleEn(existingNextFlowCh.titleEn || existingNextFlowCh.title);
+            onUpdateChapterIndex?.(nextIndex, existingNextFlowCh.title, chapterList);
+            const nextParas = prefs.bilingualMode === "chinese"
+              ? existingNextFlowCh.chineseParagraphs
+              : (existingNextFlowCh.englishParagraphs?.length ? existingNextFlowCh.englishParagraphs : existingNextFlowCh.chineseParagraphs);
+            ttsParagraphsRef.current = nextParas;
+            setTtsFeedbackMessage(`Chapter ${activeChapter} complete · Flowing Chapter ${nextIndex}...`);
+            setTimeout(() => setTtsFeedbackMessage(null), 3000);
+            speakParagraphAtIndexRef.current(0);
+            return;
+          }
+
           pendingTtsStartRef.current = true;
           setIsTtsPlaying(true);
           setIsTtsPaused(false);
           setActiveParagraphIndex(-1);
           activeParagraphIndexRef.current = -1;
-          setTtsFeedbackMessage(`Chapter ${currentChapterIndex} complete · Flowing Chapter ${nextIndex}...`);
+          ttsChapterIndexRef.current = nextIndex;
+          currentChapterIndexRef.current = nextIndex;
+          setTtsFeedbackMessage(`Chapter ${activeChapter} complete · Flowing Chapter ${nextIndex}...`);
           setTimeout(() => setTtsFeedbackMessage(null), 3500);
           loadChapter(nextIndex);
           return;
@@ -2109,6 +2165,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
       // OPTIMIZATION: Read directly from what is visually rendered on screen.
       // This allows instant TTS support for browser-translated pages (Chrome, Edge, Safari, Soul Browser, etc.)
       const renderedEl =
+        document.getElementById(`reader-ch-${activeChapter}-para-${index}`) ||
         document.getElementById(`reader-paragraph-${index}`) ||
         document.getElementById(`reader-ch-${currentChapterIndex}-para-${index}`);
       if (renderedEl) {
@@ -2132,7 +2189,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
       if (!text) {
         // Skip empty whitespace paragraphs
-        speakParagraphAtIndex(index + 1);
+        speakParagraphAtIndexRef.current(index + 1);
         return;
       }
 
@@ -2145,6 +2202,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
       // 2. Smoothly scroll highlighted paragraph into center view (non-blocking)
       requestAnimationFrame(() => {
         const el =
+          document.getElementById(`reader-ch-${activeChapter}-para-${index}`) ||
           document.getElementById(`reader-paragraph-${index}`) ||
           document.getElementById(`reader-ch-${currentChapterIndex}-para-${index}`);
         if (el && readerBodyRef.current) {
@@ -2194,7 +2252,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
         if (currentIndex < 0 || currentIndex >= currentList.length) {
           currentIndex = 0;
         }
-        speakParagraphAtIndex(currentIndex);
+        speakParagraphAtIndexRef.current(currentIndex);
       } else {
         // Pause instantly without altering voice engine or state
         setIsTtsPaused(true);
@@ -2215,7 +2273,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
       if (startIndex < 0 || startIndex >= currentList.length) {
         startIndex = 0;
       }
-      speakParagraphAtIndex(startIndex);
+      ttsChapterIndexRef.current = currentChapterIndexRef.current || currentChapterIndex;
+      speakParagraphAtIndexRef.current(startIndex);
     }
   };
 
@@ -2223,13 +2282,14 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
   const handleSkipParagraph = (direction: -1 | 1) => {
     const current = activeParagraphIndexRef.current >= 0 ? activeParagraphIndexRef.current : 0;
     const next = current + direction;
-    const max = displayParagraphs.length;
+    const currentList = ttsParagraphsRef.current.length > 0 ? ttsParagraphsRef.current : displayParagraphs;
+    const max = currentList.length;
     if (next >= 0 && next < max) {
-      speakParagraphAtIndex(next);
+      speakParagraphAtIndexRef.current(next);
     } else if (next >= max) {
       // Advance to next chapter
       handleSkipChapter(1);
-    } else if (next < 0 && currentChapterIndex > 1) {
+    } else if (next < 0 && (ttsChapterIndexRef.current || currentChapterIndex) > 1) {
       // Skip back to previous chapter
       handleSkipChapter(-1);
     }
@@ -2237,7 +2297,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
 
   // Instant Skip Chapter Handler
   const handleSkipChapter = (direction: -1 | 1) => {
-    const target = currentChapterIndex + direction;
+    const active = ttsChapterIndexRef.current || currentChapterIndexRef.current || currentChapterIndex;
+    const target = active + direction;
     const maxChapters = chapterList.length || totalChapters;
     if (target >= 1 && target <= maxChapters) {
       loadChapter(target);
@@ -2909,7 +2970,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                         onClick={() => {
                           updatePrefs({ ttsEngine: "browser-native" });
                           if (isTtsPlaying && activeParagraphIndexRef.current >= 0) {
-                            speakParagraphAtIndex(activeParagraphIndexRef.current);
+                            speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                           }
                         }}
                         className={`p-3 rounded-xl border text-left cursor-pointer transition ${
@@ -2932,7 +2993,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                         onClick={() => {
                           updatePrefs({ ttsEngine: "google-classic" });
                           if (isTtsPlaying && activeParagraphIndexRef.current >= 0) {
-                            speakParagraphAtIndex(activeParagraphIndexRef.current);
+                            speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                           }
                         }}
                         className={`p-3 rounded-xl border text-left cursor-pointer transition ${
@@ -2998,7 +3059,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             if (v) {
                               setChosenVoice(v);
                               if (isTtsPlaying && activeParagraphIndexRef.current >= 0) {
-                                speakParagraphAtIndex(activeParagraphIndexRef.current);
+                                speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                               }
                             }
                           }}
@@ -3068,7 +3129,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             const val = e.target.value;
                             updatePrefs({ cloudVoiceLang: val });
                             if (isTtsPlaying && activeParagraphIndexRef.current >= 0) {
-                              speakParagraphAtIndex(activeParagraphIndexRef.current);
+                              speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                             }
                           }}
                           className={`w-full rounded-lg ${themeClasses.buttonBg} px-2.5 py-2 font-semibold text-xs focus:outline-none truncate border ${themeClasses.border}`}
@@ -3115,7 +3176,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             updatePrefs({ ttsRate: newRate });
                             if (audioPlayerRef.current) audioPlayerRef.current.playbackRate = newRate;
                             if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                              speakParagraphAtIndex(activeParagraphIndexRef.current);
+                              speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                             }
                           }}
                           className={`px-2 py-0.5 rounded ${themeClasses.buttonBg} hover:bg-purple-500/20 active:scale-95 font-mono font-bold text-[11px] cursor-pointer`}
@@ -3133,7 +3194,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             updatePrefs({ ttsRate: newRate });
                             if (audioPlayerRef.current) audioPlayerRef.current.playbackRate = newRate;
                             if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                              speakParagraphAtIndex(activeParagraphIndexRef.current);
+                              speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                             }
                           }}
                           className={`px-2 py-0.5 rounded ${themeClasses.buttonBg} hover:bg-purple-500/20 active:scale-95 font-mono font-bold text-[11px] cursor-pointer`}
@@ -3156,7 +3217,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                               updatePrefs({ ttsRate: rate });
                               if (audioPlayerRef.current) audioPlayerRef.current.playbackRate = rate;
                               if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                                speakParagraphAtIndex(activeParagraphIndexRef.current);
+                                speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                               }
                             }}
                             className={`px-2.5 py-1 rounded-lg text-xs font-bold font-mono transition cursor-pointer active:scale-95 ${
@@ -3184,7 +3245,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                           updatePrefs({ ttsRate: newRate });
                           if (audioPlayerRef.current) audioPlayerRef.current.playbackRate = newRate;
                           if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                            speakParagraphAtIndex(activeParagraphIndexRef.current);
+                            speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                           }
                         }}
                         className="w-full accent-purple-600 cursor-pointer"
@@ -3213,7 +3274,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             const newPitch = Math.max(0.5, Math.round(((prefs.ttsPitch || 1.0) - 0.05) * 100) / 100);
                             updatePrefs({ ttsPitch: newPitch });
                             if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                              speakParagraphAtIndex(activeParagraphIndexRef.current);
+                              speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                             }
                           }}
                           className={`px-2 py-0.5 rounded ${themeClasses.buttonBg} hover:bg-purple-500/20 active:scale-95 font-mono font-bold text-[11px] cursor-pointer`}
@@ -3230,7 +3291,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             const newPitch = Math.min(1.6, Math.round(((prefs.ttsPitch || 1.0) + 0.05) * 100) / 100);
                             updatePrefs({ ttsPitch: newPitch });
                             if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                              speakParagraphAtIndex(activeParagraphIndexRef.current);
+                              speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                             }
                           }}
                           className={`px-2 py-0.5 rounded ${themeClasses.buttonBg} hover:bg-purple-500/20 active:scale-95 font-mono font-bold text-[11px] cursor-pointer`}
@@ -3258,7 +3319,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             onClick={() => {
                               updatePrefs({ ttsPitch: item.val });
                               if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                                speakParagraphAtIndex(activeParagraphIndexRef.current);
+                                speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                               }
                             }}
                             className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer active:scale-95 ${
@@ -3285,7 +3346,7 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                           const newPitch = parseFloat(e.target.value);
                           updatePrefs({ ttsPitch: newPitch });
                           if (isTtsPlaying && activeParagraphIndexRef.current >= 0 && prefs.ttsEngine === "browser-native") {
-                            speakParagraphAtIndex(activeParagraphIndexRef.current);
+                            speakParagraphAtIndexRef.current(activeParagraphIndexRef.current);
                           }
                         }}
                         className="w-full accent-purple-600 cursor-pointer"
@@ -3721,10 +3782,17 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                                     onClick={() => {
                                       if (flowCh.index !== currentChapterIndex) {
                                         setCurrentChapterIndex(flowCh.index);
+                                        currentChapterIndexRef.current = flowCh.index;
                                         setChapterTitle(flowCh.title);
                                         onUpdateChapterIndex?.(flowCh.index, flowCh.title, chapterList);
                                       }
-                                      speakParagraphAtIndex(idx);
+                                      ttsChapterIndexRef.current = flowCh.index;
+                                      currentChapterIndexRef.current = flowCh.index;
+                                      const flowParas = prefs.bilingualMode === "chinese"
+                                        ? flowCh.chineseParagraphs
+                                        : (flowCh.englishParagraphs?.length ? flowCh.englishParagraphs : flowCh.chineseParagraphs);
+                                      ttsParagraphsRef.current = flowParas;
+                                      speakParagraphAtIndexRef.current(idx);
                                     }}
                                     className={`p-3 rounded-xl transition cursor-pointer ${
                                       isHighlighted ? themeClasses.activeParagraph : "bg-black/5 dark:bg-white/5"
@@ -3756,10 +3824,17 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                                     onClick={() => {
                                       if (flowCh.index !== currentChapterIndex) {
                                         setCurrentChapterIndex(flowCh.index);
+                                        currentChapterIndexRef.current = flowCh.index;
                                         setChapterTitle(flowCh.title);
                                         onUpdateChapterIndex?.(flowCh.index, flowCh.title, chapterList);
                                       }
-                                      speakParagraphAtIndex(pIdx);
+                                      ttsChapterIndexRef.current = flowCh.index;
+                                      currentChapterIndexRef.current = flowCh.index;
+                                      const flowParas = prefs.bilingualMode === "chinese"
+                                        ? flowCh.chineseParagraphs
+                                        : (flowCh.englishParagraphs?.length ? flowCh.englishParagraphs : flowCh.chineseParagraphs);
+                                      ttsParagraphsRef.current = flowParas;
+                                      speakParagraphAtIndexRef.current(pIdx);
                                     }}
                                     style={{ fontSize: `${prefs.fontSize}px` }}
                                     className={`transition-all duration-150 cursor-pointer rounded-xl p-2 sm:p-2.5 select-text ${
@@ -3969,7 +4044,11 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             <div
                               key={idx}
                               id={`reader-paragraph-${idx}`}
-                              onClick={() => speakParagraphAtIndex(idx)}
+                              onClick={() => {
+                                ttsChapterIndexRef.current = currentChapterIndexRef.current || currentChapterIndex;
+                                ttsParagraphsRef.current = displayParagraphs;
+                                speakParagraphAtIndexRef.current(idx);
+                              }}
                               className={`p-3 rounded-xl transition cursor-pointer ${
                                 isHighlighted ? themeClasses.activeParagraph : "bg-black/5 dark:bg-white/5"
                               } space-y-1.5 mb-2.5`}
@@ -3995,7 +4074,11 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                             <p
                               key={pIdx}
                               id={`reader-paragraph-${pIdx}`}
-                              onClick={() => speakParagraphAtIndex(pIdx)}
+                              onClick={() => {
+                                ttsChapterIndexRef.current = currentChapterIndexRef.current || currentChapterIndex;
+                                ttsParagraphsRef.current = displayParagraphs;
+                                speakParagraphAtIndexRef.current(pIdx);
+                              }}
                               style={{ fontSize: `${prefs.fontSize}px` }}
                               className={`transition-all duration-150 cursor-pointer rounded-xl p-2 sm:p-2.5 select-text ${
                                 isHighlighted
@@ -4129,7 +4212,8 @@ export const NovelReaderModal: React.FC<NovelReaderModalProps> = ({
                 type="button"
                 onClick={guardUnminimizeClick(() => {
                   const startIndex = activeParagraphIndexRef.current >= 0 ? activeParagraphIndexRef.current : 0;
-                  speakParagraphAtIndex(startIndex);
+                  ttsChapterIndexRef.current = currentChapterIndexRef.current || currentChapterIndex;
+                  speakParagraphAtIndexRef.current(startIndex);
                 })}
                 className="flex flex-col items-center justify-center w-full h-full text-purple-600 dark:text-purple-400 hover:bg-purple-500/10 active:bg-purple-500/20 transition-colors cursor-pointer select-none group"
                 title="Start Text-to-Speech (TTS)"

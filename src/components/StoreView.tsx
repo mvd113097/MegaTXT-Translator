@@ -21,6 +21,7 @@ import {
   Languages,
 } from "lucide-react";
 import { cleanAuthorName, cleanSummaryText } from "../utils/storeFormatters";
+import { downloadFile } from "../utils/fileDownloader";
 
 export interface StoreSearchResult {
   id: string;
@@ -526,10 +527,10 @@ export const StoreView: React.FC<StoreViewProps> = ({
         let sliceSuccess = false;
         let lastSliceErr: any = null;
 
-        for (let attempt = 0; attempt < 2; attempt++) {
+        for (let attempt = 0; attempt < 3; attempt++) {
           try {
             if (attempt > 0) {
-              await new Promise((r) => setTimeout(r, 400));
+              await new Promise((r) => setTimeout(r, (attempt + 1) * 800));
             }
             const res = await fetch("/api/store/import-novel", {
               method: "POST",
@@ -539,6 +540,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
                 novelUrl: selectedNovel.novelUrl,
                 siteId: selectedNovel.siteId,
                 title: selectedNovel.title,
+                author: selectedNovel.author,
                 startChapter: currentSlice.start,
                 endChapter: currentSlice.end,
                 chapters: selectedNovel.chapters,
@@ -550,7 +552,13 @@ export const StoreView: React.FC<StoreViewProps> = ({
             }
 
             const data = await res.json();
+            const hasFailure = (data.failedChaptersCount && data.failedChaptersCount > 0) || (data.rawText && data.rawText.includes("[Content from this chapter could not be retrieved"));
+
             if (data.rawText && data.rawText.trim()) {
+              if (hasFailure && attempt < 2) {
+                console.warn(`[Store Import] Slice ${currentSlice.start}-${currentSlice.end} had incomplete chapters. Retrying attempt ${attempt + 2}...`);
+                continue;
+              }
               collectedTexts.push(data.rawText.trim());
               sliceSuccess = true;
               break;
@@ -587,6 +595,124 @@ export const StoreView: React.FC<StoreViewProps> = ({
       }
       console.error("Import error:", err);
       setErrorMessage(err.message || "Failed to import novel chapters.");
+    } finally {
+      setIsScraping(false);
+      setScrapePercentage(0);
+      activeAbortControllerRef.current = null;
+    }
+  };
+
+  // Export raw Chinese TXT file directly for offline reading without putting into translator
+  const handleExportRawTxt = async () => {
+    if (!selectedNovel) return;
+
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    activeAbortControllerRef.current = controller;
+
+    setIsScraping(true);
+    setScrapePercentage(5);
+    setScrapeProgress("Preparing raw text download...");
+
+    try {
+      const CHUNK_SIZE = 15;
+      const slices: { start: number; end: number }[] = [];
+      for (let s = startChapter; s <= endChapter; s += CHUNK_SIZE) {
+        slices.push({
+          start: s,
+          end: Math.min(endChapter, s + CHUNK_SIZE - 1),
+        });
+      }
+
+      const collectedTexts: string[] = [];
+
+      for (let i = 0; i < slices.length; i++) {
+        const currentSlice = slices[i];
+        const percent = Math.max(5, Math.round((i / slices.length) * 100));
+        setScrapePercentage(percent);
+        setScrapeProgress(
+          `Fetching raw Chinese chapters ${currentSlice.start}–${currentSlice.end} of ${endChapter} (${percent}%)...`
+        );
+
+        let sliceSuccess = false;
+        let lastSliceErr: any = null;
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (attempt > 0) {
+              await new Promise((r) => setTimeout(r, (attempt + 1) * 800));
+            }
+            const res = await fetch("/api/store/import-novel", {
+              method: "POST",
+              headers: getAuthHeaders(),
+              signal: controller.signal,
+              body: JSON.stringify({
+                novelUrl: selectedNovel.novelUrl,
+                siteId: selectedNovel.siteId,
+                title: selectedNovel.title,
+                author: selectedNovel.author,
+                startChapter: currentSlice.start,
+                endChapter: currentSlice.end,
+                chapters: selectedNovel.chapters,
+              }),
+            });
+
+            if (!res.ok) {
+              throw new Error(`Batch failed with status ${res.status}`);
+            }
+
+            const data = await res.json();
+            const hasFailure =
+              (data.failedChaptersCount && data.failedChaptersCount > 0) ||
+              (data.rawText && data.rawText.includes("[Content from this chapter could not be retrieved"));
+
+            if (data.rawText && data.rawText.trim()) {
+              if (hasFailure && attempt < 2) {
+                console.warn(
+                  `[Raw TXT Export] Slice ${currentSlice.start}-${currentSlice.end} had incomplete chapters. Retrying attempt ${attempt + 2}...`
+                );
+                continue;
+              }
+              collectedTexts.push(data.rawText.trim());
+              sliceSuccess = true;
+              break;
+            } else {
+              throw new Error("Empty batch text received.");
+            }
+          } catch (err: any) {
+            lastSliceErr = err;
+            if (err?.name === "AbortError") throw err;
+          }
+        }
+
+        if (!sliceSuccess) {
+          console.warn(`Could not export batch ${currentSlice.start}-${currentSlice.end}:`, lastSliceErr?.message);
+        }
+      }
+
+      setScrapePercentage(100);
+
+      if (collectedTexts.length === 0) {
+        throw new Error(
+          "No readable chapters could be retrieved from this source. The site may be rate-limiting. Try selecting fewer chapters."
+        );
+      }
+
+      const fullRawText = collectedTexts.join("\n\n\n");
+      const downloadFileName = `${selectedNovel.title}_Ch${startChapter}_to_${endChapter}_Raw_ZH.txt`;
+
+      await downloadFile(fullRawText, downloadFileName, "text/plain;charset=utf-8");
+
+      setSelectedNovel(null);
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        console.log("Export process aborted by user.");
+        return;
+      }
+      console.error("Raw TXT Export error:", err);
+      setErrorMessage(err.message || "Failed to export raw text.");
     } finally {
       setIsScraping(false);
       setScrapePercentage(0);
@@ -1459,12 +1585,12 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => handleStartImport(false)}
+                        onClick={handleExportRawTxt}
                         disabled={isScraping}
                         className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/60 px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer disabled:opacity-50 shadow-2xs"
                       >
                         <Download className="h-3.5 w-3.5" />
-                        <span>Import Raw Text</span>
+                        <span>Export Raw TXT</span>
                       </button>
                     </div>
                   </div>

@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { quotaScheduler, formatCleanErrorMessage } from "./server/quotaScheduler";
+import { quotaScheduler, formatCleanErrorMessage, is503OrHighDemand } from "./server/quotaScheduler";
 import { parseAndValidateBatchResponse, groupChunksIntoBatches, MAX_BATCH_CHAR_BUDGET } from "./server/batchParser";
 import { sendTelegramNotification as rawSendTelegramNotification } from "./server/telegram";
 import { searchStoreNovels, fetchNovelTOC, fetchChapterText, scrapeExploreNovels, findNovelMirrors, enrichAiquNovelItems, enrichJjwxcNovelItems, fetchNovelFullIntro } from "./server/storeScraper";
@@ -280,7 +280,7 @@ async function generateWithQuotaScheduler(
         projectWaitMs / 1000
       )}s. Waiting...`
     );
-    await new Promise((resolve) => setTimeout(resolve, Math.min(projectWaitMs, 30000)));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(projectWaitMs, 1000)));
   }
 
   // 2. Select available model from pool
@@ -291,13 +291,20 @@ async function generateWithQuotaScheduler(
         modelSelection.waitMs / 1000
       )}s before querying ${modelSelection.modelName}...`
     );
-    await new Promise((resolve) => setTimeout(resolve, Math.min(modelSelection.waitMs, 30000)));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(modelSelection.waitMs, 300)));
   }
 
   const modelName = modelSelection.modelName;
   const currentModelIdx = modelSelection.index;
 
   quotaScheduler.acquireProject(project.id);
+  let projectReleased = false;
+  const releaseCurrentProject = () => {
+    if (!projectReleased) {
+      quotaScheduler.releaseProject(project.id);
+      projectReleased = true;
+    }
+  };
 
   try {
     const generatePromise = project.client.models.generateContent({
@@ -358,6 +365,7 @@ async function generateWithQuotaScheduler(
       excludeProjectIds.add(project.id);
 
       if (quotaScheduler.enabledProjectCount > 0 && retries > 0) {
+        releaseCurrentProject();
         const nextExclude = new Set(excludeProjectIds);
         if (nextExclude.size >= quotaScheduler.enabledProjectCount) {
           nextExclude.clear();
@@ -367,7 +375,7 @@ async function generateWithQuotaScheduler(
           systemInstruction,
           (currentModelIdx + 1) % FREE_TIER_MODELS.length,
           retries - 1,
-          currentDelay,
+          0,
           rawSourceText,
           nextExclude
         );
@@ -421,7 +429,10 @@ async function generateWithQuotaScheduler(
           !errStr.includes("exceeded") &&
           !errStr.includes("resource")));
 
+    const is503Spike = is503OrHighDemand(err);
+
     const isTemporary =
+      is503Spike ||
       err.status === 503 ||
       err.status === 500 ||
       err.status === 504 ||
@@ -455,6 +466,8 @@ async function generateWithQuotaScheduler(
       `[Gemini Engine] ${project.name} (${project.keyMask}) notice on ${modelName}: ${
         isAuthOrInvalidKey
           ? "401/403 Invalid API Key"
+          : is503Spike
+          ? "503 Temporary High Demand Spike"
           : isRateLimit
           ? "429 Rate Limit"
           : isNotFoundOrDeprecated
@@ -467,6 +480,7 @@ async function generateWithQuotaScheduler(
 
     // 0. Auth / Invalid Key (401/403) -> Disable this project and immediately continue with others
     if (isAuthOrInvalidKey) {
+      releaseCurrentProject();
       quotaScheduler.recordFailure(project.id, err);
       excludeProjectIds.add(project.id);
       console.warn(
@@ -478,7 +492,7 @@ async function generateWithQuotaScheduler(
           systemInstruction,
           currentModelIdx,
           retries - 1,
-          currentDelay,
+          0,
           rawSourceText,
           excludeProjectIds
         );
@@ -490,6 +504,7 @@ async function generateWithQuotaScheduler(
 
     // 1. Model Deprecated / 404
     if (isNotFoundOrDeprecated) {
+      releaseCurrentProject();
       deprecatedModels.add(modelName);
       console.log(`[Gemini Engine] Model ${modelName} returned 404. Pruning from pool and switching model...`);
       return generateWithQuotaScheduler(
@@ -497,7 +512,7 @@ async function generateWithQuotaScheduler(
         systemInstruction,
         currentModelIdx + 1,
         retries,
-        currentDelay,
+        0,
         rawSourceText,
         excludeProjectIds
       );
@@ -505,31 +520,91 @@ async function generateWithQuotaScheduler(
 
     // 2. Safety filter fast signal
     if (isFilterOrBlock) {
+      releaseCurrentProject();
       console.warn(`[Gemini Engine] Safety trigger detected on ${project.name}. Raising instant safety fallback signal for Google Translate.`);
       quotaScheduler.recordFailure(project.id, err);
       throw new Error(`SAFETY_FILTER_TRIGGER: Sensitive content blocked by safety filter (${formatCleanErrorMessage(err)})`);
     }
 
-    // 3. Quota / Rate Limit (429) or Transient (500/503)
-    if ((isRateLimit || isTemporary) && retries > 0) {
-      if (isTemporary) {
-        // Place model on temporary 25s cooldown so all projects bypass overloaded model immediately
-        modelCooldowns.set(modelName, Date.now() + 25000);
+    // 3. Instant Multi-Project Failover on 503 Spikes (When an upstream model experiences temporary high demand)
+    if (is503Spike && retries > 0) {
+      releaseCurrentProject();
+      quotaScheduler.record503Spike(project.id, err);
+      excludeProjectIds.add(project.id);
+
+      const hasOtherProjects = quotaScheduler.hasOtherActiveProjects(excludeProjectIds);
+
+      if (hasOtherProjects) {
+        // Instant routing to another active project without stalling the queue or locking the model
+        const remainingProjects = quotaScheduler.getAvailableProjectsCount(excludeProjectIds);
+        console.log(
+          `[Quota Scheduler] Instant Multi-Project Failover on 503 Spike: Upstream model "${modelName}" reported temporary high demand on ${project.name} (${project.keyMask}). Routing immediately to next active project without stalling the queue (${remainingProjects} alternate project(s) ready)...`
+        );
+
+        return generateWithQuotaScheduler(
+          userPrompt,
+          systemInstruction,
+          currentModelIdx, // Keep the same model! Other active projects can try it immediately without locking the model.
+          retries - 1,
+          0, // 0ms delay: Instant failover without stalling the queue!
+          rawSourceText,
+          excludeProjectIds
+        );
       }
 
+      // All active projects in the pool have encountered 503 on this model in this round.
+      // Now failover immediately to the next model in pool without stalling the queue!
+      console.warn(
+        `[Quota Scheduler] Upstream model "${modelName}" high demand across all ${quotaScheduler.enabledProjectCount} active project(s). Failing over instantly to next model in pool without stalling queue...`
+      );
+
+      // Place a lightweight non-blocking 5s cooldown on this model so the next model is preferred
+      modelCooldowns.set(modelName, Date.now() + 5000);
+
+      // Reset project exclusions so all active projects can try the new model
+      const nextExclude = new Set<string>();
+      const nextModelIdx = (currentModelIdx + 1) % FREE_TIER_MODELS.length;
+
+      return generateWithQuotaScheduler(
+        userPrompt,
+        systemInstruction,
+        nextModelIdx,
+        retries - 1,
+        0, // 0ms delay: Instant failover!
+        rawSourceText,
+        nextExclude
+      );
+    }
+
+    // 4. Quota / Rate Limit (429) or other Transient (500/504)
+    if ((isRateLimit || isTemporary) && retries > 0) {
+      releaseCurrentProject();
       quotaScheduler.recordFailure(project.id, err);
       excludeProjectIds.add(project.id);
 
-      // If we have tried all active enabled projects in this round or model is overloaded, clear exclusion and rotate model
-      const nextExclude = new Set(excludeProjectIds);
-      let nextModelIdx = (currentModelIdx + 1) % FREE_TIER_MODELS.length;
+      const hasOtherProjects = quotaScheduler.hasOtherActiveProjects(excludeProjectIds);
 
-      if (nextExclude.size >= quotaScheduler.enabledProjectCount) {
-        nextExclude.clear();
+      if (hasOtherProjects) {
+        console.log(
+          `[Quota Scheduler] Project throttled (${isRateLimit ? "429 Rate Limit" : "Transient Error"}). Switching project immediately...`
+        );
+        return generateWithQuotaScheduler(
+          userPrompt,
+          systemInstruction,
+          currentModelIdx,
+          retries - 1,
+          0,
+          rawSourceText,
+          excludeProjectIds
+        );
       }
 
+      // All projects throttled: rotate model and retry
+      const nextExclude = new Set<string>();
+      let nextModelIdx = (currentModelIdx + 1) % FREE_TIER_MODELS.length;
+
       console.log(
-        `[Quota Scheduler] ${isTemporary ? "Model overloaded / temporary error" : "Project throttled"}. Switching model/project immediately...`
+        `[Quota Scheduler] All projects throttled. Switching model and retrying with backoff...`
       );
 
       return generateWithQuotaScheduler(
@@ -543,9 +618,10 @@ async function generateWithQuotaScheduler(
       );
     }
 
+    releaseCurrentProject();
     throw err;
   } finally {
-    quotaScheduler.releaseProject(project.id);
+    releaseCurrentProject();
   }
 }
 
@@ -3799,27 +3875,84 @@ app.post("/api/store/import-novel", requireAuthMiddleware, async (req, res) => {
       return;
     }
 
-    // Fetch chapter contents with balanced batch concurrency (5 at a time with 30ms delay)
+    // Fetch chapter contents with paced concurrency and progressive retry + mirror failover
     const chapterTexts: string[] = [];
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 2;
+    const failedChapterIndices: number[] = [];
+
+    let mirrorTocCache: any = null;
+    let mirrorSearchAttempted = false;
 
     for (let i = 0; i < selected.length; i += BATCH_SIZE) {
       const batch = selected.slice(i, i + BATCH_SIZE);
       const fetched = await Promise.all(
         batch.map(async (item: any) => {
           let body = await fetchChapterText(item.url);
-          // If empty, do a short retry with a tiny delay
-          if (!body || body.trim().length < 15) {
-            await new Promise((r) => setTimeout(r, 150));
+
+          // If empty or short (< 30 chars), retry with progressive backoff
+          if (!body || body.trim().length < 30) {
+            await new Promise((r) => setTimeout(r, 800));
             body = await fetchChapterText(item.url);
           }
+          if (!body || body.trim().length < 30) {
+            await new Promise((r) => setTimeout(r, 1800));
+            body = await fetchChapterText(item.url);
+          }
+
+          // If still empty, attempt multi-site mirror fallback
+          if ((!body || body.trim().length < 30) && (title || req.body.author)) {
+            try {
+              if (!mirrorTocCache && !mirrorSearchAttempted) {
+                mirrorSearchAttempted = true;
+                const cleanTitle = (title || "").replace(/^《|》$/g, "").trim();
+                const mirrors = await findNovelMirrors(cleanTitle, req.body.author);
+                for (const m of mirrors) {
+                  if (m.novelUrl && m.siteId !== siteId) {
+                    try {
+                      const mToc = await fetchNovelTOC(m.novelUrl, m.siteId, cleanTitle, req.body.author);
+                      if (mToc && mToc.chapters && mToc.chapters.length > 0) {
+                        mirrorTocCache = mToc.chapters;
+                        break;
+                      }
+                    } catch {}
+                  }
+                }
+              }
+
+              if (mirrorTocCache && mirrorTocCache.length > 0) {
+                // Match mirror chapter by index or by title
+                const mirrorChapter =
+                  mirrorTocCache.find((mc: any) => mc.index === item.index) ||
+                  mirrorTocCache.find(
+                    (mc: any) =>
+                      item.title &&
+                      mc.title &&
+                      (mc.title.includes(item.title) || item.title.includes(mc.title))
+                  );
+                if (mirrorChapter && mirrorChapter.url) {
+                  const mirrorBody = await fetchChapterText(mirrorChapter.url);
+                  if (mirrorBody && mirrorBody.trim().length > 30) {
+                    body = mirrorBody;
+                    console.log(`[Import Novel] Recovered Chapter ${item.index} ("${item.title}") via mirror failover.`);
+                  }
+                }
+              }
+            } catch (mirrorErr) {
+              console.warn(`[Import Novel] Mirror fallback error for Chapter ${item.index}:`, mirrorErr);
+            }
+          }
+
           const chHeader = item.title ? `${item.title}\n\n` : `第${item.index}章\n\n`;
-          return `${chHeader}${body || "[Content from this chapter could not be retrieved from source site]"}`;
+          if (!body || body.trim().length < 30) {
+            failedChapterIndices.push(item.index);
+            return `${chHeader}[Content from this chapter could not be retrieved from source site]`;
+          }
+          return `${chHeader}${body}`;
         })
       );
       chapterTexts.push(...fetched);
       if (i + BATCH_SIZE < selected.length) {
-        await new Promise((r) => setTimeout(r, 30));
+        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
@@ -3829,6 +3962,8 @@ app.post("/api/store/import-novel", requireAuthMiddleware, async (req, res) => {
       success: true,
       title: title || "Imported Web Novel",
       totalChaptersScraped: selected.length,
+      failedChaptersCount: failedChapterIndices.length,
+      failedChapterIndices,
       rawText: fullRawText,
     });
   } catch (err: any) {

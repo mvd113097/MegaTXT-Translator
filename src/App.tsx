@@ -50,6 +50,7 @@ import {
   removeReadingHistoryItem,
   clearReadingHistory,
   addReadingHistory,
+  addOrUpdateBookInLibrary,
 } from "./utils/indexedDbStorage";
 import { isSameNovel } from "./utils/chunkCleaner";
 import {
@@ -560,10 +561,12 @@ export default function App() {
         .filter((c) => !c.englishText || !c.englishText.trim())
         .map((c) => c.index);
 
-      // High-efficiency delta sync: only download the newly translated chunk indices instead of all 500+ chapters
+      // High-efficiency delta sync: sync all missing indices or all completed chunks
       let syncUrl = "/api/cloud-job/sync-texts?completedOnly=true";
-      if (baseChunks.length > 0 && missingIndices.length > 0 && missingIndices.length < baseChunks.length) {
-        syncUrl = `/api/cloud-job/sync-texts?indices=${missingIndices.slice(0, 40).join(",")}`;
+      if (baseChunks.length > 0 && missingIndices.length > 0 && missingIndices.length <= 150) {
+        syncUrl = `/api/cloud-job/sync-texts?indices=${missingIndices.join(",")}`;
+      } else {
+        syncUrl = "/api/cloud-job/sync-texts?completedOnly=true";
       }
 
       const res = await fetch(syncUrl, {
@@ -814,8 +817,9 @@ export default function App() {
 
             const totalExpected = Math.max(prevChunks.length, sJob.totalChunks || 0, merged.length);
             const completedCount = merged.filter((c: any) => c.status === "completed").length;
-            const allDone = (totalExpected > 0 && merged.length >= totalExpected && completedCount === totalExpected) || sJob.status === "completed";
-            const finalStatus = allDone ? "completed" : (sJob.status === "completed" && !allDone ? "running" : sJob.status);
+            const isServerCompleted = sJob.status === "completed" || (totalExpected > 0 && sJob.completedChunks === totalExpected);
+            const allDone = (totalExpected > 0 && merged.length >= totalExpected && completedCount === totalExpected) || isServerCompleted;
+            const finalStatus = isServerCompleted ? "completed" : (allDone ? "completed" : sJob.status);
 
             chunksRef.current = merged;
             return {
@@ -829,7 +833,7 @@ export default function App() {
           });
 
           // If no chunks were returned or summary had missing text, automatically sync texts
-          if (sortedChunks.length === 0 || forceFullText || sJob.status === "completed") {
+          if (sortedChunks.length === 0 || forceFullText || sJob.status === "completed" || sJob.completedChunks === sJob.totalChunks) {
             syncCompletedTexts(true);
           }
         }
@@ -959,22 +963,29 @@ export default function App() {
         // Stop polling completely when phone is locked or app is in background to save 100% of mobile background data
         stopPolling();
       } else {
-        // Instantly refresh when phone unlocked or tab reopened
+        // Instantly sync all completed progress when phone unlocked or tab reopened
+        syncCloudProgress(true, false);
         startPolling();
       }
     };
 
+    const handleFocus = () => {
+      syncCloudProgress(true, false);
+      startPolling();
+    };
+
     if (!document.hidden) {
+      syncCloudProgress(true, false);
       startPolling();
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", startPolling);
+    window.addEventListener("focus", handleFocus);
 
     return () => {
       stopPolling();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", startPolling);
+      window.removeEventListener("focus", handleFocus);
     };
   }, [mode, isRunning, isPaused]);
 
@@ -1051,6 +1062,38 @@ export default function App() {
         startCloudTranslation(newSession);
       }, 150);
     }
+  };
+
+  // Safely archive completed novel in history & library, then return to home upload screen to translate another novel
+  const handleTranslateAnother = async () => {
+    if (session) {
+      try {
+        await saveSessionToIdb(session);
+        addOrUpdateBookInLibrary({
+          id: session.fileName,
+          title: session.fileName.replace(/\.txt$/i, "").replace(/_/g, " "),
+          totalChapters: session.chunks.length,
+          completedChapters: session.chunks.filter((c) => c.status === "completed").length,
+          coverUrl: (session as any).coverUrl,
+          lastReadAt: Date.now(),
+        });
+      } catch (e) {
+        console.warn("Error saving session to library before translating another:", e);
+      }
+      setToastData({
+        message: `"${session.fileName.replace(/\.txt$/i, "")}" is saved in History & Cloud Translations! Ready for your next novel.`,
+        type: "success",
+      });
+    }
+
+    userHasResetRef.current = false;
+    stopRequestedRef.current = true;
+    setIsRunning(false);
+    setIsPaused(false);
+    setSession(null);
+    chunksRef.current = [];
+    localStorage.removeItem(STORAGE_KEY);
+    setActiveNavTab("home");
   };
 
   // Reset workspace / permanently delete novel translation
@@ -2047,6 +2090,7 @@ Export Timestamp: ${new Date().toLocaleString()}
               onDownloadProgress={handleDownloadProgress}
               onOpenExport={handleOpenExport}
               onReset={handleReset}
+              onTranslateAnother={handleTranslateAnother}
               onSyncProgress={() => syncCloudProgress(false, true)}
               isSyncing={isSyncingProgress}
               onOpenReader={handleOpenCurrentSessionReader}

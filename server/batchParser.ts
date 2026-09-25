@@ -6,8 +6,8 @@ export interface ParsedBatchChapter {
   errorReason?: string;
 }
 
-/** Configurable maximum Chinese character budget for safe batching (6,000–8,000 range) */
-export const MAX_BATCH_CHAR_BUDGET = parseInt(process.env.MAX_BATCH_CHAR_BUDGET || "7000", 10);
+/** Configurable maximum Chinese character budget for safe batching (7,000–10,000 range) */
+export const MAX_BATCH_CHAR_BUDGET = parseInt(process.env.MAX_BATCH_CHAR_BUDGET || "9000", 10);
 
 /**
  * Groups adjacent pending chunks into batches up to maxBudget Chinese characters.
@@ -17,7 +17,7 @@ export function groupChunksIntoBatches<T extends { id: string; index: number; ch
   chunks: T[],
   inFlightIds: Set<string> = new Set(),
   maxBudget: number = MAX_BATCH_CHAR_BUDGET,
-  maxItemsPerBatch: number = 4
+  maxItemsPerBatch: number = 5
 ): T[][] {
   const batches: T[][] = [];
   const claimed = new Set<string>();

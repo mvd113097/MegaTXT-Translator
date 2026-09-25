@@ -279,10 +279,17 @@ const ROTATING_USER_AGENTS = [
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 ];
 
+const BROWSER_USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+];
+
 // Helper to fetch HTML buffer with custom encoding support (GBK / GB2312 / UTF-8) and robust fast retry
-async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<string> {
+async function fetchHtml(url: string, headers: Record<string, string> = {}, timeoutMs = 10000): Promise<string> {
   const isCzbooks = url.includes("czbooks");
-  const maxRetries = 2;
+  const maxRetries = 4;
 
   // Derive smart referer for czbooks chapters
   let czReferer = "https://czbooks.net/";
@@ -296,13 +303,22 @@ async function fetchHtml(url: string, headers: Record<string, string> = {}, time
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 150));
+        const backoffMs = isCzbooks ? (attempt + 1) * 1200 : (attempt + 1) * 600;
+        await new Promise((r) => setTimeout(r, backoffMs));
       }
-      const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+      const ua = BROWSER_USER_AGENTS[attempt % BROWSER_USER_AGENTS.length];
       const defaultHeaders: Record<string, string> = {
         "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": isCzbooks ? "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7" : "zh-CN,zh;q=0.9,en;q=0.8",
+        "Sec-Ch-Ua": "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": "\"Windows\"",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": isCzbooks ? "same-origin" : "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         ...(isCzbooks ? { Referer: czReferer } : {}),
@@ -311,7 +327,7 @@ async function fetchHtml(url: string, headers: Record<string, string> = {}, time
 
       const response = await axios.get(url, {
         responseType: "arraybuffer",
-        timeout: Math.min(timeoutMs, 8000),
+        timeout: Math.min(timeoutMs, 10000),
         httpsAgent: sslAgent,
         headers: defaultHeaders,
       });
@@ -357,6 +373,10 @@ async function fetchHtml(url: string, headers: Record<string, string> = {}, time
 
       return iconv.decode(buffer, encoding);
     } catch (err: any) {
+      const status = err?.response?.status;
+      if ((status === 429 || status === 503 || status === 403 || err?.code === "ECONNABORTED") && attempt < maxRetries - 1) {
+        continue;
+      }
       if (attempt === maxRetries - 1) {
         throw err;
       }
@@ -1902,10 +1922,11 @@ const txtContentCache = new Map<string, string>();
 async function fetchTxtOrZipFileCached(url: string): Promise<string> {
   if (txtContentCache.has(url)) return txtContentCache.get(url)!;
   try {
-    const res = await axios.get(encodeURI(url), {
+    const targetUrl = url.includes("%") ? url : encodeURI(url);
+    const res = await axios.get(targetUrl, {
       responseType: "arraybuffer",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/128.0.0.0 Safari/537.36",
         Referer: "http://www.aiqu226.com/",
       },
       timeout: 25000,
@@ -2173,45 +2194,48 @@ export function cleanChapterContent(raw: string): string {
  * Fetch raw chapter text and extract clean content with proper paragraph spacing
  */
 export async function fetchChapterText(chapterUrl: string): Promise<string> {
-  const maxRetries = 2;
+  if (!chapterUrl) return "";
+
+  // Handle direct TXT line pointers
+  if (chapterUrl.startsWith("txt:")) {
+    const match = chapterUrl.match(/^txt:([^#]+)#(?:start:(\d+)&end:(\d+)|line:(\d+)(?:&end:(\d+))?)/);
+    if (match) {
+      const rawUrl = decodeURIComponent(match[1]);
+      const startLine = parseInt(match[2] || match[4] || "0", 10);
+      const endLine = match[3] || match[5] ? parseInt(match[3] || match[5], 10) : undefined;
+      const txt = await fetchTxtOrZipFileCached(rawUrl);
+      if (txt) {
+        const lines = txt.split(/\r\n|\n|\r/);
+        if (startLine >= 0 && startLine < lines.length) {
+          let chapterLines: string[] = [];
+          if (typeof endLine === "number" && endLine > startLine) {
+            // Exact slice bounded by next chapter start! Cap safely at max 800 lines for a chapter + preamble
+            chapterLines = lines.slice(startLine, Math.min(endLine, startLine + 800));
+          } else {
+            // Backward compatibility for legacy links with only startLine: scan up to next header or 350 lines
+            chapterLines.push(lines[startLine]);
+            for (let i = startLine + 1; i < Math.min(lines.length, startLine + 350); i++) {
+              const line = lines[i];
+              if (isAnyChapterHeader(line)) break;
+              chapterLines.push(line);
+            }
+          }
+
+          // Return pristine sanitized paragraph lines preserving full synopsis and preamble
+          const cleaned = cleanChapterContent(chapterLines.join("\n"));
+          if (cleaned.length > 0) return cleaned;
+        }
+      }
+    }
+    return "";
+  }
+
+  const maxRetries = 3;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-
-      // Handle direct TXT line pointers
-      if (chapterUrl.startsWith("txt:")) {
-        const match = chapterUrl.match(/^txt:([^#]+)#(?:start:(\d+)&end:(\d+)|line:(\d+)(?:&end:(\d+))?)/);
-        if (match) {
-          const rawUrl = decodeURIComponent(match[1]);
-          const startLine = parseInt(match[2] || match[4] || "0", 10);
-          const endLine = match[3] || match[5] ? parseInt(match[3] || match[5], 10) : undefined;
-          const txt = await fetchTxtOrZipFileCached(rawUrl);
-          if (txt) {
-            const lines = txt.split(/\r\n|\n|\r/);
-            if (startLine >= 0 && startLine < lines.length) {
-              let chapterLines: string[] = [];
-              if (typeof endLine === "number" && endLine > startLine) {
-                // Exact slice bounded by next chapter start! Cap safely at max 800 lines for a chapter + preamble
-                chapterLines = lines.slice(startLine, Math.min(endLine, startLine + 800));
-              } else {
-                // Backward compatibility for legacy links with only startLine: scan up to next header or 350 lines
-                chapterLines.push(lines[startLine]);
-                for (let i = startLine + 1; i < Math.min(lines.length, startLine + 350); i++) {
-                  const line = lines[i];
-                  if (isAnyChapterHeader(line)) break;
-                  chapterLines.push(line);
-                }
-              }
-
-              // Return pristine sanitized paragraph lines preserving full synopsis and preamble
-              const cleaned = cleanChapterContent(chapterLines.join("\n"));
-              if (cleaned.length > 0) return cleaned;
-            }
-          }
-        }
+        await new Promise((r) => setTimeout(r, (attempt + 1) * 800));
       }
 
       const html = await fetchHtml(chapterUrl);
@@ -2244,14 +2268,15 @@ export async function fetchChapterText(chapterUrl: string): Promise<string> {
       }
 
       const cleaned = cleanChapterContent(content);
-      if (cleaned.length > 20 || attempt === maxRetries - 1) {
+      if (cleaned.length > 20) {
         return cleaned;
       }
     } catch (e: any) {
       const errMsg = e?.message || "";
-      if (errMsg.includes("CLOUDFLARE_CHALLENGE") || e?.response?.status === 403 || e?.response?.status === 429) {
-        console.warn(`Protected or rate-limited chapter ${chapterUrl}: ${errMsg}`);
-        return "";
+      const status = e?.response?.status;
+      if (attempt < maxRetries - 1 && (status === 429 || status === 503 || status === 403 || errMsg.includes("CLOUDFLARE_CHALLENGE"))) {
+        await new Promise((r) => setTimeout(r, (attempt + 1) * 1200));
+        continue;
       }
       if (attempt === maxRetries - 1) {
         console.warn(`Failed to fetch chapter ${chapterUrl}:`, errMsg);
