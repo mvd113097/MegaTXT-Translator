@@ -341,6 +341,17 @@ export function cleanAndDeduplicateChapterList(
  * - Punctuation, casing, and whitespace normalization
  * - Substring containment (e.g. base title vs full chapter filename)
  */
+export const KNOWN_NOVEL_ALIASES: Array<[string, string]> = [
+  ["primitive chen qi", "穿越兽世当神棍"],
+  ["primitivechenqi", "穿越兽世当神棍"],
+  ["chen qi", "穿越兽世当神棍"],
+  ["chenqi", "穿越兽世当神棍"],
+  ["chuanyueshoshidangshengun", "primitive chen qi"],
+  ["raising cubs and building a tribe in the beast world", "在兽世养崽建部落"],
+  ["modern bird parrot bai linlin", "现代小鸟白林林"],
+  ["yiren bei rebellion", "一人之下"],
+];
+
 export function isSameNovel(name1?: string, name2?: string): boolean {
   if (!name1 || !name2) return false;
   const norm = (s: string) =>
@@ -354,5 +365,19 @@ export function isSameNovel(name1?: string, name2?: string): boolean {
   const n1 = norm(name1);
   const n2 = norm(name2);
   if (!n1 || !n2) return false;
-  return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+  if (n1 === n2 || n1.includes(n2) || n2.includes(n1)) return true;
+
+  for (const [aliasA, aliasB] of KNOWN_NOVEL_ALIASES) {
+    const normA = norm(aliasA);
+    const normB = norm(aliasB);
+    if (
+      (n1.includes(normA) && n2.includes(normB)) ||
+      (n2.includes(normA) && n1.includes(normB)) ||
+      (n1.includes(normB) && n2.includes(normA)) ||
+      (n2.includes(normB) && n1.includes(normA))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }

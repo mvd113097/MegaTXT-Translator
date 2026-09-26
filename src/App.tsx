@@ -1231,7 +1231,23 @@ export default function App() {
     setIsStarting(true);
 
     try {
-      // 1. Try lightweight resume first ONLY if the server already has a job for this exact same novel
+      // 1. Check if novel is already completed in cloud: restore instantly without retranslation
+      if (
+        serverCloudJob &&
+        isSameNovel(serverCloudJob.fileName, targetSession.fileName) &&
+        (serverCloudJob.status === "completed" || ((serverCloudJob as any).totalChunks > 0 && (serverCloudJob as any).completedChunks >= (serverCloudJob as any).totalChunks))
+      ) {
+        setToastData({
+          message: "🎉 Novel Already 100% Translated! Restoring all completed chapters from cloud...",
+          type: "success",
+        });
+        setTimeout(() => setToastData(null), 8000);
+        await syncCloudProgress(true, true, targetSession.fileName);
+        setIsStarting(false);
+        return;
+      }
+
+      // 2. Try lightweight resume first ONLY if the server already has a job for this exact same novel
       if (
         serverCloudJob &&
         isSameNovel(serverCloudJob.fileName, targetSession.fileName) &&
@@ -1257,7 +1273,7 @@ export default function App() {
         }
       }
 
-      // 2. Launch full job payload to server (with all chunks)
+      // 3. Launch full job payload to server (with all chunks)
       const res = await fetch("/api/cloud-job/start", {
         method: "POST",
         headers: {

@@ -622,24 +622,26 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
                         </span>
                       )}
 
-                      {isCurrentSession && novel.completedChunks > 0 && (
+                      {novel.completedChunks > 0 && (
                         <>
-                          <button
-                            type="button"
-                            onClick={() => onDownloadProgress("epub")}
+                          <a
+                            href={`/api/cloud-job/download-epub?novelName=${encodeURIComponent(novel.fileName)}`}
+                            download
                             className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
+                            title="Download complete novel as EPUB"
                           >
                             <Download className="h-3 w-3" />
                             <span>EPUB</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDownloadProgress("txt")}
+                          </a>
+                          <a
+                            href={`/api/cloud-job/download-txt?novelName=${encodeURIComponent(novel.fileName)}`}
+                            download
                             className="inline-flex items-center justify-center gap-1 rounded-xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 active:scale-95 transition cursor-pointer"
+                            title="Download complete novel as TXT"
                           >
                             <FileText className="h-3 w-3" />
                             <span>TXT</span>
-                          </button>
+                          </a>
                         </>
                       )}
 

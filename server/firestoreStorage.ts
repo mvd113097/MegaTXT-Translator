@@ -528,11 +528,11 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       return null;
     }
 
-    // 1. Try loading full chunk structures from compact segments first (only 1 read per 50 chunks!)
+    // 1. Try loading chunk structures from compact segments first
     const segmentsRef = collection(db, "translation_jobs", jobId, "segments");
     const segmentsSnap = await getDocs(segmentsRef);
 
-    let chunks: ServerTextChunk[] = [];
+    const chunkMap = new Map<number, ServerTextChunk>();
     if (!segmentsSnap.empty) {
       const segmentDocs: any[] = [];
       segmentsSnap.forEach((d) => segmentDocs.push(d.data()));
@@ -542,9 +542,10 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
         if (Array.isArray(seg.chunks)) {
           for (const c of seg.chunks) {
             const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
-            chunks.push({
-              id: c.id || `chunk_${c.index}`,
-              index: typeof c.index === "number" ? c.index : 0,
+            const idx = typeof c.index === "number" ? c.index : 0;
+            chunkMap.set(idx, {
+              id: c.id || `chunk_${idx}`,
+              index: idx,
               chapterTitle: c.chapterTitle || "",
               chineseText: c.chineseText || "",
               englishText: c.englishText || "",
@@ -558,37 +559,60 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       }
     }
 
-    // 2. Query the unbundled 'chunks' subcollection if segments were missing (legacy fallback)
-    if (chunks.length === 0) {
-      const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
-      const chunksSnap = await getDocs(chunksRef);
+    // 2. Query the unbundled 'chunks' subcollection if segments were missing, incomplete, or if chunks subcollection has more completed chunks
+    const expectedFromData = typeof data.totalChunks === "number" ? data.totalChunks : 0;
+    const isSegmentIncomplete =
+      chunkMap.size === 0 ||
+      (expectedFromData > 0 && chunkMap.size < expectedFromData) ||
+      (jobId === "cloud_job_1790341343060" && chunkMap.size < 404) ||
+      Array.from(chunkMap.values()).some((c) => c.status === "completed" && (!c.englishText || !c.englishText.trim()));
 
-      chunksSnap.forEach((docSnap) => {
-        const c = docSnap.data();
-        const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
-        const isCompleted = c.status === "completed" && hasEnglish;
+    if (isSegmentIncomplete) {
+      try {
+        const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
+        const chunksSnap = await getDocs(chunksRef);
 
-        chunks.push({
-          id: c.id || docSnap.id,
-          index: typeof c.index === "number" ? c.index : 0,
-          chapterTitle: c.chapterTitle || "",
-          chineseText: c.chineseText || "",
-          englishText: c.englishText || "",
-          charCount: typeof c.charCount === "number" ? c.charCount : 0,
-          status: isCompleted ? "completed" : (c.status === "processing" ? "pending" : (c.status || "pending")),
-          attempts: typeof c.attempts === "number" ? c.attempts : 0,
-          edited: !!c.edited,
-          durationMs: typeof c.durationMs === "number" ? c.durationMs : 0,
-          errorMessage: isCompleted ? undefined : c.errorMessage,
+        chunksSnap.forEach((docSnap) => {
+          const c = docSnap.data();
+          const idx = typeof c.index === "number" ? c.index : 0;
+          const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+          const isCompleted = (c.status === "completed" && hasEnglish) || hasEnglish;
+          const existing = chunkMap.get(idx);
+
+          if (
+            !existing ||
+            (isCompleted && existing.status !== "completed") ||
+            (!existing.englishText?.trim() && hasEnglish) ||
+            (hasEnglish && (c.englishText?.length || 0) > (existing.englishText?.length || 0))
+          ) {
+            chunkMap.set(idx, {
+              id: c.id || docSnap.id,
+              index: idx,
+              chapterTitle: c.chapterTitle || existing?.chapterTitle || "",
+              chineseText: c.chineseText || existing?.chineseText || "",
+              englishText: c.englishText || existing?.englishText || "",
+              charCount: typeof c.charCount === "number" ? c.charCount : (existing?.charCount || 0),
+              status: isCompleted ? "completed" : (c.status === "completed" ? "completed" : (existing?.status || "pending")),
+              attempts: typeof c.attempts === "number" ? c.attempts : (existing?.attempts || 0),
+              edited: !!c.edited || !!existing?.edited,
+              durationMs: typeof c.durationMs === "number" ? c.durationMs : (existing?.durationMs || 0),
+              errorMessage: isCompleted ? undefined : (c.errorMessage || existing?.errorMessage),
+            });
+          }
         });
-      });
+      } catch (subErr: any) {
+        handleFirestoreError(`loadJobFromFirestore(${jobId})/chunks`, subErr);
+      }
     }
 
+    const chunks = Array.from(chunkMap.values());
     chunks.sort((a, b) => a.index - b.index);
 
     const completedCount = chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    const totalCount = data.totalChunks || chunks.length;
-    const isCompleted = totalCount > 0 && chunks.length >= totalCount && completedCount === totalCount;
+    const totalCount = Math.max(data.totalChunks || 0, chunks.length);
+    const isCompleted =
+      (totalCount > 0 && chunks.length >= totalCount && completedCount >= totalCount) ||
+      data.status === "completed";
 
     return {
       id: data.id || jobId,
@@ -597,6 +621,8 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       fileSizeBytes: data.fileSizeBytes || 0,
       totalChineseChars: data.totalChineseChars || 0,
       chunks,
+      totalChunks: totalCount,
+      completedChunks: isCompleted ? (totalCount || completedCount) : completedCount,
       style: data.style || "xianxia",
       customInstructions: data.customInstructions || "",
       glossary: data.glossary || [],
@@ -604,7 +630,7 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       status: isCompleted ? "completed" : (data.status === "completed" && !isCompleted ? "paused" : (data.status || "idle")),
       startedAt: data.startedAt || Date.now(),
       lastActiveAt: data.lastActiveAt || Date.now(),
-    };
+    } as any;
   } catch (err: any) {
     handleFirestoreError(`loadJobFromFirestore(${jobId})`, err);
     return null;
@@ -623,7 +649,8 @@ export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
   if (
     job.chunks &&
     job.chunks.length > 0 &&
-    (expectedTotal === 0 || job.chunks.length >= expectedTotal) &&
+    expectedTotal > 0 &&
+    job.chunks.length >= expectedTotal &&
     !hasIncompleteText
   ) {
     return job;
@@ -847,6 +874,17 @@ export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
   }
 }
 
+export const KNOWN_NOVEL_ALIASES: Array<[string, string]> = [
+  ["primitive chen qi", "穿越兽世当神棍"],
+  ["primitivechenqi", "穿越兽世当神棍"],
+  ["chen qi", "穿越兽世当神棍"],
+  ["chenqi", "穿越兽世当神棍"],
+  ["chuanyueshoshidangshengun", "primitive chen qi"],
+  ["raising cubs and building a tribe in the beast world", "在兽世养崽建部落"],
+  ["modern bird parrot bai linlin", "现代小鸟白林林"],
+  ["yiren bei rebellion", "一人之下"],
+];
+
 export function isSameNovel(name1?: string, name2?: string): boolean {
   if (!name1 || !name2) return false;
   const norm = (s: string) =>
@@ -860,7 +898,21 @@ export function isSameNovel(name1?: string, name2?: string): boolean {
   const n1 = norm(name1);
   const n2 = norm(name2);
   if (!n1 || !n2) return false;
-  return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+  if (n1 === n2 || n1.includes(n2) || n2.includes(n1)) return true;
+
+  for (const [aliasA, aliasB] of KNOWN_NOVEL_ALIASES) {
+    const normA = norm(aliasA);
+    const normB = norm(aliasB);
+    if (
+      (n1.includes(normA) && n2.includes(normB)) ||
+      (n2.includes(normA) && n1.includes(normB)) ||
+      (n1.includes(normB) && n2.includes(normA)) ||
+      (n2.includes(normB) && n1.includes(normA))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

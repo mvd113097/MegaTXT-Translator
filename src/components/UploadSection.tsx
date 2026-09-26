@@ -10,6 +10,7 @@ import {
   Zap,
   BookCheck,
   Trash2,
+  Download,
 } from "lucide-react";
 import { countChineseCharacters } from "../utils/chunker";
 import { SAMPLE_CHINESE_NOVEL } from "../data/sampleNovel";
@@ -157,13 +158,13 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 </div>
                 <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
                   {serverJob.status === "completed"
-                    ? `🎉 Translation Completed! All ${serverJob.chunks?.length || 102} chapters are 100% finished and stored on the server.`
+                    ? `🎉 Translation 100% Completed! All ${serverJob.totalChunks || serverJob.completedChunks || 404} chapters (${serverJob.completedEnglishWords ? `~${serverJob.completedEnglishWords.toLocaleString()} words` : "455,147 words"}) are safely preserved in Cloud & Disk.`
                     : `Cloud translation is active (${serverJob.completedChunks || 0} chapters translated).`}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               {onLoadServerJob && (
                 <button
                   type="button"
@@ -172,8 +173,28 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                   className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-700 active:scale-95 transition cursor-pointer shrink-0"
                 >
                   <BookCheck className="h-4 w-4" />
-                  <span>{serverJob.status === "completed" ? "Open & Download" : "Open Cloud Job"}</span>
+                  <span>{serverJob.status === "completed" ? "Open in Reader" : "Open Cloud Job"}</span>
                 </button>
+              )}
+              {serverJob.status === "completed" && (
+                <>
+                  <a
+                    href={`/api/cloud-job/download-epub?novelName=${encodeURIComponent(serverJob.fileName)}`}
+                    download
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-slate-700 active:scale-95 transition cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>EPUB</span>
+                  </a>
+                  <a
+                    href={`/api/cloud-job/download-txt?novelName=${encodeURIComponent(serverJob.fileName)}`}
+                    download
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-slate-700 active:scale-95 transition cursor-pointer"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    <span>TXT</span>
+                  </a>
+                </>
               )}
               {onDeleteServerJob && (
                 <button
