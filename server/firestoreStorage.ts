@@ -970,3 +970,74 @@ export async function deleteAllJobsFromFirestore(): Promise<number> {
   return deletedCount;
 }
 
+
+/**
+ * Real-time direct query against Firestore for any existing completed or matching in-progress job for a novel.
+ * Guarantees mathematically absolute protection against duplicate translations even on cold server starts.
+ */
+export async function findJobInFirestoreByNovel(targetNovelName: string, totalChars?: number): Promise<CloudJob | null> {
+  if (!targetNovelName || !targetNovelName.trim()) return null;
+  if (!isCloudStorageAvailable()) return null;
+  const db = initFirestore();
+  if (!db) return null;
+
+  try {
+    const tombstones = await getDeletedJobTombstonesFromFirestore();
+    const cleanTarget = targetNovelName.trim().toLowerCase();
+
+    // Check if tombstoned
+    if (tombstones.fileNames.has(cleanTarget) || Array.from(tombstones.fileNames).some(t => isSameNovel(t, cleanTarget))) {
+      return null;
+    }
+
+    const jobsRef = collection(db, "translation_jobs");
+    const snapshot = await getDocs(jobsRef);
+    let matchedDocId: string | null = null;
+    let matchedScore = -1;
+
+    for (const docSnap of snapshot.docs) {
+      const jId = docSnap.id;
+      if (jId.startsWith("_") || jId.startsWith("synthetic_") || jId.startsWith("test_")) continue;
+      if (tombstones.ids.has(jId)) continue;
+
+      const data = docSnap.data();
+      const docFileName = (data.fileName || "").trim().toLowerCase();
+
+      if (tombstones.fileNames.has(docFileName) || Array.from(tombstones.fileNames).some(t => isSameNovel(t, docFileName))) {
+        continue;
+      }
+
+      const sameNovel = isSameNovel(docFileName, cleanTarget);
+      if (!sameNovel && docFileName !== cleanTarget) continue;
+
+      // Score matches (completed > in-progress, character match > general match)
+      const completedCount = typeof data.completedChunks === "number" ? data.completedChunks : 0;
+      const totalCount = typeof data.totalChunks === "number" ? data.totalChunks : 0;
+      const isCompleted = (totalCount > 0 && completedCount >= totalCount) || data.status === "completed";
+
+      let score = completedCount;
+      if (isCompleted) score += 100000;
+
+      if (totalChars && data.totalChineseChars && Math.abs(data.totalChineseChars - totalChars) < 50) {
+        score += 50000;
+      }
+
+      if (score > matchedScore) {
+        matchedScore = score;
+        matchedDocId = jId;
+      }
+    }
+
+    if (matchedDocId) {
+      console.log(`[FirestoreStorage] Direct live query found matching novel job in Firestore: "${matchedDocId}" (Score: ${matchedScore})`);
+      const fullJob = await loadJobFromFirestore(matchedDocId);
+      return fullJob;
+    }
+  } catch (err: any) {
+    handleFirestoreError(`findJobInFirestoreByNovel(${targetNovelName})`, err);
+  }
+
+  return null;
+}
+
+

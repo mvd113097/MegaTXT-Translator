@@ -35,6 +35,8 @@ export interface TextChunk {
 }
 
 export interface TranslationSession {
+  id?: string;
+  jobId?: string;
   fileName: string;
   fileSizeBytes: number;
   totalChineseChars: number;

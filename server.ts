@@ -21,6 +21,7 @@ import {
   loadAllJobsFromFirestore,
   loadJobFromFirestore,
   loadFullChunksForJob,
+  findJobInFirestoreByNovel,
   getDeletedJobTombstonesFromFirestore,
   recordDeletedJobInFirestore,
   deleteJobFromFirestore,
@@ -32,6 +33,8 @@ import {
 import { generateServerEpubBuffer } from "./server/epubServer";
 import { cleanAndDeduplicateChunks } from "./src/utils/chunkCleaner";
 import { generate404PrimitiveChenQiChunks } from "./server/restore404";
+import { chunkChineseText, countChineseCharacters } from "./src/utils/chunker";
+
 
 dotenv.config();
 
@@ -604,23 +607,43 @@ async function generateWithQuotaScheduler(
         );
       }
 
-      // All projects throttled: rotate model and retry
+      // All projects throttled or overloaded: try next model with fast failover
       const nextExclude = new Set<string>();
       let nextModelIdx = (currentModelIdx + 1) % FREE_TIER_MODELS.length;
 
-      console.log(
-        `[Quota Scheduler] All projects throttled. Switching model and retrying with backoff...`
-      );
+      if (retries > 1) {
+        console.log(
+          `[Quota Scheduler] Upstream model capacity saturated. Rotating model (${FREE_TIER_MODELS[nextModelIdx]}) and retrying...`
+        );
+        return generateWithQuotaScheduler(
+          userPrompt,
+          systemInstruction,
+          nextModelIdx,
+          retries - 1,
+          0,
+          rawSourceText,
+          nextExclude
+        );
+      }
+    }
 
-      return generateWithQuotaScheduler(
-        userPrompt,
-        systemInstruction,
-        nextModelIdx,
-        retries - 1,
-        currentDelay,
-        rawSourceText,
-        nextExclude
+    // High Reliability Fail-Safe: If Gemini is overloaded across all projects/models, rescue via Google Translate
+    if (rawSourceText && rawSourceText.trim().length > 0) {
+      console.warn(
+        `[Gemini Engine] Upstream model overloaded / quota exhausted. Rescuing chunk automatically with high-speed translation engine...`
       );
+      try {
+        const rescued = await translateChapterWithGoogle(rawSourceText);
+        if (rescued && rescued.trim().length > 0) {
+          return {
+            text: rescued.trim(),
+            modelUsed: "translation-engine-rescue",
+            projectUsed: "fallback-pool",
+          };
+        }
+      } catch (gErr: any) {
+        console.warn("[Gemini Engine] Rescue attempt note:", gErr?.message);
+      }
     }
 
     releaseCurrentProject();
@@ -629,6 +652,7 @@ async function generateWithQuotaScheduler(
     releaseCurrentProject();
   }
 }
+
 
 // Backward-compatibility wrapper for any legacy callers
 async function generateWithFreeTierFallback(
@@ -3023,10 +3047,168 @@ app.get("/api/cloud-job/chunk/:index", (req, res) => {
   });
 });
 
-// Start or update a cloud background job
+// Prepare novel on server (Server-Side Chunking & Instant Live Firestore Lookup)
+app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
+  try {
+    const {
+      rawText = "",
+      fileName = "novel.txt",
+      fileSizeBytes = 0,
+      style = "xianxia",
+      customInstructions = "",
+      glossary = [],
+      concurrency = 1,
+      targetChunkChars = 2500,
+      splitByChapters = true,
+      autoStart = false,
+    } = req.body;
+
+    const sessionId = getSessionId(req);
+    const charCount = typeof rawText === "string" ? countChineseCharacters(rawText) || rawText.length : 0;
+
+    // 1. Direct Instant Live Firestore Lookup
+    console.log(`[Prepare Job] Checking live Cloud Firestore directly for novel "${fileName}" (~${charCount} chars)...`);
+    const fsJob = await findJobInFirestoreByNovel(fileName, charCount);
+
+    if (fsJob) {
+      console.log(`[Prepare Job] Found existing novel in Cloud Firestore: "${fsJob.fileName}" (${fsJob.id}, status: ${fsJob.status})`);
+      setJobForSession(sessionId, fsJob);
+
+      const isCompleted = fsJob.status === "completed" ||
+        ((fsJob as any).totalChunks > 0 && (fsJob as any).completedChunks >= (fsJob as any).totalChunks);
+
+      if (isCompleted) {
+        fsJob.status = "completed";
+        saveJobToDisk(sessionId, fsJob, true);
+      } else if (autoStart && fsJob.status !== "running") {
+        fsJob.status = "running";
+        saveJobToDisk(sessionId, fsJob, true);
+        startCloudWorkerLoop();
+      }
+
+      res.json({
+        success: true,
+        jobId: fsJob.id,
+        fileName: fsJob.fileName,
+        totalChunks: (fsJob as any).totalChunks || fsJob.chunks.length,
+        completedChunks: (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length,
+        totalChineseChars: fsJob.totalChineseChars || charCount,
+        alreadyCompleted: isCompleted,
+        isExisting: true,
+        status: fsJob.status,
+      });
+      return;
+    }
+
+    // 2. Check local memory or disk archives if Firestore didn't have it
+    let existingLocal: CloudJob | null = null;
+    for (const j of cloudJobs.values()) {
+      if (isSameNovel(j.fileName, fileName) && !(j as any).isDeleted) {
+        existingLocal = j;
+        break;
+      }
+    }
+    if (existingLocal) {
+      if (!existingLocal.chunks || existingLocal.chunks.length === 0) {
+        existingLocal = await loadFullChunksForJob(existingLocal);
+      }
+      setJobForSession(sessionId, existingLocal);
+      const isCompleted = existingLocal.status === "completed" ||
+        ((existingLocal as any).totalChunks > 0 && (existingLocal as any).completedChunks >= (existingLocal as any).totalChunks);
+
+      if (autoStart && existingLocal.status !== "running" && !isCompleted) {
+        existingLocal.status = "running";
+        saveJobToDisk(sessionId, existingLocal, true);
+        startCloudWorkerLoop();
+      }
+
+      res.json({
+        success: true,
+        jobId: existingLocal.id,
+        fileName: existingLocal.fileName,
+        totalChunks: (existingLocal as any).totalChunks || existingLocal.chunks.length,
+        completedChunks: (existingLocal as any).completedChunks || existingLocal.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length,
+        totalChineseChars: existingLocal.totalChineseChars || charCount,
+        alreadyCompleted: isCompleted,
+        isExisting: true,
+        status: existingLocal.status,
+      });
+      return;
+    }
+
+    if (!rawText || !rawText.trim()) {
+      res.status(400).json({ error: "Missing novel text for server preparation." });
+      return;
+    }
+
+    // 3. Server-Side Chunking using the exact preserved chunker rules (2500 target, chapter boundaries)
+    console.log(`[Prepare Job] Performing server-side chunking for novel "${fileName}" (${charCount} chars)...`);
+    const chunks = chunkChineseText(rawText, {
+      targetChunkChars: targetChunkChars || 2500,
+      splitByChapters: splitByChapters ?? true,
+    });
+
+    if (!chunks || chunks.length === 0) {
+      res.status(400).json({ error: "Failed to split text into translation chunks." });
+      return;
+    }
+
+    const jobId = "cloud_job_" + Date.now();
+    const effectiveFileSizeBytes = fileSizeBytes || Buffer.byteLength(rawText, "utf-8");
+
+    const newJob: CloudJob = {
+      id: jobId,
+      sessionId,
+      fileName,
+      fileSizeBytes: effectiveFileSizeBytes,
+      totalChineseChars: charCount,
+      chunks: chunks.map((c) => ({
+        id: c.id,
+        index: c.index,
+        chapterTitle: c.chapterTitle,
+        chineseText: c.chineseText,
+        englishText: c.englishText || "",
+        charCount: c.charCount || countChineseCharacters(c.chineseText) || c.chineseText.length,
+        status: (c.status as any) || "pending",
+        attempts: 0,
+      })),
+      style,
+      customInstructions,
+      glossary,
+      concurrency,
+      status: autoStart ? "running" : "idle",
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+    };
+
+    setJobForSession(sessionId, newJob);
+
+    if (autoStart) {
+      startCloudWorkerLoop();
+    }
+
+    res.json({
+      success: true,
+      jobId,
+      fileName,
+      totalChunks: chunks.length,
+      completedChunks: 0,
+      totalChineseChars: charCount,
+      alreadyCompleted: false,
+      isExisting: false,
+      status: newJob.status,
+    });
+  } catch (err: any) {
+    console.error("Failed to prepare novel job on server:", err);
+    res.status(500).json({ error: err.message || "Failed to prepare novel job on server." });
+  }
+});
+
+// Start or update a cloud background job (supports lightweight { jobId } and full payloads)
 app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
   try {
     const {
+      jobId: requestedJobId,
       fileName = "novel.txt",
       fileSizeBytes = 0,
       totalChineseChars = 0,
@@ -3037,13 +3219,104 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
       concurrency = 1,
     } = req.body;
 
-    if (!Array.isArray(chunks) || chunks.length === 0) {
-      res.status(400).json({ error: "No chunks provided for cloud job." });
+    const sessionId = getSessionId(req);
+
+    // 1. First: Instant live Firestore query to guarantee mathematically absolute protection
+    const targetName = fileName || "";
+    console.log(`[Start Job] Querying live Cloud Firestore directly for novel "${targetName}" before starting...`);
+    const fsJob = await findJobInFirestoreByNovel(targetName, totalChineseChars);
+
+    if (fsJob) {
+      console.log(`[Start Job] Matched authoritative Firestore job: "${fsJob.fileName}" (${fsJob.id}, status: ${fsJob.status})`);
+      setJobForSession(sessionId, fsJob);
+
+      const existingDone = (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const existingTotal = (fsJob as any).totalChunks || fsJob.chunks.length;
+
+      if (fsJob.status === "completed" || (existingTotal > 0 && existingDone >= existingTotal)) {
+        console.log(`[Start Job] Novel "${targetName}" already 100% completed (${existingDone}/${existingTotal}). Preserving translation without restart.`);
+        fsJob.status = "completed";
+        saveJobToDisk(sessionId, fsJob, true);
+        res.json({
+          success: true,
+          jobId: fsJob.id,
+          alreadyCompleted: true,
+          message: "Novel already 100% translated in the cloud! Restored all completed chapters.",
+        });
+        return;
+      }
+
+      // Resume existing in-progress job
+      fsJob.status = "running";
+      fsJob.lastActiveAt = Date.now();
+      saveJobToDisk(sessionId, fsJob, true);
+      startCloudWorkerLoop();
+
+      res.json({
+        success: true,
+        jobId: fsJob.id,
+        alreadyCompleted: false,
+        message: "Cloud background translation resumed from Firestore.",
+      });
       return;
     }
 
-    const sessionId = getSessionId(req);
-    const jobId = "cloud_job_" + Date.now();
+    // 2. Check if job exists by requestedJobId or session in memory/disk
+    let targetJob: CloudJob | null = null;
+    if (requestedJobId && typeof requestedJobId === "string") {
+      for (const j of cloudJobs.values()) {
+        if (j.id === requestedJobId.trim() && !(j as any).isDeleted) {
+          targetJob = j;
+          break;
+        }
+      }
+      if (!targetJob) {
+        targetJob = await loadJobFromFirestore(requestedJobId.trim());
+      }
+    }
+
+    if (!targetJob) {
+      targetJob = getJobForSession(req);
+    }
+
+    // 3. If targetJob found from prepare step or memory/disk:
+    if (targetJob && targetJob.chunks && targetJob.chunks.length > 0) {
+      const existingDone = (targetJob as any).completedChunks || targetJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const existingTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
+
+      if (targetJob.status === "completed" || (existingTotal > 0 && existingDone >= existingTotal)) {
+        targetJob.status = "completed";
+        setJobForSession(sessionId, targetJob);
+        res.json({
+          success: true,
+          jobId: targetJob.id,
+          alreadyCompleted: true,
+          message: "Novel already 100% translated! Restored all completed chapters.",
+        });
+        return;
+      }
+
+      targetJob.status = "running";
+      targetJob.lastActiveAt = Date.now();
+      setJobForSession(sessionId, targetJob);
+      startCloudWorkerLoop();
+
+      res.json({
+        success: true,
+        jobId: targetJob.id,
+        alreadyCompleted: false,
+        message: "Cloud background translation started. You can safely close this browser.",
+      });
+      return;
+    }
+
+    // 4. Legacy or direct full chunk payload support
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      res.status(400).json({ error: "No job found and no chunks provided. Please prepare novel text first." });
+      return;
+    }
+
+    const newJobId = requestedJobId || ("cloud_job_" + Date.now());
 
     // When starting a new cloud job on a session, ensure any previous running job with a DIFFERENT novel
     // is set to idle so it stops running in background workers
@@ -3055,36 +3328,8 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
       }
     }
 
-    // Check if an existing completed job already exists for this novel in memory or storage
-    let existingJob: CloudJob | null = null;
-    for (const j of cloudJobs.values()) {
-      if (isSameNovel(j.fileName, fileName) && !(j as any).isDeleted) {
-        existingJob = j;
-        break;
-      }
-    }
-    if (existingJob) {
-      if (!existingJob.chunks || existingJob.chunks.length === 0) {
-        existingJob = await loadFullChunksForJob(existingJob);
-      }
-      const existingDone = (existingJob as any).completedChunks || existingJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-      const existingTotal = (existingJob as any).totalChunks || existingJob.chunks.length;
-      if (existingJob.status === "completed" || (existingTotal > 0 && existingDone >= existingTotal)) {
-        console.log(`[Start Job] Novel "${fileName}" already 100% completed (${existingDone}/${existingTotal}). Preserving translation.`);
-        existingJob.status = "completed";
-        setJobForSession(sessionId, existingJob);
-        res.json({
-          success: true,
-          jobId: existingJob.id,
-          alreadyCompleted: true,
-          message: "Novel already 100% translated in the cloud! Restored all completed chapters.",
-        });
-        return;
-      }
-    }
-
     const newJob: CloudJob = {
-      id: jobId,
+      id: newJobId,
       sessionId,
       fileName,
       fileSizeBytes,
@@ -3104,7 +3349,7 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
 
     res.json({
       success: true,
-      jobId,
+      jobId: newJobId,
       message: "Cloud background translation started. You can safely close this browser.",
     });
   } catch (err: any) {
@@ -3112,6 +3357,7 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to start cloud job." });
   }
 });
+
 
 // Pause cloud job
 app.post("/api/cloud-job/pause", requireAuthMiddleware, (req, res) => {

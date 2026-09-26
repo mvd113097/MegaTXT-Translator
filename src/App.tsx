@@ -1031,7 +1031,7 @@ export default function App() {
     };
   }, [isRunning, isPaused]);
 
-  // Handle file or text load
+  // Handle file or text load (with server-side prepare and instant Firestore check)
   const handleLoadText = (
     text: string,
     fileName: string,
@@ -1039,6 +1039,7 @@ export default function App() {
     splitByChapters: boolean,
     autoStart: boolean = false
   ) => {
+    // 1. Instant client-side preview using exact preserved chunker rules
     const rawChunks = chunkChineseText(text, {
       targetChunkChars,
       splitByChapters,
@@ -1069,12 +1070,57 @@ export default function App() {
     setCharsTranslatedInRun(0);
     saveSessionToIdb(newSession).catch(() => {});
 
+    // 2. Server-side prepare: uploads text once, checks Firestore directly, gets authoritative jobId
+    fetch("/api/cloud-job/prepare", {
+      method: "POST",
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "application/json",
+        "x-novel-filename": encodeURIComponent(fileName),
+      },
+      body: JSON.stringify({
+        rawText: text,
+        fileName,
+        fileSizeBytes: newSession.fileSizeBytes,
+        style,
+        customInstructions,
+        glossary,
+        concurrency,
+        targetChunkChars,
+        splitByChapters,
+        autoStart,
+      }),
+    })
+      .then((res) => res.json())
+      .then((prepData) => {
+        if (prepData && prepData.success && prepData.jobId) {
+          setSession((prev) => {
+            if (!prev) return null;
+            const updated = { ...prev, jobId: prepData.jobId, id: prepData.jobId };
+            saveSessionToIdb(updated).catch(() => {});
+            return updated;
+          });
+
+          if (prepData.alreadyCompleted) {
+            setToastData({
+              message: `🎉 Novel "${fileName.replace(/\.txt$/i, "")}" is already 100% translated in Cloud! Restored all ${prepData.totalChunks} chapters.`,
+              type: "success",
+            });
+            syncCloudProgress(true, true, fileName);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn("Notice preparing novel job on server:", err);
+      });
+
     if (autoStart) {
       setTimeout(() => {
         startCloudTranslation(newSession);
-      }, 150);
+      }, 300);
     }
   };
+
 
   // Safely archive completed novel in history & library, then return to home upload screen to translate another novel
   const handleTranslateAnother = async () => {
@@ -1273,28 +1319,46 @@ export default function App() {
         }
       }
 
-      // 3. Launch full job payload to server (with all chunks)
+      // 3. Start cloud job (Lightweight payload with instant live Firestore lookup)
+      const startPayload: any = {
+        jobId: targetSession.jobId || (targetSession as any).id,
+        fileName: targetSession.fileName,
+        fileSizeBytes: targetSession.fileSizeBytes,
+        totalChineseChars: targetSession.totalChineseChars,
+        style: targetSession.style || style,
+        customInstructions: targetSession.customInstructions || customInstructions,
+        glossary: targetSession.glossary || glossary,
+        concurrency,
+      };
+
+      // If no server jobId was established yet, include chunks as fallback
+      if (!targetSession.jobId && (!targetSession.id || !targetSession.id.startsWith("cloud_job_"))) {
+        startPayload.chunks = targetSession.chunks;
+      }
+
       const res = await fetch("/api/cloud-job/start", {
         method: "POST",
         headers: {
           ...getAuthHeaders(),
+          "Content-Type": "application/json",
           "x-novel-filename": encodeURIComponent(targetSession.fileName),
         },
-        body: JSON.stringify({
-          fileName: targetSession.fileName,
-          fileSizeBytes: targetSession.fileSizeBytes,
-          totalChineseChars: targetSession.totalChineseChars,
-          chunks: targetSession.chunks,
-          style: targetSession.style || style,
-          customInstructions: targetSession.customInstructions || customInstructions,
-          glossary: targetSession.glossary || glossary,
-          concurrency,
-        }),
+        body: JSON.stringify(startPayload),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
         throw new Error(data.error || "Failed to start cloud job on server");
+      }
+
+      if (data.alreadyCompleted) {
+        setToastData({
+          message: "🎉 Novel Already 100% Translated! Restoring all completed chapters from Cloud...",
+          type: "success",
+        });
+        setTimeout(() => setToastData(null), 8000);
+        await syncCloudProgress(true, true, targetSession.fileName);
+        return;
       }
 
       setIsRunning(true);
@@ -1312,6 +1376,7 @@ export default function App() {
         type: "error",
       });
       setTimeout(() => setToastData(null), 7000);
+
     } finally {
       setIsStarting(false);
     }

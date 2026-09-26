@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan explaining the safety of \"Translate Another Book\", verifying permanent archival of the 455k-word Primitive Chen Qi novel, and adding UI reassurance banners and 1-click restore from the History drawer.",
-  "updatedAt":  "2026-09-26T12:42:53.757252853Z",
+  "summary":  "Revised implementation plan to strictly preserve existing chunking rules (2500-char target, 7000-char batch budget, identical chapter-boundary logic), reuse src/utils/chunker.ts directly, query Firestore live upon /api/cloud-job/start, and upload raw novel text once for compact sub-KB start requests.",
+  "updatedAt":  "2026-09-26T13:53:44.419922072Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
