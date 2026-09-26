@@ -686,16 +686,23 @@ export default function App() {
         }
         const sJob = data.job;
 
-        // CRITICAL FIX: If the user currently has a newly imported or unstarted novel loaded in the workspace,
-        // and its filename does NOT match the server job, DO NOT clobber the user's workspace
-        // unless they explicitly asked to switch novels (explicitNovelFileName was provided).
+        const isMatch = session && session.fileName ? isSameNovel(session.fileName, sJob.fileName) : false;
+        const localProgress = (session?.chunks || []).filter((c) => c.status === "completed").length;
+        const localTotal = session?.chunks?.length || 0;
+        const sTotal = sJob.totalChunks || 0;
+        const isSameTotal = localTotal > 0 && sTotal > 0 && Math.abs(localTotal - sTotal) <= 5;
+
+        // If local session has 0 completed progress or chunk counts match, bind to server job.
+        // Only skip clobbering if local session actually HAS completed progress on a DIFFERENT novel.
         if (
           session &&
           session.fileName &&
-          !isSameNovel(session.fileName, sJob.fileName) &&
+          !isMatch &&
+          !isSameTotal &&
+          localProgress > 0 &&
           !explicitNovelFileName
         ) {
-          // Keep serverCloudJob reference in state for history drawer, but do NOT replace the active session!
+          // Keep serverCloudJob reference in state for history drawer, but do NOT replace active session
           setServerCloudJob(sJob);
           return;
         }

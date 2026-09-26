@@ -763,6 +763,7 @@ export function isSameNovel(name1?: string, name2?: string): boolean {
       .replace(/\[.*?\]/g, "")
       .replace(/【.*?】/g, "")
       .replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
+
   const n1 = norm(name1);
   const n2 = norm(name2);
   if (!n1 || !n2) return false;
