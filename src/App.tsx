@@ -1363,6 +1363,10 @@ export default function App() {
 
       setIsRunning(true);
       setIsPaused(false);
+      setSession((prev) => (prev ? { ...prev, status: "running", jobId: data.jobId || (prev as any).jobId } : prev));
+
+      // Trigger immediate cloud progress sync to bind latest server state
+      syncCloudProgress(false, false, targetSession.fileName);
 
       setToastData({
         message: "☁️ Cloud Mode Activated: The server is translating your novel in the background. You can safely close your browser or turn off your screen anytime. Come back whenever you want to download your chapters!",

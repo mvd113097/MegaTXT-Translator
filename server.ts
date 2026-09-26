@@ -785,7 +785,6 @@ export function isSameNovel(name1?: string, name2?: string): boolean {
 
 function getJobForSession(req: express.Request): CloudJob | null {
   const sId = getSessionId(req);
-  let job: CloudJob | null = null;
 
   const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
   const novelQuery = (req.query.fileName || req.query.novelName || (req.body && (req.body.fileName || req.body.novelName)) || "") as string;
@@ -813,19 +812,18 @@ function getJobForSession(req: express.Request): CloudJob | null {
     targetNovelName = "";
   }
 
-  // 1. If client specifically targeted a novel name:
-  if (targetNovelName) {
-    if (cloudJobs.has(sId)) {
-      const candidate = cloudJobs.get(sId)!;
-      if (isSameNovel(candidate.fileName, targetNovelName) && !(candidate as any).isDeleted) {
-        return candidate;
-      }
-    }
+  // Gather ALL candidate jobs across memory and local disk for a given novel name
+  const getCandidatesForNovel = (novelName: string): CloudJob[] => {
+    const candidates: CloudJob[] = [];
+    const seenIds = new Set<string>();
+
     for (const j of cloudJobs.values()) {
-      if (isSameNovel(j.fileName, targetNovelName) && !(j as any).isDeleted) {
-        return j;
+      if (isSameNovel(j.fileName, novelName) && !(j as any).isDeleted) {
+        candidates.push(j);
+        seenIds.add(j.id);
       }
     }
+
     if (fs.existsSync(JOBS_DIR)) {
       try {
         const files = fs.readdirSync(JOBS_DIR);
@@ -834,107 +832,120 @@ function getJobForSession(req: express.Request): CloudJob | null {
           const fullPath = path.join(JOBS_DIR, f);
           const content = fs.readFileSync(fullPath, "utf-8");
           const parsed = JSON.parse(content);
-          if (parsed?.fileName && isSameNovel(parsed.fileName, targetNovelName) && !parsed.isDeleted) {
-            cloudJobs.set(parsed.sessionId || sId, parsed);
-            return parsed;
+          if (parsed?.fileName && isSameNovel(parsed.fileName, novelName) && !parsed.isDeleted && !seenIds.has(parsed.id)) {
+            candidates.push(parsed);
+            seenIds.add(parsed.id);
           }
         }
       } catch {}
     }
-    // CRITICAL: When a specific novel was requested and not found, NEVER fall back to a random other novel!
+    return candidates;
+  };
+
+  // Helper to pick the best/highest progress job among multiple candidates
+  const sortBestJob = (jobs: CloudJob[]): CloudJob | null => {
+    if (jobs.length === 0) return null;
+    const valid = jobs.filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
+    if (valid.length === 0) return null;
+
+    valid.sort((a, b) => {
+      // 1. Prioritize running status
+      if (a.status === "running" && b.status !== "running") return -1;
+      if (b.status === "running" && a.status !== "running") return 1;
+
+      // 2. Prioritize completed status
+      if (a.status === "completed" && b.status !== "completed") return -1;
+      if (b.status === "completed" && a.status !== "completed") return 1;
+
+      // 3. Most completed chunks
+      const aDone = (a as any).completedChunks || (a.chunks ? a.chunks.filter(c => c.status === "completed" && !!c.englishText?.trim()).length : 0);
+      const bDone = (b as any).completedChunks || (b.chunks ? b.chunks.filter(c => c.status === "completed" && !!c.englishText?.trim()).length : 0);
+      if (aDone !== bDone) return bDone - aDone;
+
+      // 4. Most total chunks
+      const aTotal = (a as any).totalChunks || a.chunks?.length || 0;
+      const bTotal = (b as any).totalChunks || b.chunks?.length || 0;
+      if (aTotal !== bTotal) return bTotal - aTotal;
+
+      // 5. Most recent activity
+      return (b.lastActiveAt || 0) - (a.lastActiveAt || 0);
+    });
+
+    return valid[0];
+  };
+
+  // 1. If client specifically targeted a novel name:
+  if (targetNovelName) {
+    const candidates = getCandidatesForNovel(targetNovelName);
+    const best = sortBestJob(candidates);
+    if (best) {
+      cloudJobs.set(sId, best);
+      return best;
+    }
     return null;
   }
 
   // 2. If no specific novel was targeted, check session job
+  let sessionCandidates: CloudJob[] = [];
   if (cloudJobs.has(sId)) {
     const sj = cloudJobs.get(sId)!;
-    if (!(sj as any).isDeleted) {
-      job = sj;
-    }
+    if (!(sj as any).isDeleted) sessionCandidates.push(sj);
   }
 
-  // 3. Match by explicit job id
-  if (!job) {
-    const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
-    if (jobId && typeof jobId === "string") {
-      for (const j of cloudJobs.values()) {
-        if (j.id === jobId.trim() && !(j as any).isDeleted) {
-          job = j;
-          break;
-        }
+  // Also check disk for sId
+  const safeKey = sanitizeSessionKey(sId);
+  const diskPath = path.join(JOBS_DIR, `job_${safeKey}.json`);
+  if (fs.existsSync(diskPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(diskPath, "utf-8"));
+      if (parsed && !parsed.isDeleted && !sessionCandidates.some((j) => j.id === parsed.id)) {
+        sessionCandidates.push(parsed);
+      }
+    } catch {}
+  }
+
+  if (sessionCandidates.length > 0) {
+    const sj = sessionCandidates[0];
+    if (sj.fileName) {
+      const novelCandidates = getCandidatesForNovel(sj.fileName);
+      const bestForNovel = sortBestJob(novelCandidates);
+      if (bestForNovel) {
+        cloudJobs.set(sId, bestForNovel);
+        return bestForNovel;
       }
     }
+    const bestS = sortBestJob(sessionCandidates);
+    if (bestS) return bestS;
   }
 
-  // 4. Check disk job file for sId if not in memory
-  if (!job) {
-    const safeKey = sanitizeSessionKey(sId);
-    const diskPath = path.join(JOBS_DIR, `job_${safeKey}.json`);
-    if (fs.existsSync(diskPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(diskPath, "utf-8"));
-        if (parsed && Array.isArray(parsed.chunks) && !parsed.isDeleted) {
-          job = parsed;
-          cloudJobs.set(sId, job);
-        }
-      } catch {}
-    }
-  }
-
-  // 5. Fallbacks: Check legacy_default or any real job (completed or running) when no specific target novel was requested
-  if (!job) {
-    const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
-    if (allowFallback) {
-      if (cloudJobs.has("legacy_default") && !isSyntheticOrTestJob(cloudJobs.get("legacy_default")!) && !(cloudJobs.get("legacy_default") as any).isDeleted) {
-        job = cloudJobs.get("legacy_default")!;
-      } else {
-        const realJobs = Array.from(cloudJobs.values()).filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
-        if (realJobs.length > 0) {
-          realJobs.sort((a, b) => {
-            if (a.status === "running" && b.status !== "running") return -1;
-            if (b.status === "running" && a.status !== "running") return 1;
-            return (b.lastActiveAt || 0) - (a.lastActiveAt || 0);
-          });
-          job = realJobs[0];
-        } else if (fs.existsSync(CLOUD_JOB_FILE)) {
-          try {
-            const parsed = JSON.parse(fs.readFileSync(CLOUD_JOB_FILE, "utf-8"));
-            if (parsed && Array.isArray(parsed.chunks) && !isSyntheticOrTestJob(parsed) && !parsed.isDeleted) {
-              job = parsed;
-              cloudJobs.set("legacy_default", job);
-            }
-          } catch {}
-        }
-      }
-    }
-  }
-
-  // Safety self-heal: If the retrieved job has 0 chunks in memory, rehydrate from disk or archive
-  if (job && (!job.chunks || job.chunks.length === 0)) {
-    if (fs.existsSync(CLOUD_JOB_FILE)) {
-      try {
-        const rootParsed = JSON.parse(fs.readFileSync(CLOUD_JOB_FILE, "utf-8"));
-        if (rootParsed?.chunks?.length > 0 && (!job.fileName || rootParsed.fileName === job.fileName)) {
-          job.chunks = rootParsed.chunks;
-        }
-      } catch {}
-    }
-    if ((!job.chunks || job.chunks.length === 0) && fs.existsSync(JOBS_DIR)) {
+  // 3. Fallbacks when allowFallback is requested: find any running or highest-progress real job
+  const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
+  if (allowFallback) {
+    const allRealJobs = Array.from(cloudJobs.values()).filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
+    if (fs.existsSync(JOBS_DIR)) {
       try {
         const files = fs.readdirSync(JOBS_DIR);
         for (const f of files) {
           if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
-          const parsed = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf-8"));
-          if (parsed?.chunks?.length > 0 && isSameNovel(parsed.fileName, job.fileName)) {
-            job.chunks = parsed.chunks;
-            break;
+          const content = fs.readFileSync(path.join(JOBS_DIR, f), "utf-8");
+          const parsed = JSON.parse(content);
+          if (parsed && parsed.fileName && !isSyntheticOrTestJob(parsed) && !parsed.isDeleted) {
+            if (!allRealJobs.some((j) => j.id === parsed.id)) {
+              allRealJobs.push(parsed);
+            }
           }
         }
       } catch {}
     }
+
+    const bestFallback = sortBestJob(allRealJobs);
+    if (bestFallback) {
+      cloudJobs.set(sId, bestFallback);
+      return bestFallback;
+    }
   }
 
-  return job;
+  return null;
 }
 
 const pendingFirestoreJobSyncs = new Map<string, NodeJS.Timeout>();
@@ -1630,8 +1641,24 @@ async function loadCloudJobsFromDisk() {
           reconciled.status = "completed";
           (reconciled as any).completedChunks = expectedTotal || effectiveCompletedCount;
         } else if ((reconciled.chunks?.length || 0) === 0) {
-          // Job shell with 0 chunks in memory - do NOT set to running without chunks!
-          reconciled.status = "paused";
+          if (reconciled.id && (reconciled.status === "running" || fsJob?.status === "running" || dJob?.status === "running")) {
+            console.log(`[Startup] Active job "${reconciled.fileName}" had 0 chunks in memory. Loading full chunks from Firestore...`);
+            try {
+              const hydrated = await loadJobFromFirestore(reconciled.id);
+              if (hydrated && hydrated.chunks && hydrated.chunks.length > 0) {
+                reconciled.chunks = hydrated.chunks;
+                (reconciled as any).totalChunks = hydrated.chunks.length;
+                (reconciled as any).completedChunks = hydrated.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+                reconciled.status = "running";
+              } else {
+                reconciled.status = "paused";
+              }
+            } catch {
+              reconciled.status = "paused";
+            }
+          } else {
+            reconciled.status = "paused";
+          }
         }
 
         cloudJobs.set(sId, reconciled);
@@ -2743,6 +2770,42 @@ app.get("/api/cloud-job/status", async (req, res) => {
   const firestoreStatus = getFirestoreQuotaStatus();
   const projectsSummary = quotaScheduler.getActiveProjectSummary();
 
+  // 1. Direct Cloud Firestore Lookup if missing or if local job has 0 progress/0 chunks
+  const currentDone = targetJob ? ((targetJob as any).completedChunks || targetJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length) : -1;
+  
+  if (!targetJob || (currentDone === 0 && targetJob.status !== "completed") || targetJob.chunks.length === 0) {
+    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+    let targetNovelName = "";
+    if (rawNovelHeader && typeof rawNovelHeader === "string") {
+      try {
+        targetNovelName = decodeURIComponent(rawNovelHeader).trim();
+      } catch {
+        targetNovelName = rawNovelHeader.trim();
+      }
+    } else if (novelQuery && typeof novelQuery === "string") {
+      try {
+        targetNovelName = decodeURIComponent(novelQuery).trim();
+      } catch {
+        targetNovelName = novelQuery.trim();
+      }
+    }
+
+    const searchName = targetNovelName || targetJob?.fileName || "";
+    if (searchName && searchName !== "[object Object]" && searchName !== "undefined") {
+      console.log(`[Status] Querying live Cloud Firestore directly for novel "${searchName}"...`);
+      const fsJob = await findJobInFirestoreByNovel(searchName);
+      if (fsJob) {
+        const fsDone = (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+        if (fsDone > currentDone || fsJob.status === "running") {
+          targetJob = fsJob;
+          const sessionId = getSessionId(req);
+          setJobForSession(sessionId, targetJob);
+        }
+      }
+    }
+  }
+
   if (!targetJob) {
     res.json({
       hasJob: false,
@@ -2774,10 +2837,16 @@ app.get("/api/cloud-job/status", async (req, res) => {
   const includeFullText = req.query.full === "true";
   const isSummaryOnly = req.query.summary === "true";
 
-  // If memory chunks are empty, or full text requested, or job is complete, load from Firestore
-  if ((includeFullText || !isSummaryOnly || targetJob.status === "completed") && targetJob.chunks.length === 0) {
+  // CRITICAL FIX: If memory chunks are empty, ALWAYS load chunks from Firestore so that
+  // completedChunks, totalChunks, completedEnglishWords, and frontier are 100% accurate!
+  if (targetJob.chunks.length === 0) {
     targetJob = await loadFullChunksForJob(targetJob);
     cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
+  }
+
+  // Automatically revive worker loop if an active running job is discovered
+  if (targetJob.status === "running" && !isCloudWorkerRunning && targetJob.chunks.length > 0) {
+    startCloudWorkerLoop();
   }
 
   const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
@@ -2899,6 +2968,28 @@ app.get("/api/cloud-job/status", async (req, res) => {
 // Sync full chapter texts for completed chunks or requested chunk indices on-demand
 app.get("/api/cloud-job/sync-texts", async (req, res) => {
   let targetJob = getJobForSession(req);
+
+  // If not found in memory, query Firestore directly using novel name
+  if (!targetJob) {
+    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+    let targetNovelName = "";
+    if (rawNovelHeader && typeof rawNovelHeader === "string") {
+      try { targetNovelName = decodeURIComponent(rawNovelHeader).trim(); } catch { targetNovelName = rawNovelHeader.trim(); }
+    } else if (novelQuery && typeof novelQuery === "string") {
+      try { targetNovelName = decodeURIComponent(novelQuery).trim(); } catch { targetNovelName = novelQuery.trim(); }
+    }
+
+    if (targetNovelName && targetNovelName !== "[object Object]" && targetNovelName !== "undefined") {
+      const fsJob = await findJobInFirestoreByNovel(targetNovelName);
+      if (fsJob) {
+        targetJob = fsJob;
+        const sessionId = getSessionId(req);
+        setJobForSession(sessionId, targetJob);
+      }
+    }
+  }
+
   if (!targetJob) {
     res.json({ success: false, chunks: [] });
     return;
