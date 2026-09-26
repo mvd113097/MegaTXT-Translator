@@ -35,12 +35,13 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   const isFinished =
     propIsCompleted !== undefined
       ? propIsCompleted
-      : metrics.totalChunks > 0 && metrics.completedChunks === metrics.totalChunks;
+      : (metrics.totalChunks > 0 && metrics.completedChunks >= metrics.totalChunks);
 
-  const percent =
-    metrics.totalChunks > 0
-      ? Math.min(100, Math.round((metrics.completedChunks / metrics.totalChunks) * 100))
-      : 0;
+  const percent = isFinished
+    ? 100
+    : (metrics.totalChunks > 0
+        ? Math.min(99, Math.round((metrics.completedChunks / metrics.totalChunks) * 100))
+        : 0);
 
   const charPercent =
     metrics.totalChars > 0

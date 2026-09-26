@@ -121,8 +121,18 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
   const pendingChunks = session.chunks.filter((c) => c.status === "pending");
   const errorChunks = session.chunks.filter((c) => c.status === "error");
 
-  const effectiveCompletedCount = Math.max(metrics.completedChunks, completedChunks.length);
-  const percent = totalChunks > 0 ? Math.min(100, Math.round((effectiveCompletedCount / totalChunks) * 100)) : 0;
+  const isAllDone =
+    session.status === "completed" ||
+    (totalChunks > 0 && (metrics.completedChunks >= totalChunks || completedChunks.length >= totalChunks));
+  const effectiveCompletedCount =
+    isAllDone && totalChunks > 0
+      ? totalChunks
+      : Math.max(metrics.completedChunks, completedChunks.length);
+  const percent = totalChunks > 0
+    ? isAllDone
+      ? 100
+      : Math.min(99, Math.round((effectiveCompletedCount / totalChunks) * 100))
+    : 0;
   const charPercent = metrics.totalChars > 0 ? Math.min(100, Math.round((metrics.completedChars / metrics.totalChars) * 100)) : 0;
 
   // Find active chunk

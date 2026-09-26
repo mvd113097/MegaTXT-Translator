@@ -240,8 +240,20 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
     (diskJob as any).totalChunks || 0,
     reconciledChunks.length
   );
-  // Immutable lock: A job is ONLY complete if all expected chunks are present AND all are completed
-  const isAllDone = totalCount > 0 && reconciledChunks.length >= totalCount && completedCount === totalCount;
+  const effectiveCompleted = Math.max(
+    completedCount,
+    (fsJob as any).completedChunks || 0,
+    (diskJob as any)?.completedChunks || 0
+  );
+  const effectiveTotal = Math.max(
+    totalCount,
+    (fsJob as any).totalChunks || 0,
+    (diskJob as any)?.totalChunks || 0
+  );
+  const isAllDone =
+    (effectiveTotal > 0 && effectiveCompleted >= effectiveTotal) ||
+    fsJob.status === "completed" ||
+    diskJob?.status === "completed";
 
   let finalStatus: CloudJob["status"] = "idle";
   if (isAllDone) {
@@ -261,6 +273,8 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
     fileSizeBytes: Math.max(fsJob.fileSizeBytes || 0, diskJob.fileSizeBytes || 0),
     totalChineseChars: Math.max(fsJob.totalChineseChars || 0, diskJob.totalChineseChars || 0),
     chunks: reconciledChunks,
+    totalChunks: effectiveTotal,
+    completedChunks: isAllDone ? (effectiveTotal || effectiveCompleted) : effectiveCompleted,
     style: fsJob.style || diskJob.style || "xianxia",
     customInstructions: fsJob.customInstructions !== undefined ? fsJob.customInstructions : (diskJob.customInstructions || ""),
     glossary: (fsJob.glossary && fsJob.glossary.length > 0) ? fsJob.glossary : (diskJob.glossary || []),
@@ -268,7 +282,7 @@ export function reconcileAuthoritativeJob(fsJob: CloudJob, diskJob?: CloudJob | 
     status: finalStatus,
     startedAt: fsJob.startedAt || diskJob.startedAt || Date.now(),
     lastActiveAt: Math.max(fsJob.lastActiveAt || 0, diskJob.lastActiveAt || 0, Date.now()),
-  };
+  } as any;
 }
 
 export function mergeMonotonicJob(authoritative: CloudJob, candidate: CloudJob): CloudJob {
@@ -287,8 +301,13 @@ export async function saveJobToFirestore(job: CloudJob): Promise<boolean> {
 
   try {
     const jobRef = doc(db, "translation_jobs", job.id);
-    const completedCount = (job.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    const isCompleted = completedCount === (job.chunks?.length || 0) && (job.chunks?.length || 0) > 0;
+    const totalCount = (job.chunks && job.chunks.length > 0)
+      ? job.chunks.length
+      : ((job as any).totalChunks || 0);
+    const completedCount = (job.chunks && job.chunks.length > 0)
+      ? job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length
+      : ((job as any).completedChunks || (job.status === "completed" ? totalCount : 0));
+    const isCompleted = (totalCount > 0 && completedCount >= totalCount) || job.status === "completed";
 
     const payload = {
       id: job.id,
@@ -296,7 +315,7 @@ export async function saveJobToFirestore(job: CloudJob): Promise<boolean> {
       fileName: job.fileName,
       fileSizeBytes: job.fileSizeBytes || 0,
       totalChineseChars: job.totalChineseChars || 0,
-      totalChunks: job.chunks ? job.chunks.length : 0,
+      totalChunks: totalCount,
       completedChunks: completedCount,
       style: job.style || "xianxia",
       customInstructions: job.customInstructions || "",
@@ -598,7 +617,15 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
 export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
   if (!job) return job;
   const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
-  if (job.chunks && job.chunks.length >= expectedTotal && job.chunks.length > 0) {
+  const hasIncompleteText = (job.chunks || []).some(
+    (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
+  );
+  if (
+    job.chunks &&
+    job.chunks.length > 0 &&
+    (expectedTotal === 0 || job.chunks.length >= expectedTotal) &&
+    !hasIncompleteText
+  ) {
     return job;
   }
 
@@ -609,9 +636,11 @@ export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
       return {
         ...job,
         chunks: fullFromFs.chunks,
-        status: fullFromFs.status,
+        totalChunks: fullFromFs.chunks.length,
+        completedChunks: fullFromFs.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length,
+        status: fullFromFs.status === "completed" ? "completed" : job.status,
         lastActiveAt: Math.max(job.lastActiveAt || 0, fullFromFs.lastActiveAt || 0),
-      };
+      } as any;
     }
   }
 

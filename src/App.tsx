@@ -710,11 +710,23 @@ export default function App() {
 
           setSession((prev) => {
             if (!prev) return prev;
+            let updatedChunks = prev.chunks;
+            if (isAllCompleted && updatedChunks && updatedChunks.length > 0) {
+              const needsMarking = updatedChunks.some((c) => c.status !== "completed");
+              if (needsMarking) {
+                updatedChunks = updatedChunks.map((c) => ({
+                  ...c,
+                  status: "completed" as const,
+                }));
+                chunksRef.current = updatedChunks;
+              }
+            }
             return {
               ...prev,
               status: finalJobStatus,
-              completedEnglishWords: sJob.completedEnglishWords,
-              completedChars: sJob.completedChars,
+              chunks: updatedChunks,
+              completedEnglishWords: Math.max(prev.completedEnglishWords || 0, sJob.completedEnglishWords || 0),
+              completedChars: Math.max(prev.completedChars || 0, sJob.completedChars || 0),
               lastUpdated: Math.max(prev.lastUpdated || 0, sJob.lastActiveAt || 0),
             };
           });
@@ -1868,10 +1880,15 @@ Export Timestamp: ${new Date().toLocaleString()}
   // Calculate real-time metrics
   const hasMatchingServerJob = serverCloudJob && session && isSameNovel(serverCloudJob.fileName, session.fileName);
   const totalChunks = session?.chunks.length || (hasMatchingServerJob ? serverCloudJob.totalChunks : 0) || 0;
-  const completedChunks = Math.max(
-    (hasMatchingServerJob ? serverCloudJob.completedChunks : 0) || 0,
-    session?.chunks.filter((c) => c.status === "completed").length || 0
-  );
+  const isJobFinished =
+    session?.status === "completed" ||
+    (hasMatchingServerJob && (serverCloudJob.status === "completed" || (serverCloudJob.completedChunks >= totalChunks && totalChunks > 0)));
+  const completedChunks = isJobFinished && totalChunks > 0
+    ? totalChunks
+    : Math.max(
+        (hasMatchingServerJob ? serverCloudJob.completedChunks : 0) || 0,
+        session?.chunks.filter((c) => c.status === "completed").length || 0
+      );
   const inProgressChunks =
     session?.chunks.filter((c) => c.status === "processing").length || 0;
   const errorChunks =

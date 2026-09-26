@@ -74,7 +74,18 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
   const [isClearingAll, setIsClearingAll] = useState(false);
 
   const refreshReadingHistory = () => {
-    setReadingHistory(getReadingHistory());
+    const deletedSet = getLocalDeletedNovels();
+    const raw = getReadingHistory();
+    const filtered = raw.filter((item) => {
+      const title = (item.title || "").trim().toLowerCase();
+      const id = (item.id || "").trim().toLowerCase();
+      if (deletedSet.has(title) || deletedSet.has(id)) return false;
+      for (const del of deletedSet) {
+        if (isSameNovel(del, title) || isSameNovel(del, id)) return false;
+      }
+      return true;
+    });
+    setReadingHistory(filtered);
   };
 
   const getLocalDeletedNovels = (): Set<string> => {
@@ -95,8 +106,9 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     if (!key) return;
     try {
       const set = getLocalDeletedNovels();
-      set.add(key.trim().toLowerCase());
-      set.add(key.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+      const cleanKey = key.trim().toLowerCase();
+      set.add(cleanKey);
+      set.add(cleanKey.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
       localStorage.setItem("megatext_deleted_novels", JSON.stringify(Array.from(set)));
     } catch {}
   };
@@ -142,8 +154,30 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     e.stopPropagation();
     const targetKey = item.id || item.title;
     addLocalDeletedNovel(targetKey);
-    const updated = removeReadingHistoryItem(targetKey);
-    setReadingHistory([...updated]);
+    addLocalDeletedNovel(item.title);
+    if (item.id) addLocalDeletedNovel(item.id);
+    removeReadingHistoryItem(targetKey);
+    removeReadingHistoryItem(item.title);
+    removeBookFromLibrary(targetKey);
+    removeBookFromLibrary(item.title);
+    setReadingHistory((prev) => prev.filter((h) => h.id !== targetKey && h.title !== item.title));
+
+    // Also inform server to remove any matching cloud jobs
+    try {
+      const headers = getAuthHeaders ? getAuthHeaders() : {};
+      fetch("/api/cloud-job/delete", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+          "x-novel-filename": encodeURIComponent(item.title),
+        },
+        body: JSON.stringify({
+          fileName: item.title,
+          jobId: item.id,
+        }),
+      }).catch(() => {});
+    } catch {}
   };
 
   const handleClearAllHistory = (e?: React.MouseEvent) => {
@@ -484,9 +518,9 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
             ) : novels.length > 0 ? (
               novels.map((novel) => {
                 const isCurrentSession = session && session.fileName.toLowerCase() === novel.fileName.toLowerCase();
-                const percent = novel.totalChunks > 0 ? Math.round((novel.completedChunks / novel.totalChunks) * 100) : 0;
-                const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks === novel.totalChunks);
-                const isRunning = novel.status === "running" && novel.totalChunks > 0 && novel.completedChunks < novel.totalChunks;
+                const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks >= novel.totalChunks);
+                const percent = novel.totalChunks > 0 ? (isDone ? 100 : Math.round((novel.completedChunks / novel.totalChunks) * 100)) : 0;
+                const isRunning = !isDone && novel.status === "running" && novel.totalChunks > 0 && novel.completedChunks < novel.totalChunks;
                 const isDeleting = deletingId === novel.id || deletingId === novel.fileName;
 
                 return (
