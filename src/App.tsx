@@ -659,12 +659,10 @@ export default function App() {
         userHasResetRef.current = false;
         headers["x-novel-filename"] = encodeURIComponent(explicitNovelFileName);
       }
-      // Use summary mode by default for ultra-low data consumption (~350 bytes per sync)
+      // Always use summary mode by default for ultra-low data consumption (~350 bytes per sync)
       const url = forceFullText
         ? "/api/cloud-job/status?full=true&allowFallback=true"
-        : (session?.chunks && session.chunks.length > 0)
-        ? "/api/cloud-job/status?summary=true&allowFallback=true"
-        : "/api/cloud-job/status?allowFallback=true";
+        : "/api/cloud-job/status?summary=true&allowFallback=true";
 
       const res = await fetch(url, {
         headers,
@@ -710,7 +708,7 @@ export default function App() {
         setServerCloudJob(sJob);
 
         // If this is a lightweight summary update and we already have the novel session loaded
-        if (sJob.isSummary && session && isSameNovel(session.fileName, sJob.fileName)) {
+        if (sJob.isSummary && session) {
           const totalExpected = Math.max(session.chunks?.length || 0, sJob.totalChunks || 0);
           const isAllCompleted = (sJob.completedChunks === totalExpected && totalExpected > 0) || sJob.status === "completed";
           const finalJobStatus = isAllCompleted ? "completed" : sJob.status;
@@ -738,9 +736,8 @@ export default function App() {
             };
           });
 
-          // Check if local chunks are missing translated English texts or completed status
-          const localDoneCount = (session.chunks || []).filter(c => c.status === "completed" && !!c.englishText?.trim()).length;
-          if (sJob.completedChunks > localDoneCount || isAllCompleted || forceFullText) {
+          // Ultra-data saver: Only download heavy chapter text payloads if explicitly requested (e.g. Reader / Download)
+          if (forceFullText) {
             syncCompletedTexts(true);
           }
         } else {
