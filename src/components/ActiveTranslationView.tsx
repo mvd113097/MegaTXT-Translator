@@ -462,7 +462,7 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>Starting translation...</span>
           </button>
-        ) : isRunning ? (
+        ) : isRunning || session?.status === "running" ? (
           <button
             id="active-pause-btn"
             onClick={() => onPause()}

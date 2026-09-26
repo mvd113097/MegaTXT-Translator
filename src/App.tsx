@@ -716,13 +716,17 @@ export default function App() {
           setSession((prev) => {
             if (!prev) return prev;
             let updatedChunks = prev.chunks;
-            if (isAllCompleted && updatedChunks && updatedChunks.length > 0) {
-              const needsMarking = updatedChunks.some((c) => c.status !== "completed");
-              if (needsMarking) {
-                updatedChunks = updatedChunks.map((c) => ({
-                  ...c,
-                  status: "completed" as const,
-                }));
+            if (sJob.completedChunks > 0 && updatedChunks && updatedChunks.length > 0) {
+              const numDone = Math.min(sJob.completedChunks, updatedChunks.length);
+              let changed = false;
+              updatedChunks = updatedChunks.map((c, idx) => {
+                if (idx < numDone && c.status !== "completed") {
+                  changed = true;
+                  return { ...c, status: "completed" as const };
+                }
+                return c;
+              });
+              if (changed) {
                 chunksRef.current = updatedChunks;
               }
             }
@@ -2100,8 +2104,8 @@ Export Timestamp: ${new Date().toLocaleString()}
               passcodeVerified: true,
               hasPasscodeConfigured: true,
             });
-            // Auto-fetch progress immediately on password unlock: loads the latest cloud job status and full texts
-            syncCloudProgress(true, false);
+            // Auto-fetch progress on password unlock with low-data summary mode
+            syncCloudProgress(false, false);
           }}
         />
       </React.Suspense>

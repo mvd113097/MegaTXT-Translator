@@ -139,7 +139,7 @@ export const TranslationControls: React.FC<TranslationControlsProps> = ({
             <Pause className="h-4 w-4" />
             <span>Pause Translation</span>
           </button>
-        ) : isPaused || (completedChunks > 0 && completedChunks < totalChunks) ? (
+        ) : isPaused ? (
           <button
             id="resume-translation-btn"
             onClick={() => (isPaused ? onResume() : onStart())}
