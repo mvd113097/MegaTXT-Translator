@@ -1292,10 +1292,46 @@ export function expandKeywordsForSearch(query: string): string[] {
     if (!queries.includes(v4)) queries.push(v4);
   }
 
+  // Chinese Trope & Keyword Auto-Expansion (Tightly isolated, no generic farming in tribal/primitive)
+  if (clean.includes("部落") || clean.includes("tribe")) {
+    const expansions = ["部落", "史前", "原始", "兽世", "兽人", "史前基建", "原始基建", "穿去史前", "原始社会"];
+    for (const exp of expansions) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+  }
+
+  if (clean.includes("史前") || clean.includes("prehistoric")) {
+    const expansions = ["史前", "原始", "部落", "远古", "兽世", "兽人", "史前基建", "穿去史前", "原始社会"];
+    for (const exp of expansions) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+  }
+
+  if (clean.includes("原始") || clean.includes("primitive")) {
+    const expansions = ["原始", "史前", "部落", "远古", "原始社会", "兽世", "兽人", "原始基建", "穿去史前"];
+    for (const exp of expansions) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+  }
+
+  if (clean.includes("兽世") || clean.includes("兽人") || clean.includes("beast world") || clean.includes("beastman") || clean.includes("orc")) {
+    const expansions = ["兽世", "兽人", "部落", "原始", "史前"];
+    for (const exp of expansions) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+  }
+
+  if (clean.includes("基建") || clean.includes("infrastructure")) {
+    const expansions = ["基建", "史前基建", "领主", "建设", "原始基建"];
+    for (const exp of expansions) {
+      if (!queries.includes(exp)) queries.push(exp);
+    }
+  }
+
   const termMap: Record<string, string[]> = {
-    prehistoric: ["洪荒", "史前", "远古", "原始", "舊石器時代", "石器時代"],
+    prehistoric: ["史前", "原始", "部落", "远古", "兽世", "兽人", "史前基建", "穿去史前", "原始社会"],
     honghuang: ["洪荒"],
-    primitive: ["原始", "原始社会", "远古", "原始社會", "舊石器時代"],
+    primitive: ["原始", "史前", "部落", "远古", "原始社会", "兽世", "兽人", "原始基建", "穿去史前"],
     ancient: ["古代", "穿越古代", "古穿今"],
     apocalypse: ["末世", "末日", "末日"],
     apocalyptic: ["末世", "末日"],
@@ -1321,10 +1357,10 @@ export function expandKeywordsForSearch(query: string): string[] {
     infinite: ["无限流", "无限", "無限流"],
     entertainment: ["娱乐圈", "娛樂圈"],
     showbiz: ["娱乐圈", "娛樂圈"],
-    "beast world": ["兽世", "兽人", "獸世", "獸人"],
-    beastman: ["兽世", "兽人", "獸世", "獸人"],
-    orc: ["兽世", "兽人", "獸世", "獸人"],
-    orcs: ["兽世", "兽人", "獸世", "獸人"],
+    "beast world": ["兽世", "兽人", "獸世", "獸人", "部落", "史前"],
+    beastman: ["兽世", "兽人", "獸世", "獸人", "部落", "史前"],
+    orc: ["兽世", "兽人", "獸世", "獸人", "部落"],
+    orcs: ["兽世", "兽人", "獸世", "獸人", "部落"],
     abo: ["ABO", "Omega", "Alpha"],
     omega: ["Omega", "ABO"],
     alpha: ["Alpha", "ABO"],
@@ -1350,10 +1386,10 @@ export function expandKeywordsForSearch(query: string): string[] {
     "childhood sweethearts": ["青梅竹马", "青梅竹馬"],
     ceo: ["总裁", "豪门", "總裁", "豪門"],
     tycoon: ["豪门", "总裁", "豪門", "總裁"],
-    tribe: ["部落"],
-    tribes: ["部落"],
-    tribal: ["部落"],
-    "tribe in chinese": ["部落"],
+    tribe: ["部落", "史前", "原始", "兽世", "兽人", "史前基建", "穿去史前", "原始社会"],
+    tribes: ["部落", "史前", "原始", "兽世", "兽人", "史前基建", "穿去史前", "原始社会"],
+    tribal: ["部落", "史前", "原始", "兽世", "兽人", "史前基建", "穿去史前", "原始社会"],
+    "tribe in chinese": ["部落", "史前", "原始", "兽世", "兽人", "史前基建", "穿去史前"],
   };
 
   const cleanNoSuffix = clean
@@ -3164,6 +3200,21 @@ function buildExploreSearchKeywords(options: ExploreFilterOptions): string[] {
     for (const exp of expanded) {
       if (!queries.includes(exp)) queries.push(exp);
     }
+    // Inject orientation-anchored pairs for deep high-recall discovery
+    if (ori === "bl") {
+      const topTokens = queries.slice(0, 4);
+      for (const tok of topTokens) {
+        const paired = `${tok} 耽美`;
+        if (!queries.includes(paired)) queries.push(paired);
+      }
+    } else if (ori === "het") {
+      const topTokens = queries.slice(0, 4);
+      for (const tok of topTokens) {
+        const paired = `${tok} 言情`;
+        if (!queries.includes(paired)) queries.push(paired);
+      }
+    }
+
     const cleanNoSuffix = q
       .replace(/\s*(?:in chinese|in jjwxc|in english|novel|novels|bl|danmei)\s*/gi, " ")
       .trim();
@@ -3357,7 +3408,14 @@ export function detect52ShukuOrientation(
     summaryLower.includes("年上攻") ||
     titleLower.includes("主受") ||
     titleLower.includes("主攻") ||
-    titleLower.includes("双男主");
+    titleLower.includes("双男主") ||
+    titleLower.includes("穿去史前搞基建") ||
+    titleLower.includes("史前搞基建") ||
+    titleLower.includes("原始再来") ||
+    titleLower.includes("原始再來") ||
+    titleLower.includes("回到原始开荒") ||
+    titleLower.includes("史前男妻") ||
+    titleLower.includes("兽人时代");
 
   // 4. Strict Het / BG / 言情 Check (Authentic 所属栏目：言情小说, /yanqing/, 军婚, 养崽, 穿越重生, 女生小说, etc.)
   const isExplicitYanqing =
@@ -4369,7 +4427,9 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
 
   // 2. Query 52shuku internal search engine across multiple pages
   const queriesToRun: string[] = [];
-  if (options.query && options.query.trim().length > 0) {
+  if (searchQueries.length > 0) {
+    queriesToRun.push(...searchQueries);
+  } else if (options.query && options.query.trim().length > 0) {
     queriesToRun.push(options.query.trim());
   } else if (options.tag && options.tag !== "all") {
     queriesToRun.push(options.tag);
@@ -4384,17 +4444,18 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
     queriesToRun.push("耽美", "言情");
   }
 
-  const searchPagesToFetch = [1, 2, 3];
+  // Deepen search to 6 pages for comprehensive catalog coverage
+  const searchPagesToFetch = [1, 2, 3, 4, 5, 6];
 
   const searchPromises: Promise<void>[] = [];
-  for (const q of queriesToRun.slice(0, 3)) {
+  for (const q of queriesToRun.slice(0, 6)) {
     for (const p of searchPagesToFetch) {
       searchPromises.push(
         (async () => {
           try {
             // Small staggering to avoid hitting 52shuku rate limiter
             if (p > 1) {
-              await new Promise((r) => setTimeout(r, (p - 1) * 80));
+              await new Promise((r) => setTimeout(r, (p - 1) * 60));
             }
             const searchUrl =
               p === 1
@@ -4528,10 +4589,19 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
               const orientation = detected.orientation;
               const orientationLabel = detected.orientationLabel;
 
-              // Filter orientation if specified
-              if (oriFilter === "bl" && orientation !== "bl") return;
-              if (oriFilter === "het" && orientation !== "het") return;
-              if (oriFilter === "no_cp" && orientation !== "no_cp") return;
+              // Filter orientation if specified (Loosened matching for BL & Het)
+              if (oriFilter === "bl") {
+                const isGl = isGlNovel(rawTitleText, noteText, category || authSpan, fullUrl);
+                const isNoCp = isNoCpNovel(rawTitleText, noteText, category || authSpan, fullUrl);
+                if (isGl || isNoCp || orientation === "no_cp" || orientation === "het") return;
+                if (orientation === "general" && (combinedText.includes("言情") || combinedText.includes("百合"))) return;
+              } else if (oriFilter === "het") {
+                const isNoCp = isNoCpNovel(rawTitleText, noteText, category || authSpan, fullUrl);
+                if (isNoCp || orientation === "no_cp" || orientation === "bl") return;
+                if (orientation === "general" && combinedText.includes("耽美")) return;
+              } else if (oriFilter === "no_cp" && orientation !== "no_cp") {
+                return;
+              }
 
               // Clean summary (remove title/author preamble from note)
               let summary = noteText
@@ -4786,11 +4856,28 @@ async function scrape52ShukuExplore(options: ExploreFilterOptions): Promise<Expl
   }
 
   if (oriFilter === "bl") {
-    validItems = validItems.filter((item) => item.orientation === "bl");
+    validItems = validItems.filter((item) => {
+      const isGl = isGlNovel(item.title, item.summary, item.tags ? item.tags.join(" ") : "", item.novelUrl);
+      const isNoCp = isNoCpNovel(item.title, item.summary, item.orientationLabel, item.novelUrl, item.tags);
+      if (isGl || isNoCp || item.orientation === "no_cp" || item.orientation === "het") return false;
+      if (item.orientation === "bl") return true;
+      if (item.orientation === "general") {
+        return !item.summary.includes("言情") && !item.summary.includes("百合") && !(item.tags || []).includes("言情") && !(item.tags || []).includes("百合");
+      }
+      return false;
+    });
   } else if (oriFilter === "het") {
-    validItems = validItems.filter((item) => item.orientation === "het");
+    validItems = validItems.filter((item) => {
+      const isNoCp = isNoCpNovel(item.title, item.summary, item.orientationLabel, item.novelUrl, item.tags);
+      if (isNoCp || item.orientation === "no_cp" || item.orientation === "bl") return false;
+      if (item.orientation === "het") return true;
+      if (item.orientation === "general") {
+        return !item.summary.includes("耽美") && !(item.tags || []).includes("耽美");
+      }
+      return false;
+    });
   } else if (oriFilter === "no_cp") {
-    validItems = validItems.filter((item) => item.orientation === "no_cp");
+    validItems = validItems.filter((item) => item.orientation === "no_cp" || isNoCpNovel(item.title, item.summary, item.orientationLabel, item.novelUrl, item.tags));
   }
 
   // 7. Sort descending strictly by authentic likes
@@ -6495,8 +6582,15 @@ export async function scrapeExploreNovels(options: ExploreFilterOptions): Promis
       "hoarding": ["囤货", "囤物资", "囤粮", "物资", "疯狂囤", "囤百亿", "囤积", "超市", "hoard"],
       "基建": ["基建", "建设", "领主", "开荒", "建城", "招工", "基建狂魔", "发展", "infrastructure"],
       "宫斗": ["宫斗", "宫廷", "宅斗", "后宫", "王妃", "贵妃", "皇后", "东宫", "贵人", "皇子", "侯爵"],
-      "史前": ["史前", "原始", "远古", "兽世", "兽人", "石器", "石器时代", "蛮荒", "部落"],
-      "部落": ["部落", "首领", "族长", "祭司", "蛮荒", "兽人", "原始"],
+      "史前": ["史前", "原始", "远古", "兽世", "兽人", "石器", "石器时代", "蛮荒", "部落", "基建", "史前基建", "穿去史前"],
+      "prehistoric": ["史前", "原始", "远古", "兽世", "兽人", "石器", "石器时代", "蛮荒", "部落", "基建", "史前基建", "穿去史前"],
+      "部落": ["部落", "首领", "族长", "祭司", "蛮荒", "兽人", "原始", "史前", "兽世", "史前基建", "原始基建", "穿去史前"],
+      "tribe": ["部落", "首领", "族长", "祭司", "蛮荒", "兽人", "原始", "史前", "兽世", "史前基建", "原始基建", "穿去史前"],
+      "tribal": ["部落", "首领", "族长", "祭司", "蛮荒", "兽人", "原始", "史前", "兽世", "史前基建", "原始基建", "穿去史前"],
+      "原始": ["原始", "史前", "远古", "蛮荒", "部落", "兽世", "兽人", "原始社会", "原始基建", "穿去史前"],
+      "primitive": ["原始", "史前", "远古", "蛮荒", "部落", "兽世", "兽人", "原始社会", "原始基建", "穿去史前"],
+      "兽世": ["兽世", "兽人", "部落", "原始", "史前"],
+      "beast world": ["兽世", "兽人", "部落", "原始", "史前"],
       "快穿": ["快穿", "快穿系统", "快穿文", "穿梭"],
       "无限流": ["无限流", "逃生游戏", "惊悚游戏", "规则类怪谈", "主神空间", "生存游戏"],
       "重生": ["重生", "重回", "回溯", "逆袭重生", "再世"],

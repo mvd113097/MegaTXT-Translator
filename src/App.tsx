@@ -1866,9 +1866,10 @@ Export Timestamp: ${new Date().toLocaleString()}
   };
 
   // Calculate real-time metrics
-  const totalChunks = session?.chunks.length || (serverCloudJob && serverCloudJob.fileName === session?.fileName ? serverCloudJob.totalChunks : 0) || 0;
+  const hasMatchingServerJob = serverCloudJob && session && isSameNovel(serverCloudJob.fileName, session.fileName);
+  const totalChunks = session?.chunks.length || (hasMatchingServerJob ? serverCloudJob.totalChunks : 0) || 0;
   const completedChunks = Math.max(
-    (serverCloudJob && serverCloudJob.fileName === session?.fileName ? serverCloudJob.completedChunks : 0) || 0,
+    (hasMatchingServerJob ? serverCloudJob.completedChunks : 0) || 0,
     session?.chunks.filter((c) => c.status === "completed").length || 0
   );
   const inProgressChunks =
@@ -1876,9 +1877,9 @@ Export Timestamp: ${new Date().toLocaleString()}
   const errorChunks =
     session?.chunks.filter((c) => c.status === "error").length || 0;
 
-  const totalChineseChars = session?.totalChineseChars || (serverCloudJob && serverCloudJob.fileName === session?.fileName ? serverCloudJob.totalChineseChars : 0) || 0;
+  const totalChineseChars = session?.totalChineseChars || (hasMatchingServerJob ? serverCloudJob.totalChineseChars : 0) || 0;
   const completedChars = Math.max(
-    (serverCloudJob && serverCloudJob.fileName === session?.fileName ? serverCloudJob.completedChars : 0) || 0,
+    (hasMatchingServerJob ? serverCloudJob.completedChars : 0) || 0,
     session?.completedChars || 0,
     session?.chunks
       .filter((c) => c.status === "completed")
@@ -1896,7 +1897,7 @@ Export Timestamp: ${new Date().toLocaleString()}
     ) || 0;
 
   const completedEnglishWords = Math.max(
-    (serverCloudJob && serverCloudJob.fileName === session?.fileName ? serverCloudJob.completedEnglishWords : 0) || 0,
+    (hasMatchingServerJob ? serverCloudJob.completedEnglishWords : 0) || 0,
     session?.completedEnglishWords || 0,
     calculatedChunkWords
   );
@@ -1922,7 +1923,7 @@ Export Timestamp: ${new Date().toLocaleString()}
     totalChunks > 0 &&
     completedChunks >= totalChunks &&
     (session?.status === "completed" ||
-      Boolean(serverCloudJob && session && serverCloudJob.fileName === session.fileName && serverCloudJob.status === "completed") ||
+      Boolean(hasMatchingServerJob && serverCloudJob.status === "completed") ||
       completedChunks === totalChunks);
 
   // Dynamic document title reflecting progress or 100% completion

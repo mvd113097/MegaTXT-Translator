@@ -441,6 +441,44 @@ export async function saveChunksBatchToFirestore(jobId: string, chunks: ServerTe
   }
 }
 
+// Local disk cache path for deleted novel tombstones
+const TOMBSTONES_FILE = path.join(process.cwd(), ".data", "jobs", "deleted_tombstones.json");
+
+function getLocalDiskTombstones(): { ids: Set<string>; fileNames: Set<string> } {
+  const ids = new Set<string>();
+  const fileNames = new Set<string>();
+  try {
+    if (fs.existsSync(TOMBSTONES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TOMBSTONES_FILE, "utf-8"));
+      if (Array.isArray(data.ids)) {
+        for (const id of data.ids) if (id) ids.add(String(id).trim());
+      }
+      if (Array.isArray(data.fileNames)) {
+        for (const fn of data.fileNames) if (fn) fileNames.add(String(fn).trim().toLowerCase());
+      }
+    }
+  } catch {}
+  return { ids, fileNames };
+}
+
+function saveLocalDiskTombstones(ids: Set<string>, fileNames: Set<string>): void {
+  try {
+    const dir = path.dirname(TOMBSTONES_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(
+      TOMBSTONES_FILE,
+      JSON.stringify({
+        ids: Array.from(ids),
+        fileNames: Array.from(fileNames),
+        updatedAt: Date.now(),
+      }, null, 2),
+      "utf-8"
+    );
+  } catch {}
+}
+
 /**
  * Load authoritative job and all chunks from Firestore
  */
@@ -450,11 +488,26 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
   if (!db || !jobId) return null;
 
   try {
+    // Check tombstones first
+    const tombstones = await getDeletedJobTombstonesFromFirestore();
+    if (tombstones.ids.has(jobId.trim())) {
+      console.log(`[FirestoreStorage] Skipping load for tombstoned job ID: ${jobId}`);
+      return null;
+    }
+
     const jobRef = doc(db, "translation_jobs", jobId);
     const jobSnap = await getDoc(jobRef);
     if (!jobSnap.exists()) return null;
 
     const data = jobSnap.data();
+    const docFileName = (data.fileName || "").trim().toLowerCase();
+    if (
+      tombstones.fileNames.has(docFileName) ||
+      Array.from(tombstones.fileNames).some((t) => isSameNovel(t, docFileName))
+    ) {
+      console.log(`[FirestoreStorage] Skipping load for tombstoned novel filename: ${docFileName}`);
+      return null;
+    }
 
     // 1. Try loading full chunk structures from compact segments first (only 1 read per 50 chunks!)
     const segmentsRef = collection(db, "translation_jobs", jobId, "segments");
@@ -486,7 +539,7 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       }
     }
 
-    // 2. Only query the unbundled 'chunks' subcollection if segments were missing (legacy fallback)
+    // 2. Query the unbundled 'chunks' subcollection if segments were missing (legacy fallback)
     if (chunks.length === 0) {
       const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
       const chunksSnap = await getDocs(chunksRef);
@@ -529,7 +582,7 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       customInstructions: data.customInstructions || "",
       glossary: data.glossary || [],
       concurrency: data.concurrency || 1,
-      status: isCompleted ? "completed" : (data.status === "completed" && !isCompleted ? "running" : (data.status || "idle")),
+      status: isCompleted ? "completed" : (data.status === "completed" && !isCompleted ? "paused" : (data.status || "idle")),
       startedAt: data.startedAt || Date.now(),
       lastActiveAt: data.lastActiveAt || Date.now(),
     };
@@ -540,8 +593,34 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
 }
 
 /**
+ * On-demand full chunk loader for a job shell
+ */
+export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
+  if (!job) return job;
+  const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
+  if (job.chunks && job.chunks.length >= expectedTotal && job.chunks.length > 0) {
+    return job;
+  }
+
+  // Load authoritative chunks from Firestore
+  if (job.id && isCloudStorageAvailable()) {
+    const fullFromFs = await loadJobFromFirestore(job.id);
+    if (fullFromFs && fullFromFs.chunks && fullFromFs.chunks.length > 0) {
+      return {
+        ...job,
+        chunks: fullFromFs.chunks,
+        status: fullFromFs.status,
+        lastActiveAt: Math.max(job.lastActiveAt || 0, fullFromFs.lastActiveAt || 0),
+      };
+    }
+  }
+
+  return job;
+}
+
+/**
  * Load authoritative jobs from Firestore.
- * Defaults to loadFullChunks = false on server startup to minimize document reads (1 read per novel).
+ * Automatically excludes all tombstones from deleted novels and cleans up orphaned docs.
  */
 export async function loadAllJobsFromFirestore(loadFullChunks: boolean = false): Promise<Map<string, CloudJob>> {
   const result = new Map<string, CloudJob>();
@@ -552,14 +631,31 @@ export async function loadAllJobsFromFirestore(loadFullChunks: boolean = false):
   }
 
   try {
+    const tombstones = await getDeletedJobTombstonesFromFirestore();
     const jobsRef = collection(db, "translation_jobs");
     const snapshot = await getDocs(jobsRef);
 
     for (const docSnap of snapshot.docs) {
       const jId = docSnap.id;
       if (jId.startsWith("_") || jId.startsWith("synthetic_") || jId.startsWith("test_")) continue; // Skip internal health/test docs
+
       try {
         const data = docSnap.data();
+        const docFileName = (data.fileName || "").trim().toLowerCase();
+
+        // 1. Check if this job or novel is tombstoned (deleted by user)
+        const isTombstonedId = tombstones.ids.has(jId);
+        const isTombstonedFile =
+          tombstones.fileNames.has(docFileName) ||
+          Array.from(tombstones.fileNames).some((t) => isSameNovel(t, docFileName));
+
+        if (isTombstonedId || isTombstonedFile) {
+          console.log(`[FirestoreStorage] Skipping deleted novel "${data.fileName}" (${jId}) found in Firestore.`);
+          // Asynchronously purge orphaned tombstoned doc from Firestore
+          deleteDoc(docSnap.ref).catch(() => {});
+          continue;
+        }
+
         const sKey = data.sessionId || "legacy_default";
 
         if (loadFullChunks) {
@@ -584,7 +680,7 @@ export async function loadAllJobsFromFirestore(loadFullChunks: boolean = false):
             customInstructions: data.customInstructions || "",
             glossary: data.glossary || [],
             concurrency: data.concurrency || 1,
-            status: isCompleted ? "completed" : (data.status || "idle"),
+            status: isCompleted ? "completed" : (data.status === "completed" ? "completed" : (data.status || "idle")),
             startedAt: data.startedAt || Date.now(),
             lastActiveAt: data.lastActiveAt || Date.now(),
             totalChunks: totalCount,
@@ -603,18 +699,27 @@ export async function loadAllJobsFromFirestore(loadFullChunks: boolean = false):
 }
 
 /**
- * Record a tombstone entry in Firestore for a deleted job ID or fileName so it is NEVER re-imported
+ * Record a tombstone entry in Firestore AND local disk cache for a deleted job ID or fileName so it is NEVER re-imported
  */
 export async function recordDeletedJobInFirestore(jobId?: string, fileName?: string): Promise<boolean> {
-  if (!isCloudStorageAvailable()) return false;
+  const cleanId = (jobId || "").trim();
+  const cleanFileName = (fileName || "").trim().toLowerCase();
+  if (!cleanId && !cleanFileName) return false;
+
+  // Always update local disk tombstones first
+  const local = getLocalDiskTombstones();
+  if (cleanId) local.ids.add(cleanId);
+  if (cleanFileName) {
+    local.fileNames.add(cleanFileName);
+    local.fileNames.add(cleanFileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+  }
+  saveLocalDiskTombstones(local.ids, local.fileNames);
+
+  if (!isCloudStorageAvailable()) return true;
   const db = initFirestore();
-  if (!db) return false;
+  if (!db) return true;
 
   try {
-    const cleanId = (jobId || "").trim();
-    const cleanFileName = (fileName || "").trim().toLowerCase();
-    if (!cleanId && !cleanFileName) return false;
-
     const docKey = cleanId ? `tombstone_${cleanId}` : `tombstone_file_${cleanFileName.replace(/[^a-z0-9_]/gi, "_")}`;
     const tombstoneRef = doc(db, "deleted_jobs", docKey);
     await setDoc(
@@ -634,11 +739,11 @@ export async function recordDeletedJobInFirestore(jobId?: string, fileName?: str
 }
 
 /**
- * Get all tombstone entries for deleted jobs from Firestore
+ * Get all tombstone entries for deleted jobs from local disk cache and Firestore
  */
 export async function getDeletedJobTombstonesFromFirestore(): Promise<{ ids: Set<string>; fileNames: Set<string> }> {
-  const ids = new Set<string>();
-  const fileNames = new Set<string>();
+  // 1. Read from local disk cache
+  const { ids, fileNames } = getLocalDiskTombstones();
 
   if (!isCloudStorageAvailable()) return { ids, fileNames };
   const db = initFirestore();
@@ -649,9 +754,15 @@ export async function getDeletedJobTombstonesFromFirestore(): Promise<{ ids: Set
     const snapshot = await getDocs(tombstonesRef);
     for (const docSnap of snapshot.docs) {
       const data = docSnap.data();
-      if (data.id) ids.add(data.id);
-      if (data.fileName) fileNames.add(String(data.fileName).trim().toLowerCase());
+      if (data.id) ids.add(String(data.id).trim());
+      if (data.fileName) {
+        const fn = String(data.fileName).trim().toLowerCase();
+        fileNames.add(fn);
+        fileNames.add(fn.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+      }
     }
+    // Update local disk cache with any cloud tombstones
+    saveLocalDiskTombstones(ids, fileNames);
   } catch (err: any) {
     handleFirestoreError("getDeletedJobTombstonesFromFirestore", err);
   }
@@ -663,6 +774,9 @@ export async function getDeletedJobTombstonesFromFirestore(): Promise<{ ids: Set
  * Permanently delete a job and all its chunks from Firestore
  */
 export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
+  // Record tombstone first
+  await recordDeletedJobInFirestore(jobId);
+
   if (!isCloudStorageAvailable()) return false;
   const db = initFirestore();
   if (!db || !jobId) return false;
@@ -696,9 +810,6 @@ export async function deleteJobFromFirestore(jobId: string): Promise<boolean> {
     const jobRef = doc(db, "translation_jobs", jobId);
     await deleteDoc(jobRef);
 
-    // Write tombstone entry
-    await recordDeletedJobInFirestore(jobId);
-
     console.log(`[FirestoreStorage] Deleted job ${jobId} and its chunk subcollection from Firestore`);
     return true;
   } catch (err: any) {
@@ -727,6 +838,8 @@ export function isSameNovel(name1?: string, name2?: string): boolean {
  * Permanently delete all jobs and their chunks matching a novel filename from Firestore
  */
 export async function deleteJobByFileNameFromFirestore(fileName: string): Promise<number> {
+  await recordDeletedJobInFirestore(undefined, fileName);
+
   if (!isCloudStorageAvailable()) return 0;
   const db = initFirestore();
   if (!db || !fileName) return 0;
@@ -735,7 +848,6 @@ export async function deleteJobByFileNameFromFirestore(fileName: string): Promis
   let deletedCount = 0;
 
   try {
-    await recordDeletedJobInFirestore(undefined, fileName);
     const jobsRef = collection(db, "translation_jobs");
     const snapshot = await getDocs(jobsRef);
     for (const docSnap of snapshot.docs) {

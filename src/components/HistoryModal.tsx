@@ -77,15 +77,49 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     setReadingHistory(getReadingHistory());
   };
 
+  const getLocalDeletedNovels = (): Set<string> => {
+    const set = new Set<string>();
+    try {
+      const saved = localStorage.getItem("megatext_deleted_novels");
+      if (saved) {
+        const arr = JSON.parse(saved);
+        if (Array.isArray(arr)) {
+          for (const item of arr) if (item) set.add(String(item).trim().toLowerCase());
+        }
+      }
+    } catch {}
+    return set;
+  };
+
+  const addLocalDeletedNovel = (key: string) => {
+    if (!key) return;
+    try {
+      const set = getLocalDeletedNovels();
+      set.add(key.trim().toLowerCase());
+      set.add(key.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+      localStorage.setItem("megatext_deleted_novels", JSON.stringify(Array.from(set)));
+    } catch {}
+  };
+
   const fetchNovels = async () => {
     if (!isOpen) return;
     setIsLoading(true);
     try {
+      const deletedSet = getLocalDeletedNovels();
       const headers = getAuthHeaders ? getAuthHeaders() : {};
       const res = await fetch("/api/cloud-job/list", { headers });
       const data = await res.json();
       if (data.success && Array.isArray(data.novels)) {
-        setNovels(data.novels);
+        const filtered = data.novels.filter((n: StoredNovel) => {
+          const fn = (n.fileName || "").trim().toLowerCase();
+          const id = (n.id || "").trim().toLowerCase();
+          if (deletedSet.has(fn) || deletedSet.has(id)) return false;
+          for (const del of deletedSet) {
+            if (isSameNovel(del, fn)) return false;
+          }
+          return true;
+        });
+        setNovels(filtered);
       }
     } catch (err) {
       console.warn("Failed to fetch novels list:", err);
@@ -107,6 +141,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     e.preventDefault();
     e.stopPropagation();
     const targetKey = item.id || item.title;
+    addLocalDeletedNovel(targetKey);
     const updated = removeReadingHistoryItem(targetKey);
     setReadingHistory([...updated]);
   };
@@ -160,6 +195,10 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
 
     const deleteKey = novel.id || novel.fileName;
     setDeletingId(deleteKey);
+
+    // Save tombstone in client localStorage immediately
+    addLocalDeletedNovel(novel.fileName);
+    if (novel.id) addLocalDeletedNovel(novel.id);
 
     // Optimistically remove from UI list immediately
     setNovels((prev) =>
@@ -447,7 +486,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
                 const isCurrentSession = session && session.fileName.toLowerCase() === novel.fileName.toLowerCase();
                 const percent = novel.totalChunks > 0 ? Math.round((novel.completedChunks / novel.totalChunks) * 100) : 0;
                 const isDone = novel.status === "completed" || (novel.totalChunks > 0 && novel.completedChunks === novel.totalChunks);
-                const isRunning = novel.status === "running";
+                const isRunning = novel.status === "running" && novel.totalChunks > 0 && novel.completedChunks < novel.totalChunks;
                 const isDeleting = deletingId === novel.id || deletingId === novel.fileName;
 
                 return (

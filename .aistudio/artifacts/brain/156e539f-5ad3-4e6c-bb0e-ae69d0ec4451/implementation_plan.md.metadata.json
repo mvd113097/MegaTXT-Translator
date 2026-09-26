@@ -1,0 +1,6 @@
+{
+  "summary":  "Revised implementation plan for keyword synonym expansion, BL orientation filter loosening, and search depth. Excluded generic farming (种田) from primitive/tribe expansions to preserve query precision.",
+  "updatedAt":  "2026-09-25T12:48:58.442323385Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

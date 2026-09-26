@@ -19,6 +19,10 @@ import {
   saveChunksBatchToFirestore,
   saveJobSegmentsToFirestore,
   loadAllJobsFromFirestore,
+  loadJobFromFirestore,
+  loadFullChunksForJob,
+  getDeletedJobTombstonesFromFirestore,
+  recordDeletedJobInFirestore,
   deleteJobFromFirestore,
   deleteJobByFileNameFromFirestore,
   deleteAllJobsFromFirestore,
@@ -763,12 +767,12 @@ function getJobForSession(req: express.Request): CloudJob | null {
   if (targetNovelName) {
     if (cloudJobs.has(sId)) {
       const candidate = cloudJobs.get(sId)!;
-      if (isSameNovel(candidate.fileName, targetNovelName)) {
+      if (isSameNovel(candidate.fileName, targetNovelName) && !(candidate as any).isDeleted) {
         return candidate;
       }
     }
     for (const j of cloudJobs.values()) {
-      if (isSameNovel(j.fileName, targetNovelName)) {
+      if (isSameNovel(j.fileName, targetNovelName) && !(j as any).isDeleted) {
         return j;
       }
     }
@@ -776,11 +780,11 @@ function getJobForSession(req: express.Request): CloudJob | null {
       try {
         const files = fs.readdirSync(JOBS_DIR);
         for (const f of files) {
-          if (!f.endsWith(".json")) continue;
+          if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
           const fullPath = path.join(JOBS_DIR, f);
           const content = fs.readFileSync(fullPath, "utf-8");
           const parsed = JSON.parse(content);
-          if (parsed?.fileName && isSameNovel(parsed.fileName, targetNovelName)) {
+          if (parsed?.fileName && isSameNovel(parsed.fileName, targetNovelName) && !parsed.isDeleted) {
             cloudJobs.set(parsed.sessionId || sId, parsed);
             return parsed;
           }
@@ -793,7 +797,10 @@ function getJobForSession(req: express.Request): CloudJob | null {
 
   // 2. If no specific novel was targeted, check session job
   if (cloudJobs.has(sId)) {
-    job = cloudJobs.get(sId)!;
+    const sj = cloudJobs.get(sId)!;
+    if (!(sj as any).isDeleted) {
+      job = sj;
+    }
   }
 
   // 3. Match by explicit job id
@@ -801,7 +808,7 @@ function getJobForSession(req: express.Request): CloudJob | null {
     const jobId = (req.query.jobId || req.headers["x-job-id"]) as string;
     if (jobId && typeof jobId === "string") {
       for (const j of cloudJobs.values()) {
-        if (j.id === jobId.trim()) {
+        if (j.id === jobId.trim() && !(j as any).isDeleted) {
           job = j;
           break;
         }
@@ -816,7 +823,7 @@ function getJobForSession(req: express.Request): CloudJob | null {
     if (fs.existsSync(diskPath)) {
       try {
         const parsed = JSON.parse(fs.readFileSync(diskPath, "utf-8"));
-        if (parsed && Array.isArray(parsed.chunks)) {
+        if (parsed && Array.isArray(parsed.chunks) && !parsed.isDeleted) {
           job = parsed;
           cloudJobs.set(sId, job);
         }
@@ -828,10 +835,10 @@ function getJobForSession(req: express.Request): CloudJob | null {
   if (!job) {
     const allowFallback = req.query.allowFallback !== "false" && req.headers["x-allow-fallback"] !== "false";
     if (allowFallback) {
-      if (cloudJobs.has("legacy_default") && !isSyntheticOrTestJob(cloudJobs.get("legacy_default")!)) {
+      if (cloudJobs.has("legacy_default") && !isSyntheticOrTestJob(cloudJobs.get("legacy_default")!) && !(cloudJobs.get("legacy_default") as any).isDeleted) {
         job = cloudJobs.get("legacy_default")!;
       } else {
-        const realJobs = Array.from(cloudJobs.values()).filter((j) => !isSyntheticOrTestJob(j));
+        const realJobs = Array.from(cloudJobs.values()).filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
         if (realJobs.length > 0) {
           realJobs.sort((a, b) => {
             if (a.status === "running" && b.status !== "running") return -1;
@@ -842,7 +849,7 @@ function getJobForSession(req: express.Request): CloudJob | null {
         } else if (fs.existsSync(CLOUD_JOB_FILE)) {
           try {
             const parsed = JSON.parse(fs.readFileSync(CLOUD_JOB_FILE, "utf-8"));
-            if (parsed && Array.isArray(parsed.chunks) && !isSyntheticOrTestJob(parsed)) {
+            if (parsed && Array.isArray(parsed.chunks) && !isSyntheticOrTestJob(parsed) && !parsed.isDeleted) {
               job = parsed;
               cloudJobs.set("legacy_default", job);
             }
@@ -866,9 +873,9 @@ function getJobForSession(req: express.Request): CloudJob | null {
       try {
         const files = fs.readdirSync(JOBS_DIR);
         for (const f of files) {
-          if (!f.endsWith(".json")) continue;
+          if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
           const parsed = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf-8"));
-          if (parsed?.chunks?.length > 0 && parsed.fileName === job.fileName) {
+          if (parsed?.chunks?.length > 0 && isSameNovel(parsed.fileName, job.fileName)) {
             job.chunks = parsed.chunks;
             break;
           }
@@ -1418,6 +1425,9 @@ async function loadCloudJobsFromDisk() {
       fs.mkdirSync(JOBS_DIR, { recursive: true });
     }
 
+    // 0. Load tombstones first to guarantee deleted novels are NEVER resurrected
+    const tombstones = await getDeletedJobTombstonesFromFirestore();
+
     // 1. Attempt to load authoritative state from cloud Firestore database (low-read summary only)
     let firestoreJobs = new Map<string, CloudJob>();
     let firestoreLoadedSuccessfully = false;
@@ -1440,18 +1450,34 @@ async function loadCloudJobsFromDisk() {
         const sId = job.sessionId || file.replace(/^job_/, "").replace(/\.json$/, "");
         job.sessionId = sId;
 
+        // Skip and remove any deleted tombstoned novels
+        const jName = (job.fileName || "").trim().toLowerCase();
+        const isTombstoned =
+          tombstones.ids.has(job.id) ||
+          tombstones.fileNames.has(jName) ||
+          Array.from(tombstones.fileNames).some((t) => isSameNovel(t, jName)) ||
+          (job as any).isDeleted;
+
+        if (isTombstoned) {
+          console.log(`[Startup] Cleaning up deleted disk job file: ${file}`);
+          try { fs.unlinkSync(fullPath); } catch {}
+          continue;
+        }
+
         // Fix any corrupt/empty completed chunks
-        for (const c of job.chunks) {
-          if (c.status === "completed" && (!c.englishText || !c.englishText.trim())) {
-            c.status = "pending";
-            c.englishText = undefined;
-          }
-          if (c.status === "error" || c.status === "processing") {
-            if (!c.englishText || !c.englishText.trim()) {
+        if (Array.isArray(job.chunks)) {
+          for (const c of job.chunks) {
+            if (c.status === "completed" && (!c.englishText || !c.englishText.trim())) {
               c.status = "pending";
-              c.errorMessage = undefined;
-            } else {
-              c.status = "completed";
+              c.englishText = undefined;
+            }
+            if (c.status === "error" || c.status === "processing") {
+              if (!c.englishText || !c.englishText.trim()) {
+                c.status = "pending";
+                c.errorMessage = undefined;
+              } else {
+                c.status = "completed";
+              }
             }
           }
         }
@@ -1467,8 +1493,19 @@ async function loadCloudJobsFromDisk() {
         const data = fs.readFileSync(CLOUD_JOB_FILE, "utf-8");
         const legacyJob: CloudJob = JSON.parse(data);
         if (legacyJob && Array.isArray(legacyJob.chunks)) {
-          legacyJob.sessionId = "legacy_default";
-          diskJobs.set("legacy_default", legacyJob);
+          const lName = (legacyJob.fileName || "").trim().toLowerCase();
+          const isTombstoned =
+            tombstones.ids.has(legacyJob.id) ||
+            tombstones.fileNames.has(lName) ||
+            Array.from(tombstones.fileNames).some((t) => isSameNovel(t, lName)) ||
+            (legacyJob as any).isDeleted;
+
+          if (!isTombstoned) {
+            legacyJob.sessionId = "legacy_default";
+            diskJobs.set("legacy_default", legacyJob);
+          } else {
+            try { fs.unlinkSync(CLOUD_JOB_FILE); } catch {}
+          }
         }
       } catch (legacyErr) {
         console.warn("Could not load legacy cloud job:", legacyErr);
@@ -1490,36 +1527,39 @@ async function loadCloudJobsFromDisk() {
         const dJob = diskJobs.get(sId);
 
         let reconciled: CloudJob;
-        if (fsJob) {
-          if (dJob && (dJob.chunks?.length || 0) > (fsJob.chunks?.length || 0)) {
-            reconciled = reconcileAuthoritativeJob(fsJob, dJob);
-          } else if (dJob) {
-            reconciled = reconcileAuthoritativeJob(fsJob, dJob);
-          } else {
-            reconciled = fsJob;
-          }
+        if (fsJob && dJob) {
+          reconciled = reconcileAuthoritativeJob(fsJob, dJob);
+        } else if (fsJob) {
+          reconciled = fsJob;
         } else {
           reconciled = dJob!;
           saveJobToFirestore(reconciled).catch(() => {});
         }
 
-        const completedCount = reconciled.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+        const completedCount = (reconciled.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
         const expectedTotal = Math.max(
           (reconciled as any).totalChunks || 0,
           (fsJob as any)?.totalChunks || 0,
           (dJob as any)?.totalChunks || 0,
-          reconciled.chunks.length
+          reconciled.chunks?.length || 0
         );
-        if (completedCount === expectedTotal && expectedTotal > 0 && reconciled.chunks.length >= expectedTotal) {
+
+        const isFullyDone =
+          (expectedTotal > 0 && completedCount >= expectedTotal && (reconciled.chunks?.length || 0) >= expectedTotal) ||
+          fsJob?.status === "completed" ||
+          dJob?.status === "completed" ||
+          ((fsJob as any)?.completedChunks >= expectedTotal && expectedTotal > 0);
+
+        if (isFullyDone) {
           reconciled.status = "completed";
-        } else if (reconciled.status === "completed" && (reconciled.chunks.length < expectedTotal || completedCount < expectedTotal)) {
-          console.warn(`[Startup] Self-healing premature completion on "${reconciled.fileName}": ${completedCount}/${expectedTotal} completed. Resuming job!`);
-          reconciled.status = "running";
+        } else if ((reconciled.chunks?.length || 0) === 0) {
+          // Job shell with 0 chunks in memory - do NOT set to running without chunks!
+          reconciled.status = "paused";
         }
 
         cloudJobs.set(sId, reconciled);
         saveJobToDisk(sId, reconciled);
-        console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${completedCount}/${reconciled.chunks.length} completed, status: ${reconciled.status})`);
+        console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${completedCount}/${expectedTotal || (reconciled.chunks?.length || 0)} completed, status: ${reconciled.status})`);
       }
     }
 
@@ -1539,8 +1579,8 @@ async function loadCloudJobsFromDisk() {
       const key = (job.fileName || "novel.txt").trim().toLowerCase();
       if (novelMap.has(key)) {
         const canonical = novelMap.get(key)!;
-        const total = (canonical as any).totalChunks || canonical.chunks.length;
-        const allDone = total > 0 && canonical.chunks.length >= total && canonical.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
+        const total = (canonical as any).totalChunks || canonical.chunks?.length || 0;
+        const allDone = (total > 0 && canonical.chunks?.length >= total && canonical.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim())) || canonical.status === "completed";
         if (allDone) {
           canonical.status = "completed";
         }
@@ -2585,8 +2625,8 @@ app.post("/api/telegram-settings", express.json(), (req, res) => {
 // -------------------------------------------------------------
 
 // Get status & progress of cloud job for current session (Data-saving lightweight mode by default)
-app.get("/api/cloud-job/status", (req, res) => {
-  const targetJob = getJobForSession(req);
+app.get("/api/cloud-job/status", async (req, res) => {
+  let targetJob = getJobForSession(req);
   const firestoreStatus = getFirestoreQuotaStatus();
   const projectsSummary = quotaScheduler.getActiveProjectSummary();
 
@@ -2600,15 +2640,41 @@ app.get("/api/cloud-job/status", (req, res) => {
     return;
   }
 
+  // Check if job is tombstoned/deleted
+  const tombstones = await getDeletedJobTombstonesFromFirestore();
+  const jName = (targetJob.fileName || "").trim().toLowerCase();
+  if (
+    tombstones.ids.has(targetJob.id) ||
+    tombstones.fileNames.has(jName) ||
+    Array.from(tombstones.fileNames).some((t) => isSameNovel(t, jName)) ||
+    (targetJob as any).isDeleted
+  ) {
+    res.json({
+      hasJob: false,
+      job: null,
+      firestoreStatus,
+      projectsSummary,
+    });
+    return;
+  }
+
   const includeFullText = req.query.full === "true";
   const isSummaryOnly = req.query.summary === "true";
 
-  const completedChunks = targetJob.chunks.filter((c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))).length;
+  // If full text was requested or non-summary is needed and memory chunks are empty, load from Firestore
+  if ((includeFullText || !isSummaryOnly) && targetJob.chunks.length === 0) {
+    targetJob = await loadFullChunksForJob(targetJob);
+    cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
+  }
+
+  const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
+  const completedChunks = targetJob.chunks.length > 0
+    ? targetJob.chunks.filter((c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))).length
+    : ((targetJob as any).completedChunks || (targetJob.status === "completed" ? expectedTotal : 0));
   const inProgressChunks = targetJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
 
-  const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
-  if (expectedTotal > 0 && targetJob.chunks.length >= expectedTotal && completedChunks === expectedTotal && targetJob.status !== "completed") {
+  if (expectedTotal > 0 && completedChunks >= expectedTotal && targetJob.status !== "completed") {
     targetJob.status = "completed";
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
     if (!isSyntheticOrTestJob(targetJob)) {
@@ -2633,13 +2699,17 @@ app.get("/api/cloud-job/status", (req, res) => {
     (c) => c.status === "completed" && ((c.englishText && c.englishText.trim().length > 0) || (c.wordCount && c.wordCount > 0)) && c.index > contiguousFrontierIndex
   ).length;
 
-  const completedEnglishWords = targetJob.chunks
-    .filter((c) => c.status === "completed")
-    .reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+  const completedEnglishWords = targetJob.chunks.length > 0
+    ? targetJob.chunks
+        .filter((c) => c.status === "completed")
+        .reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0)
+    : ((targetJob as any).completedEnglishWords || 0);
 
-  const completedChars = targetJob.chunks
-    .filter((c) => c.status === "completed")
-    .reduce((acc, c) => acc + (c.charCount || 0), 0);
+  const completedChars = targetJob.chunks.length > 0
+    ? targetJob.chunks
+        .filter((c) => c.status === "completed")
+        .reduce((acc, c) => acc + (c.charCount || 0), 0)
+    : ((targetJob as any).completedChars || 0);
 
   // Render chunks (if summary=true, omit chunks array completely to save 99.6% mobile data)
   const chunksData = isSummaryOnly ? [] : targetJob.chunks.map((c) => {
@@ -2676,7 +2746,7 @@ app.get("/api/cloud-job/status", (req, res) => {
       status: targetJob.status,
       startedAt: targetJob.startedAt,
       lastActiveAt: targetJob.lastActiveAt,
-      totalChunks: targetJob.chunks.length,
+      totalChunks: expectedTotal,
       completedChunks,
       inProgressChunks,
       errorChunks,
@@ -2696,20 +2766,26 @@ app.get("/api/cloud-job/status", (req, res) => {
 });
 
 // Sync full chapter texts for completed chunks or requested chunk indices on-demand
-app.get("/api/cloud-job/sync-texts", (req, res) => {
-  const targetJob = getJobForSession(req);
+app.get("/api/cloud-job/sync-texts", async (req, res) => {
+  let targetJob = getJobForSession(req);
   if (!targetJob) {
     res.json({ success: false, chunks: [] });
     return;
   }
 
+  // Rehydrate chunks from Firestore if memory has 0 chunks
+  if (!targetJob.chunks || targetJob.chunks.length === 0) {
+    targetJob = await loadFullChunksForJob(targetJob);
+    cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
+  }
+
   const indicesParam = req.query.indices as string;
-  let targetChunks = targetJob.chunks;
+  let targetChunks = targetJob.chunks || [];
   if (indicesParam) {
     const setIdx = new Set(indicesParam.split(",").map(Number));
-    targetChunks = targetJob.chunks.filter((c) => setIdx.has(c.index));
+    targetChunks = targetChunks.filter((c) => setIdx.has(c.index));
   } else if (req.query.completedOnly === "true") {
-    targetChunks = targetJob.chunks.filter(
+    targetChunks = targetChunks.filter(
       (c) => c.status === "completed" && !!c.englishText?.trim()
     );
   }
@@ -3152,24 +3228,44 @@ app.post("/api/cloud-job/delete", requireAuthMiddleware, async (req, res) => {
 });
 
 // List all distinct novels currently saved or translating on the server
-app.get("/api/cloud-job/list", requireAuthMiddleware, (req, res) => {
+app.get("/api/cloud-job/list", requireAuthMiddleware, async (req, res) => {
   const novelMap = new Map<string, any>();
+  const tombstones = await getDeletedJobTombstonesFromFirestore();
 
   // 1. Gather from in-memory cloudJobs
   for (const job of cloudJobs.values()) {
     if (isSyntheticOrTestJob(job)) continue;
     const name = job.fileName || "novel.txt";
     const key = name.trim().toLowerCase();
-    const completed = (job.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-    const total = (job.chunks || []).length;
+
+    // Check tombstones and deleted flags
+    if (
+      tombstones.ids.has(job.id) ||
+      tombstones.fileNames.has(key) ||
+      Array.from(tombstones.fileNames).some((t) => isSameNovel(t, key)) ||
+      (job as any).isDeleted
+    ) {
+      continue;
+    }
+
+    const total = (job as any).totalChunks || (job.chunks ? job.chunks.length : 0);
+    const completed = job.chunks && job.chunks.length > 0
+      ? job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length
+      : ((job as any).completedChunks || (job.status === "completed" ? total : 0));
     const wordCount = (job.chunks || []).reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+
+    const isAllDone = total > 0 && completed >= total;
+    let effectiveStatus = isAllDone ? "completed" : job.status;
+    if (effectiveStatus === "running" && (total === 0 || !isCloudWorkerRunning)) {
+      effectiveStatus = isAllDone ? "completed" : "paused";
+    }
 
     if (!novelMap.has(key) || (job.lastActiveAt || 0) > (novelMap.get(key).lastActiveAt || 0)) {
       novelMap.set(key, {
         id: job.id,
         sessionId: job.sessionId,
         fileName: job.fileName,
-        status: job.status,
+        status: effectiveStatus,
         completedChunks: completed,
         totalChunks: total,
         wordCount,
@@ -3184,21 +3280,34 @@ app.get("/api/cloud-job/list", requireAuthMiddleware, (req, res) => {
     if (fs.existsSync(JOBS_DIR)) {
       const files = fs.readdirSync(JOBS_DIR);
       for (const f of files) {
-        if (!f.endsWith(".json")) continue;
+        if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
         try {
           const content = fs.readFileSync(path.join(JOBS_DIR, f), "utf-8");
           const parsed = JSON.parse(content);
-          if (parsed && parsed.fileName && !isSyntheticOrTestJob(parsed)) {
+          if (parsed && parsed.fileName && !isSyntheticOrTestJob(parsed) && !parsed.isDeleted) {
             const key = parsed.fileName.trim().toLowerCase();
-            if (!novelMap.has(key)) {
-              const completed = (parsed.chunks || []).filter((c: any) => c.status === "completed" && !!c.englishText?.trim()).length;
-              const total = parsed.chunks ? parsed.chunks.length : 0;
+            const isTombstoned =
+              tombstones.ids.has(parsed.id) ||
+              tombstones.fileNames.has(key) ||
+              Array.from(tombstones.fileNames).some((t) => isSameNovel(t, key));
+
+            if (!isTombstoned && !novelMap.has(key)) {
+              const total = (parsed as any).totalChunks || (parsed.chunks ? parsed.chunks.length : 0);
+              const completed = parsed.chunks && parsed.chunks.length > 0
+                ? (parsed.chunks || []).filter((c: any) => c.status === "completed" && !!c.englishText?.trim()).length
+                : ((parsed as any).completedChunks || (parsed.status === "completed" ? total : 0));
               const wordCount = (parsed.chunks || []).reduce((acc: number, c: any) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0);
+              const isAllDone = total > 0 && completed >= total;
+              let effectiveStatus = isAllDone ? "completed" : (parsed.status || "idle");
+              if (effectiveStatus === "running" && !isCloudWorkerRunning) {
+                effectiveStatus = isAllDone ? "completed" : "paused";
+              }
+
               novelMap.set(key, {
                 id: parsed.id || f.replace(".json", ""),
                 sessionId: parsed.sessionId || "disk",
                 fileName: parsed.fileName,
-                status: parsed.status || (completed === total && total > 0 ? "completed" : "idle"),
+                status: effectiveStatus,
                 completedChunks: completed,
                 totalChunks: total,
                 wordCount,
