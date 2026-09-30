@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan to fix the chapter splitting and omission issue (e.g. Chapter 53/54) by guaranteeing 1:1 chapter mapping with internal sub-chunk translation and merging, and adding an automatic chapter integrity validator that verifies chapter titles, indices, continuity, duplicates, and merge order before export.",
+  "updatedAt":  "2026-09-28T17:45:28.757919907Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

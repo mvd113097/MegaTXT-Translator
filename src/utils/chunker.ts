@@ -1,4 +1,4 @@
-import { TextChunk } from "../types";
+import { TextChunk, SubChunkItem } from "../types";
 export {
   isStubOrEmptyText,
   isStubOrEmptyChunk,
@@ -32,6 +32,82 @@ export function countEnglishWords(text: string): number {
   if (!text || !text.trim()) return 0;
   const matches = text.trim().match(/\b[A-Za-z0-9'-]+\b/g);
   return matches ? matches.length : 0;
+}
+
+/**
+ * Splits text into internal sub-chunk segments for safe translation execution without creating rogue chapters.
+ */
+export function splitTextIntoSubChunks(
+  text: string,
+  targetSize: number = 2500,
+  parentChapterId?: string
+): SubChunkItem[] {
+  const subChunks: SubChunkItem[] = [];
+  if (!text.trim()) return subChunks;
+
+  const paragraphs = text.split(/\n+/);
+  let currentChunkText = "";
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i].trim();
+    if (!p) continue;
+
+    if (
+      currentChunkText.length > 0 &&
+      currentChunkText.length + p.length > targetSize
+    ) {
+      subChunks.push({
+        id: `${parentChapterId || "sub"}-part-${subChunks.length + 1}`,
+        subIndex: subChunks.length,
+        totalSubChunks: 0,
+        chineseText: currentChunkText.trim(),
+        charCount: countChineseCharacters(currentChunkText) || currentChunkText.length,
+        status: "pending",
+      });
+      currentChunkText = "";
+    }
+
+    if (p.length > targetSize) {
+      const sentences = p.split(/(?<=[。！？\.\!\?])\s*/);
+      for (const s of sentences) {
+        if (!s) continue;
+        if (
+          currentChunkText.length > 0 &&
+          currentChunkText.length + s.length > targetSize
+        ) {
+          subChunks.push({
+            id: `${parentChapterId || "sub"}-part-${subChunks.length + 1}`,
+            subIndex: subChunks.length,
+            totalSubChunks: 0,
+            chineseText: currentChunkText.trim(),
+            charCount: countChineseCharacters(currentChunkText) || currentChunkText.length,
+            status: "pending",
+          });
+          currentChunkText = "";
+        }
+        currentChunkText += (currentChunkText ? " " : "") + s;
+      }
+    } else {
+      currentChunkText += (currentChunkText ? "\n\n" : "") + p;
+    }
+  }
+
+  if (currentChunkText.trim()) {
+    subChunks.push({
+      id: `${parentChapterId || "sub"}-part-${subChunks.length + 1}`,
+      subIndex: subChunks.length,
+      totalSubChunks: 0,
+      chineseText: currentChunkText.trim(),
+      charCount: countChineseCharacters(currentChunkText) || currentChunkText.length,
+      status: "pending",
+    });
+  }
+
+  for (const item of subChunks) {
+    item.totalSubChunks = subChunks.length;
+  }
+
+  return subChunks;
 }
 
 /**
@@ -127,7 +203,8 @@ function splitTextIntoParagraphChunks(
 }
 
 /**
- * Main chunking function that takes raw Chinese text and outputs structured TextChunks
+ * Main chunking function that takes raw Chinese text and outputs structured TextChunks.
+ * Enforces strict 1:1 Chapter-to-Chunk mapping when splitByChapters is enabled.
  */
 export function chunkChineseText(
   rawText: string,
@@ -161,88 +238,27 @@ export function chunkChineseText(
           if (lines.length > 0 && lines[0].length < 60 && !/[.!?…。]$/.test(lines[0])) {
             preambleTitle = lines[0];
           }
-          const subChunks = splitTextIntoParagraphChunks(
-            preamble,
-            targetSize,
-            preambleTitle,
-            currentIndex
-          );
-          chunks.push(...subChunks);
-          currentIndex = chunks.length;
-        }
-      }
-
-      if (targetSize >= 5000) {
-        // High-Volume Free Tier Macro-Chunking: combine adjacent short chapters up to targetSize
-        let bufferText = "";
-        let bufferTitles: string[] = [];
-
-        for (let i = 0; i < matches.length; i++) {
-          const match = matches[i];
-          const chapterTitle = match[1].trim();
-          const startPos = match.index! + match[0].length;
-          const endPos =
-            i < matches.length - 1 ? matches[i + 1].index! : cleanedText.length;
-          const chapterContent = cleanedText.slice(startPos, endPos).trim();
-          const fullChapterText = `${chapterTitle}\n\n${chapterContent}`;
-
-          if (bufferText && bufferText.length + fullChapterText.length > targetSize * 1.15) {
-            // Flush current buffer
-            const combinedTitle =
-              bufferTitles.length > 1
-                ? `${bufferTitles[0]} – ${bufferTitles[bufferTitles.length - 1]}`
-                : bufferTitles[0] || `Section ${currentIndex + 1}`;
-
-            chunks.push({
-              id: `chunk-${Date.now()}-${currentIndex}-${Math.random().toString(36).slice(2, 7)}`,
-              index: currentIndex,
-              chapterTitle: combinedTitle,
-              chineseText: bufferText.trim(),
-              englishText: "",
-              charCount: countChineseCharacters(bufferText) || bufferText.length,
-              status: "pending",
-            });
-            currentIndex++;
-            bufferText = "";
-            bufferTitles = [];
-          }
-
-          if (fullChapterText.length > targetSize * 1.3) {
-            // Chapter is uniquely massive, split with paragraph splitter
-            const subChunks = splitTextIntoParagraphChunks(
-              fullChapterText,
-              targetSize,
-              chapterTitle,
-              currentIndex
-            );
-            chunks.push(...subChunks);
-            currentIndex = chunks.length;
-          } else {
-            bufferText += (bufferText ? "\n\n\n" : "") + fullChapterText;
-            bufferTitles.push(chapterTitle);
-          }
-        }
-
-        if (bufferText.trim()) {
-          const combinedTitle =
-            bufferTitles.length > 1
-              ? `${bufferTitles[0]} – ${bufferTitles[bufferTitles.length - 1]}`
-              : bufferTitles[0] || `Section ${currentIndex + 1}`;
+          const preambleId = `chapter-preamble-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          const subChunks =
+            preamble.length > targetSize * 1.3
+              ? splitTextIntoSubChunks(preamble, targetSize, preambleId)
+              : undefined;
 
           chunks.push({
-            id: `chunk-${Date.now()}-${currentIndex}-${Math.random().toString(36).slice(2, 7)}`,
+            id: preambleId,
             index: currentIndex,
-            chapterTitle: combinedTitle,
-            chineseText: bufferText.trim(),
+            chapterTitle: preambleTitle,
+            chineseText: preamble,
             englishText: "",
-            charCount: countChineseCharacters(bufferText) || bufferText.length,
+            charCount: countChineseCharacters(preamble) || preamble.length,
             status: "pending",
+            subChunks: subChunks && subChunks.length > 1 ? subChunks : undefined,
           });
+          currentIndex++;
         }
-
-        return chunks;
       }
 
+      // Enforce strict 1:1 Chapter Mapping: Every original novel chapter produces EXACTLY ONE TextChunk
       for (let i = 0; i < matches.length; i++) {
         const match = matches[i];
         const chapterTitle = match[1].trim();
@@ -252,37 +268,32 @@ export function chunkChineseText(
 
         const chapterContent = cleanedText.slice(startPos, endPos).trim();
         const fullChapterText = `${chapterTitle}\n\n${chapterContent}`;
+        const chapterId = `chapter-${Date.now()}-${currentIndex}-${Math.random().toString(36).slice(2, 7)}`;
 
-        if (fullChapterText.length <= targetSize * 1.3) {
-          // Chapter fits nicely in one chunk
-          chunks.push({
-            id: `chunk-${Date.now()}-${currentIndex}-${Math.random().toString(36).slice(2, 7)}`,
-            index: currentIndex,
-            chapterTitle,
-            chineseText: fullChapterText,
-            englishText: "",
-            charCount: countChineseCharacters(fullChapterText) || fullChapterText.length,
-            status: "pending",
-          });
-          currentIndex++;
-        } else {
-          // Chapter is long, split sub-chunks
-          const subChunks = splitTextIntoParagraphChunks(
-            fullChapterText,
-            targetSize,
-            chapterTitle,
-            currentIndex
-          );
-          chunks.push(...subChunks);
-          currentIndex = chunks.length;
+        let subChunks: SubChunkItem[] | undefined = undefined;
+        // If chapter exceeds target size * 1.25, decompose into internal sub-chunks for translation
+        if (fullChapterText.length > targetSize * 1.25) {
+          subChunks = splitTextIntoSubChunks(fullChapterText, targetSize, chapterId);
         }
+
+        chunks.push({
+          id: chapterId,
+          index: currentIndex,
+          chapterTitle,
+          chineseText: fullChapterText,
+          englishText: "",
+          charCount: countChineseCharacters(fullChapterText) || fullChapterText.length,
+          status: "pending",
+          subChunks: subChunks && subChunks.length > 1 ? subChunks : undefined,
+        });
+        currentIndex++;
       }
 
       return chunks;
     }
   }
 
-  // Fallback: split by paragraph blocks
+  // Fallback: split continuous text into paragraph blocks
   return splitTextIntoParagraphChunks(rawText, targetSize, undefined, 0);
 }
 

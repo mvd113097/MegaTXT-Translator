@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import { cleanAndDeduplicateChunks } from "../src/utils/chunkCleaner";
+import { validateChapterIntegrity } from "../src/utils/chapterValidator";
 
 export interface ServerTextChunk {
   id?: string;
@@ -10,6 +11,7 @@ export interface ServerTextChunk {
   charCount?: number;
   wordCount?: number;
   status?: string;
+  subChunks?: any[];
 }
 
 function escapeXml(unsafe: string): string {
@@ -26,6 +28,7 @@ export interface ServerEpubOptions {
   author?: string;
   language?: string;
   isBilingual?: boolean;
+  originalSourceText?: string;
 }
 
 export async function generateServerEpubBuffer(
@@ -48,6 +51,16 @@ export async function generateServerEpubBuffer(
     throw new Error(
       "No completed translated content available to build EPUB."
     );
+  }
+
+  // Automatic Chapter Integrity Validation: Block export if chapters are missing, duplicated, or misaligned
+  const validation = validateChapterIntegrity(validChunks as any, options.originalSourceText);
+  if (!validation.canExport) {
+    const errorDetails = validation.issues
+      .filter((i) => i.severity === "error")
+      .map((i) => i.message)
+      .join("\n- ");
+    throw new Error(`Server EPUB export blocked by Chapter Integrity Validator:\n- ${errorDetails}`);
   }
 
   // 1. mimetype (STORE)

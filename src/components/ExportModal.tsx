@@ -20,12 +20,15 @@ import { TextChunk } from "../types";
 import { countEnglishWords, analyzeChunkContinuity, getContiguousCompletedChunks, cleanAndDeduplicateChunks } from "../utils/chunker";
 import { downloadEpub } from "../utils/epubGenerator";
 import { downloadFile } from "../utils/fileDownloader";
+import { validateChapterIntegrity } from "../utils/chapterValidator";
 
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   chunks: TextChunk[];
   fileName: string;
+  isCloud?: boolean;
+  originalSourceText?: string;
 }
 
 type ExportFormat =
@@ -41,6 +44,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onClose,
   chunks,
   fileName,
+  isCloud = false,
+  originalSourceText,
 }) => {
   const [exportFormat, setExportFormat] = useState<ExportFormat>("epub");
   const [copied, setCopied] = useState(false);
@@ -69,8 +74,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   // Clean and deduplicate to strip empty stubs and merge duplicates seamlessly
   const exportChunks = cleanAndDeduplicateChunks(rawExportChunks);
 
+  // Automatic Chapter Integrity Validation
+  const validation = validateChapterIntegrity(
+    exportFormat === "chinese_txt" ? chunks : exportChunks,
+    originalSourceText
+  );
+
   const totalEnglishWords = exportChunks.reduce(
-    (acc, c) => acc + countEnglishWords(c.englishText),
+    (acc, c) => acc + (c.wordCount || countEnglishWords(c.englishText)),
     0
   );
   const baseName = fileName.replace(/\.[^/.]+$/, "") || "translated_novel";
@@ -83,7 +94,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       return sortedChunks
         .map((c) => {
           const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";
-          return `${header}${c.chineseText.trim()}`;
+          return `${header}${(c.chineseText || "").trim()}`;
         })
         .join("\n\n\n");
     }
@@ -92,7 +103,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       return exportChunks
         .map((c) => {
           const header = c.chapterTitle ? `${c.chapterTitle}\n\n` : "";
-          return `${header}${c.englishText.trim()}`;
+          return `${header}${(c.englishText || "").trim()}`;
         })
         .join("\n\n\n");
     }
@@ -103,7 +114,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           const header = c.chapterTitle
             ? `====================\n${c.chapterTitle}\n====================\n\n`
             : "";
-          return `${header}[ORIGINAL CHINESE]\n${c.chineseText.trim()}\n\n[ENGLISH TRANSLATION]\n${c.englishText.trim()}`;
+          return `${header}[ORIGINAL CHINESE]\n${(c.chineseText || "").trim()}\n\n[ENGLISH TRANSLATION]\n${(c.englishText || "").trim()}`;
         })
         .join("\n\n--------------------\n\n");
     }
@@ -114,7 +125,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           const title = c.chapterTitle
             ? `# ${c.chapterTitle}\n\n`
             : `## Section ${c.index + 1}\n\n`;
-          return `${title}${c.englishText.trim()}`;
+          return `${title}${(c.englishText || "").trim()}`;
         })
         .join("\n\n\n");
     }
@@ -134,7 +145,48 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       return;
     }
 
-    // EPUB format export
+    // Automatic Chapter Integrity Validation Enforcement: Block export if integrity fails
+    if (exportFormat !== "chinese_txt" && !validation.canExport) {
+      setErrorMessage(
+        `Export blocked by Automatic Chapter Integrity Validator:\n${validation.summary}`
+      );
+      return;
+    }
+
+    // If in Cloud Mode, stream directly from the server to save ~80% network data
+    if (isCloud && (exportFormat === "epub" || exportFormat === "bilingual_epub")) {
+      const isBilingual = exportFormat === "bilingual_epub";
+      const url = `/api/cloud-job/download-epub?novelName=${encodeURIComponent(fileName)}${isBilingual ? "&bilingual=true" : ""}`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${baseName}${isBilingual ? "_bilingual" : ""}.epub`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setDownloadSuccess({
+        filename: `${baseName}${isBilingual ? "_bilingual" : ""}.epub`,
+        url,
+      });
+      return;
+    }
+
+    if (isCloud && (exportFormat === "english_txt" || exportFormat === "bilingual_txt")) {
+      const isBilingual = exportFormat === "bilingual_txt";
+      const url = `/api/cloud-job/download-txt?novelName=${encodeURIComponent(fileName)}${isBilingual ? "&bilingual=true" : ""}`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${baseName}${isBilingual ? "_bilingual" : "_en"}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setDownloadSuccess({
+        filename: `${baseName}${isBilingual ? "_bilingual" : "_en"}.txt`,
+        url,
+      });
+      return;
+    }
+
+    // Client-side EPUB format export
     if (exportFormat === "epub" || exportFormat === "bilingual_epub") {
       try {
         setIsExporting(true);
@@ -301,6 +353,54 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               <span>{errorMessage}</span>
             </div>
           )}
+
+          {/* Chapter Integrity Verification Status */}
+          <div
+            className={`rounded-xl border p-3.5 text-xs transition ${
+              validation.isValid
+                ? "border-emerald-200 dark:border-emerald-800/80 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200"
+                : "border-rose-200 dark:border-rose-800/80 bg-rose-50/70 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200"
+            }`}
+          >
+            <div className="flex items-start gap-2.5">
+              {validation.isValid ? (
+                <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
+              ) : (
+                <AlertCircle className="h-5 w-5 shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
+              )}
+              <div className="flex-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs">
+                    {validation.isValid
+                      ? "Chapter Integrity: Verified (1:1 Novel Mapping)"
+                      : "Chapter Integrity: Issues Flagged"}
+                  </span>
+                  <span
+                    className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                      validation.isValid
+                        ? "bg-emerald-200/80 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200"
+                        : "bg-rose-200/80 dark:bg-rose-900/60 text-rose-800 dark:text-rose-200"
+                    }`}
+                  >
+                    {validation.completedChapters} / {validation.totalChapters} Chapters
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed opacity-90">
+                  {validation.summary}
+                </p>
+                {validation.issues.length > 0 && !validation.isValid && (
+                  <ul className="mt-2 space-y-1 text-[11px] border-t border-rose-200 dark:border-rose-800/60 pt-2 font-mono">
+                    {validation.issues.map((iss, idx) => (
+                      <li key={idx} className="flex items-start gap-1.5">
+                        <span className="text-rose-600 dark:text-rose-400 font-bold">•</span>
+                        <span>{iss.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
 
           {/* Format Choices */}
           <div>
@@ -544,8 +644,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               id="download-file-btn"
               onClick={handleDownload}
-              disabled={isExporting}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-indigo-700 active:scale-95 disabled:opacity-50 cursor-pointer"
+              disabled={isExporting || (exportFormat !== "chinese_txt" && !validation.canExport)}
+              title={exportFormat !== "chinese_txt" && !validation.canExport ? validation.summary : undefined}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-xs transition ${
+                exportFormat !== "chinese_txt" && !validation.canExport
+                  ? "bg-slate-400 dark:bg-slate-600 cursor-not-allowed opacity-60"
+                  : "bg-indigo-600 hover:bg-indigo-700 active:scale-95 cursor-pointer"
+              }`}
             >
               {isExporting ? (
                 <>

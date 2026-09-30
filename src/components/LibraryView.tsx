@@ -21,6 +21,7 @@ import {
   removeReadingHistoryItem,
   getAllNovelCachedChapterCounts,
 } from "../utils/indexedDbStorage";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface LibraryViewProps {
   onOpenReader: (novel: {
@@ -48,6 +49,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [books, setBooks] = useState<LibraryBook[]>(() => getLocalLibraryBooks());
   const [searchQuery, setSearchQuery] = useState("");
   const [cacheCounts, setCacheCounts] = useState<Record<string, number>>({});
+  const [bookToDelete, setBookToDelete] = useState<LibraryBook | null>(null);
 
   const refreshBooks = () => {
     setBooks(getLocalLibraryBooks());
@@ -69,13 +71,17 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     e.stopPropagation();
     const book = books.find((b) => b.id === id);
     if (!book) return;
-    if (!window.confirm(`Delete "${book.title}" from your library and delete its translations from the server?`)) {
-      return;
-    }
+    setBookToDelete(book);
+  };
 
-    const updated = removeBookFromLibrary(id);
+  const confirmDeleteBook = () => {
+    if (!bookToDelete) return;
+    const book = bookToDelete;
+    setBookToDelete(null);
+
+    const updated = removeBookFromLibrary(book.id);
     setBooks(updated);
-    removeReadingHistoryItem(id);
+    removeReadingHistoryItem(book.id);
     removeReadingHistoryItem(book.title);
 
     try {
@@ -361,6 +367,16 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             );
           })}
         </div>
+      )}
+
+      {bookToDelete && (
+        <ConfirmModal
+          isOpen={!!bookToDelete}
+          title="Delete from Library"
+          message={`Delete "${bookToDelete.title}" from your library and delete its translations from the server?`}
+          onConfirm={confirmDeleteBook}
+          onCancel={() => setBookToDelete(null)}
+        />
       )}
     </div>
   );

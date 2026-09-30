@@ -24,6 +24,7 @@ import {
   ReadingHistoryItem,
 } from "../utils/indexedDbStorage";
 import { isSameNovel } from "../utils/chunkCleaner";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface StoredNovel {
   id: string;
@@ -72,6 +73,17 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [isClearingAll, setIsClearingAll] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: "",
+    message: "",
+    onConfirm: () => {},
+  });
 
   const refreshReadingHistory = () => {
     const deletedSet = getLocalDeletedNovels();
@@ -186,12 +198,16 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
       e.stopPropagation();
     }
     if (readingHistory.length === 0) return;
-    const confirmClear = window.confirm(
-      "Are you sure you want to delete ALL novels from your reading history?"
-    );
-    if (!confirmClear) return;
-    clearReadingHistory();
-    setReadingHistory([]);
+    setConfirmDialog({
+      isOpen: true,
+      title: "Clear Reading History",
+      message: "Are you sure you want to delete ALL novels from your reading history?",
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        clearReadingHistory();
+        setReadingHistory([]);
+      },
+    });
   };
 
   const handleReadHistoryNovel = (item: ReadingHistoryItem) => {
@@ -221,12 +237,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     return new Date(timestamp).toLocaleDateString();
   };
 
-  const handleDeleteNovel = async (novel: StoredNovel) => {
-    const confirmDelete = window.confirm(
-      `Permanently delete "${novel.fileName}" from the server?\n\nThis will stop all background workers and completely remove all translated chunks and archives.`
-    );
-    if (!confirmDelete) return;
-
+  const executeDeleteNovel = async (novel: StoredNovel) => {
     const deleteKey = novel.id || novel.fileName;
     setDeletingId(deleteKey);
 
@@ -280,12 +291,19 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     }
   };
 
-  const handleClearAll = async () => {
-    const confirmClear = window.confirm(
-      "Are you sure you want to permanently clear ALL saved novels and translation archives from the server?\n\nThis action cannot be undone."
-    );
-    if (!confirmClear) return;
+  const handleDeleteNovel = (novel: StoredNovel) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Delete Cloud Translation",
+      message: `Permanently delete "${novel.fileName}" from the server?\n\nThis will stop all background workers and completely remove all translated chunks and archives.`,
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        executeDeleteNovel(novel);
+      },
+    });
+  };
 
+  const executeClearAll = async () => {
     setIsClearingAll(true);
     setNovels([]);
 
@@ -321,6 +339,18 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     } finally {
       setIsClearingAll(false);
     }
+  };
+
+  const handleClearAll = () => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Clear All Server Translations",
+      message: "Are you sure you want to permanently clear ALL saved novels and translation archives from the server?\n\nThis action cannot be undone.",
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        executeClearAll();
+      },
+    });
   };
 
   return (
@@ -698,6 +728,14 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
           </button>
         </div>
       </div>
+
+      <ConfirmModal
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

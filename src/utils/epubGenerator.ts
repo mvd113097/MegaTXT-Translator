@@ -1,6 +1,7 @@
 import { TextChunk } from "../types";
 import { downloadFile } from "./fileDownloader";
 import { getContiguousCompletedChunks, cleanAndDeduplicateChunks } from "./chunker";
+import { validateChapterIntegrity } from "./chapterValidator";
 
 function escapeXml(unsafe: string): string {
   return unsafe
@@ -17,11 +18,12 @@ export interface EpubOptions {
   language?: string;
   isBilingual?: boolean;
   allowGaps?: boolean; // Default false. When false, strictly enforces contiguous chapters from index 0
+  originalSourceText?: string;
 }
 
 /**
  * Builds a valid EPUB 3 / EPUB 2 compatible ebook archive from translated chunks.
- * Enforces the Never-Skip contiguous guarantee: only unbroken sequences starting from Chunk 1 are exported.
+ * Enforces the Never-Skip contiguous guarantee and automatic chapter integrity validation.
  */
 export async function generateEpubBlob(
   chunks: TextChunk[],
@@ -46,6 +48,16 @@ export async function generateEpubBlob(
     throw new Error(
       "No contiguous translated content available to build EPUB (Chapter 1 must be translated first)."
     );
+  }
+
+  // Automatic Chapter Integrity Validation: Block export if sequence or chapters are corrupted
+  const validation = validateChapterIntegrity(validChunks, options.originalSourceText);
+  if (!validation.canExport) {
+    const errorDetails = validation.issues
+      .filter((i) => i.severity === "error")
+      .map((i) => i.message)
+      .join("\n- ");
+    throw new Error(`Export blocked by Chapter Integrity Validator:\n- ${errorDetails}`);
   }
 
   // 1. mimetype (MUST be first file, uncompressed STORE)

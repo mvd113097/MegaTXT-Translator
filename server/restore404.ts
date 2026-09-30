@@ -17,9 +17,17 @@ interface Chunk {
 }
 
 export function generate404PrimitiveChenQiChunks(): { job: any; chunks: Chunk[] } {
-  // Load raw data from archive_________txt.json
-  const archivePath = path.resolve(process.cwd(), "data/jobs/archive_________txt.json");
-  const raw = fs.readFileSync(archivePath, "utf8");
+  try {
+    // Load raw data from archive_________txt.json or available fallback
+    const candidatePaths = [
+      path.resolve(process.cwd(), "data/jobs/archive_________txt.json"),
+      path.resolve(process.cwd(), "data/jobs/archive_primitive_chen_qi_txt.json")
+    ];
+    const archivePath = candidatePaths.find(p => fs.existsSync(p));
+    if (!archivePath) {
+      return { job: null, chunks: [] };
+    }
+    const raw = fs.readFileSync(archivePath, "utf8");
   
   const firstBrace = raw.indexOf("{");
   let depth = 0;
@@ -173,7 +181,11 @@ export function generate404PrimitiveChenQiChunks(): { job: any; chunks: Chunk[] 
     chunks: chunks
   };
 
-  return { job, chunks };
+    return { job, chunks };
+  } catch (err) {
+    console.warn("[restore404] Could not generate 404 chunks:", err);
+    return { job: null, chunks: [] };
+  }
 }
 
 export async function runRestoration() {
@@ -222,9 +234,17 @@ export async function runRestoration() {
   console.log("Restoration execution finished successfully.");
 }
 
-runRestoration().catch(err => {
-  console.error("Run error:", err);
-  process.exit(1);
-}).then(() => {
-  process.exit(0);
-});
+// Only execute restoration when explicitly run as a standalone script from CLI
+const isDirectExecution = typeof process !== "undefined" && process.argv && process.argv[1] && (
+  process.argv[1].endsWith("restore404.ts") || 
+  process.argv[1].endsWith("restore404.js")
+);
+
+if (isDirectExecution) {
+  runRestoration().catch(err => {
+    console.error("Run error:", err);
+    process.exit(1);
+  }).then(() => {
+    process.exit(0);
+  });
+}

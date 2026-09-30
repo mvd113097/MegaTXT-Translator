@@ -159,19 +159,27 @@ export function extractChapterNormalizedKey(title?: string, fallbackIndex?: numb
 }
 
 /**
- * Strips out stub / placeholder markers from chapter title (e.g. "Chapter 2 (Empty)" -> "Chapter 2")
+ * Strips out stub / placeholder markers and Part tags from chapter title
  */
-export function cleanChapterTitle(title?: string): string {
+export function cleanChapterTitle(title?: string, stripPartTags: boolean = true): string {
   if (!title) return "";
-  return title
+  let cleaned = title
     .replace(/\s*\((?:empty|stub|placeholder|duplicate)\)/gi, "")
     .replace(/\s*\[(?:empty|stub|placeholder|duplicate)\]/gi, "")
     .replace(/\s*[（(]【?空】?[）)]/g, "")
     .replace(/\s*\[【?空】?\]/g, "")
     .replace(/\s*[（(]防(?:采集|盗)[）)]/g, "")
     .replace(/\s*\[防(?:采集|盗)\]/g, "")
-    .replace(/\s*【防(?:采集|盗)】/g, "")
-    .trim();
+    .replace(/\s*【防(?:采集|盗)】/g, "");
+
+  if (stripPartTags) {
+    cleaned = cleaned
+      .replace(/\s*[\(\[]Part\s+\d+[\)\]]/gi, "")
+      .replace(/\s*\(Part\s+\d+.*?\)/gi, "")
+      .replace(/\s*（(?:第?[一二三四五六七八九十0-9]+部分|上|中|下)）/g, "");
+  }
+
+  return cleaned.trim();
 }
 
 /**

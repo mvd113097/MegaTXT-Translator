@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { TextChunk, TranslationMode } from "../types";
 import { countEnglishWords, analyzeChunkContinuity } from "../utils/chunker";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface TranslationQueueHubProps {
   chunks: TextChunk[];
@@ -47,6 +48,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "processing" | "pending">("all");
+  const [errorModalChunk, setErrorModalChunk] = useState<TextChunk | null>(null);
 
   const completedChunks = chunks.filter((c) => c.status === "completed");
   const pendingChunks = chunks.filter((c) => c.status === "pending");
@@ -301,10 +303,7 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
                       {chunk.status === "error" && (
                         <button
                           type="button"
-                          onClick={() => {
-                            const msg = chunk.errorMessage || "Temporary rate limit or empty response from model. Auto-retry is active.";
-                            alert(`Chapter #${chunk.index + 1} Error Details:\n\n${msg}\n\nClick the circular reload button or the top Orange button to re-run immediately.`);
-                          }}
+                          onClick={() => setErrorModalChunk(chunk)}
                           className="inline-flex items-center gap-1 rounded-full bg-rose-100 dark:bg-rose-950/80 hover:bg-rose-200 dark:hover:bg-rose-900/80 px-2.5 py-0.5 text-[11px] font-bold text-rose-700 dark:text-rose-300 cursor-pointer transition whitespace-nowrap"
                           title="Click to view exact error details"
                         >
@@ -330,6 +329,23 @@ export const TranslationQueueHub: React.FC<TranslationQueueHubProps> = ({
           )}
         </div>
       </div>
+
+      {errorModalChunk && (
+        <ConfirmModal
+          isOpen={!!errorModalChunk}
+          title={`Chapter #${errorModalChunk.index + 1} Error Details`}
+          message={`${errorModalChunk.errorMessage || "Temporary rate limit or empty response from model. Auto-retry is active."}\n\nClick "Retry Chapter Now" to translate immediately.`}
+          confirmText="Retry Chapter Now"
+          cancelText="Close"
+          isDestructive={false}
+          onConfirm={() => {
+            const chunkId = errorModalChunk.id;
+            setErrorModalChunk(null);
+            onTranslateChunk(chunkId);
+          }}
+          onCancel={() => setErrorModalChunk(null)}
+        />
+      )}
     </div>
   );
 };

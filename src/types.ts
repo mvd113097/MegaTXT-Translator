@@ -17,6 +17,16 @@ export interface GlossaryTerm {
 
 export type ChunkStatus = "pending" | "processing" | "completed" | "error";
 
+export interface SubChunkItem {
+  id: string;
+  subIndex: number;
+  totalSubChunks: number;
+  chineseText: string;
+  englishText?: string;
+  charCount: number;
+  status?: ChunkStatus;
+}
+
 export interface TextChunk {
   id: string;
   index: number;
@@ -32,6 +42,7 @@ export interface TextChunk {
   errorMessage?: string;
   durationMs?: number;
   edited?: boolean;
+  subChunks?: SubChunkItem[];
 }
 
 export interface TranslationSession {
@@ -41,6 +52,7 @@ export interface TranslationSession {
   fileSizeBytes: number;
   totalChineseChars: number;
   chunks: TextChunk[];
+  originalSourceText?: string;
   style: TranslationStyle;
   customInstructions: string;
   glossary: GlossaryTerm[];

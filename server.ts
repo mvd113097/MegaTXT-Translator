@@ -3,6 +3,7 @@ import compression from "compression";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import zlib from "zlib";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
@@ -33,7 +34,8 @@ import {
 import { generateServerEpubBuffer } from "./server/epubServer";
 import { cleanAndDeduplicateChunks } from "./src/utils/chunkCleaner";
 import { generate404PrimitiveChenQiChunks } from "./server/restore404";
-import { chunkChineseText, countChineseCharacters } from "./src/utils/chunker";
+import { chunkChineseText, countChineseCharacters, splitTextIntoSubChunks } from "./src/utils/chunker";
+import { validateChapterIntegrity } from "./src/utils/chapterValidator";
 
 
 dotenv.config();
@@ -88,8 +90,8 @@ function getGeminiClient(): GoogleGenAI {
 // Supported modern models per Google GenAI SDK guidelines:
 // gemini-3.8-flash and gemini-3.1-flash-lite deliver high throughput, fast translation, and excellent output quality.
 const FREE_TIER_MODELS = [
-  "gemini-3.8-flash",
   "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
   "gemini-flash-latest"
 ];
 
@@ -542,7 +544,8 @@ async function generateWithQuotaScheduler(
 
       const hasOtherProjects = quotaScheduler.hasOtherActiveProjects(excludeProjectIds);
 
-      if (hasOtherProjects) {
+      // If at least 2 projects in pool reported 503 on this model in this round, rotate model immediately
+      if (hasOtherProjects && excludeProjectIds.size < 2) {
         // Instant routing to another active project without stalling the queue or locking the model
         const remainingProjects = quotaScheduler.getAvailableProjectsCount(excludeProjectIds);
         console.log(
@@ -552,22 +555,21 @@ async function generateWithQuotaScheduler(
         return generateWithQuotaScheduler(
           userPrompt,
           systemInstruction,
-          currentModelIdx, // Keep the same model! Other active projects can try it immediately without locking the model.
+          currentModelIdx,
           retries - 1,
-          0, // 0ms delay: Instant failover without stalling the queue!
+          0,
           rawSourceText,
           excludeProjectIds
         );
       }
 
-      // All active projects in the pool have encountered 503 on this model in this round.
-      // Now failover immediately to the next model in pool without stalling the queue!
+      // Model is experiencing widespread high demand across projects. Failover immediately to next model!
       console.warn(
-        `[Quota Scheduler] Upstream model "${modelName}" high demand across all ${quotaScheduler.enabledProjectCount} active project(s). Failing over instantly to next model in pool without stalling queue...`
+        `[Quota Scheduler] Upstream model "${modelName}" high demand across projects. Failing over instantly to next model in pool without stalling queue...`
       );
 
-      // Place a lightweight non-blocking 5s cooldown on this model so the next model is preferred
-      modelCooldowns.set(modelName, Date.now() + 5000);
+      // Place a lightweight non-blocking 10s cooldown on this model so the next model is preferred
+      modelCooldowns.set(modelName, Date.now() + 10000);
 
       // Reset project exclusions so all active projects can try the new model
       const nextExclude = new Set<string>();
@@ -693,6 +695,7 @@ interface ServerTextChunk {
   durationMs?: number;
   edited?: boolean;
   lastErrorAt?: number;
+  subChunks?: any[];
 }
 
 interface CloudJob {
@@ -702,6 +705,7 @@ interface CloudJob {
   fileSizeBytes: number;
   totalChineseChars: number;
   chunks: ServerTextChunk[];
+  originalSourceText?: string;
   style: string;
   customInstructions: string;
   glossary: Array<{ id: string; original: string; translation: string; category?: string; notes?: string }>;
@@ -1984,6 +1988,79 @@ IMMEDIATELY PRECEDING CONTEXT (For narrative continuity & pronoun resolution onl
           let systemInstruction = "";
           let userPrompt = "";
 
+          // Long chapter internal sub-chunk translation and sequential merging
+          if (batchChunks.length === 1 && batchChunks[0].subChunks && batchChunks[0].subChunks.length > 1) {
+            const single = batchChunks[0];
+            const subChunks = single.subChunks;
+            const subTranslations: string[] = [];
+            let allSubSuccess = true;
+
+            for (let sIdx = 0; sIdx < subChunks.length; sIdx++) {
+              const sub = subChunks[sIdx];
+              try {
+                const subPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
+                  targetJob.customInstructions ? `Special Instructions: ${targetJob.customInstructions}\n\n` : ""
+                }CHINESE SOURCE TEXT (${single.chapterTitle || "Chapter"} - Part ${sIdx + 1} of ${subChunks.length}):
+"""
+${sub.chineseText}
+"""
+
+Translate the above Chinese text directly into English:`;
+
+                const subRes = await generateWithQuotaScheduler(
+                  subPrompt,
+                  `You are a master professional Chinese-to-English translator and editor.
+Translation Guidelines:
+1. Translate faithfully without summarizing, omitting, or truncating any paragraphs or dialogues.
+2. Maintain original paragraph breaks and dialogue formatting.
+3. ${styleGuidance}
+4. ${glossaryBlock || ""}
+5. Return ONLY the translated English text directly.`,
+                  0,
+                  6,
+                  3000,
+                  sub.chineseText
+                );
+
+                const subClean = (subRes.text || "").trim().replace(/<<<CHAPTER_START[^>]*>>>/gi, "").replace(/<<<CHAPTER_END[^>]*>>>/gi, "").trim();
+                if (subClean.length > 0) {
+                  sub.englishText = subClean;
+                  sub.status = "completed";
+                  subTranslations.push(subClean);
+                } else {
+                  throw new Error("Empty sub-chunk translation response");
+                }
+              } catch (subErr) {
+                try {
+                  const gTrans = await translateChapterWithGoogle(sub.chineseText);
+                  if (gTrans && gTrans.trim().length > 0) {
+                    sub.englishText = gTrans.trim();
+                    sub.status = "completed";
+                    subTranslations.push(gTrans.trim());
+                  } else {
+                    allSubSuccess = false;
+                    break;
+                  }
+                } catch {
+                  allSubSuccess = false;
+                  break;
+                }
+              }
+            }
+
+            if (allSubSuccess && subTranslations.length === subChunks.length) {
+              single.englishText = subTranslations.join("\n\n");
+              single.durationMs = Date.now() - startBatchTime;
+              single.errorMessage = undefined;
+              single.lastErrorAt = undefined;
+              single.status = "completed";
+              inFlightChunkIds.delete(single.id);
+              success = true;
+              saveChunkToFirestore(targetJob.id, single).catch(() => {});
+              break;
+            }
+          }
+
           if (batchChunks.length === 1) {
             const single = batchChunks[0];
             systemInstruction = `You are a master professional Chinese-to-English translator and editor.
@@ -3030,21 +3107,85 @@ app.get("/api/cloud-job/sync-texts", async (req, res) => {
   });
 });
 
-// Direct server-side EPUB builder & downloader with 0 client memory bottleneck
+// Direct server-side EPUB builder & downloader with 0 client memory bottleneck & minimal network data usage
 app.get("/api/cloud-job/download-epub", async (req, res) => {
   try {
-    const targetJob = getJobForSession(req);
+    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+    let targetNovelName = "";
+    if (rawNovelHeader && typeof rawNovelHeader === "string") {
+      try { targetNovelName = decodeURIComponent(rawNovelHeader).trim(); } catch { targetNovelName = rawNovelHeader.trim(); }
+    } else if (novelQuery && typeof novelQuery === "string") {
+      try { targetNovelName = decodeURIComponent(novelQuery).trim(); } catch { targetNovelName = novelQuery.trim(); }
+    }
+
+    let targetJob: CloudJob | null = null;
+    if (targetNovelName && targetNovelName !== "[object Object]" && targetNovelName !== "undefined") {
+      for (const j of cloudJobs.values()) {
+        if (isSameNovel(j.fileName, targetNovelName) && !(j as any).isDeleted) {
+          targetJob = j;
+          break;
+        }
+      }
+      if (!targetJob) {
+        targetJob = await findJobInFirestoreByNovel(targetNovelName);
+      }
+    }
+
+    if (!targetJob) {
+      targetJob = getJobForSession(req);
+    }
+
     if (!targetJob) {
       res.status(404).send("No active or completed novel translation found.");
       return;
     }
+
+    // Rehydrate chunks from Firestore if memory has 0 chunks or missing completed texts
+    const hasMissingText = (targetJob.chunks || []).some(
+      (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
+    );
+    if (!targetJob.chunks || targetJob.chunks.length === 0 || hasMissingText) {
+      targetJob = await loadFullChunksForJob(targetJob);
+      cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
+    }
+
     const isBilingual = req.query.bilingual === "true";
-    const rawCompletedChunks = (targetJob.chunks || []).filter(
+    const continuousOnly = req.query.continuous === "true";
+
+    let rawCompletedChunks = (targetJob.chunks || []).filter(
       (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
     );
+    rawCompletedChunks.sort((a, b) => a.index - b.index);
+
+    if (continuousOnly) {
+      const continuousList: typeof rawCompletedChunks = [];
+      for (let i = 0; i < rawCompletedChunks.length; i++) {
+        if (rawCompletedChunks[i].index === i) {
+          continuousList.push(rawCompletedChunks[i]);
+        } else {
+          break;
+        }
+      }
+      if (continuousList.length > 0) {
+        rawCompletedChunks = continuousList;
+      }
+    }
+
     const completedChunks = cleanAndDeduplicateChunks(rawCompletedChunks);
     if (completedChunks.length === 0) {
       res.status(400).send("No translated chapters ready to download yet.");
+      return;
+    }
+
+    // Automatic Chapter Integrity Validation before EPUB export
+    const validation = validateChapterIntegrity(completedChunks as any, targetJob.originalSourceText);
+    if (!validation.canExport) {
+      const errorDetails = validation.issues
+        .filter((i) => i.severity === "error")
+        .map((i) => i.message)
+        .join("\n- ");
+      res.status(400).send("Export blocked by Chapter Integrity Validator:\n- " + errorDetails);
       return;
     }
 
@@ -3052,6 +3193,7 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
     const epubBuffer = await generateServerEpubBuffer(completedChunks, {
       bookTitle: baseName.replace(/_/g, " "),
       isBilingual,
+      originalSourceText: targetJob.originalSourceText,
     });
 
     const safeFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : ""}.epub`);
@@ -3066,20 +3208,83 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
 });
 
 // Direct server-side TXT downloader
-app.get("/api/cloud-job/download-txt", (req, res) => {
+app.get("/api/cloud-job/download-txt", async (req, res) => {
   try {
-    const targetJob = getJobForSession(req);
+    const rawNovelHeader = req.headers["x-novel-name"] || req.headers["x-novel-filename"];
+    const novelQuery = (req.query.fileName || req.query.novelName || "") as string;
+    let targetNovelName = "";
+    if (rawNovelHeader && typeof rawNovelHeader === "string") {
+      try { targetNovelName = decodeURIComponent(rawNovelHeader).trim(); } catch { targetNovelName = rawNovelHeader.trim(); }
+    } else if (novelQuery && typeof novelQuery === "string") {
+      try { targetNovelName = decodeURIComponent(novelQuery).trim(); } catch { targetNovelName = novelQuery.trim(); }
+    }
+
+    let targetJob: CloudJob | null = null;
+    if (targetNovelName && targetNovelName !== "[object Object]" && targetNovelName !== "undefined") {
+      for (const j of cloudJobs.values()) {
+        if (isSameNovel(j.fileName, targetNovelName) && !(j as any).isDeleted) {
+          targetJob = j;
+          break;
+        }
+      }
+      if (!targetJob) {
+        targetJob = await findJobInFirestoreByNovel(targetNovelName);
+      }
+    }
+
+    if (!targetJob) {
+      targetJob = getJobForSession(req);
+    }
+
     if (!targetJob) {
       res.status(404).send("No active or completed novel translation found.");
       return;
     }
+
+    const hasMissingText = (targetJob.chunks || []).some(
+      (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
+    );
+    if (!targetJob.chunks || targetJob.chunks.length === 0 || hasMissingText) {
+      targetJob = await loadFullChunksForJob(targetJob);
+      cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
+    }
+
     const isBilingual = req.query.bilingual === "true";
-    const rawCompletedChunks = (targetJob.chunks || []).filter(
+    const continuousOnly = req.query.continuous === "true";
+
+    let rawCompletedChunks = (targetJob.chunks || []).filter(
       (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
     );
+    rawCompletedChunks.sort((a, b) => a.index - b.index);
+
+    if (continuousOnly) {
+      const continuousList: typeof rawCompletedChunks = [];
+      for (let i = 0; i < rawCompletedChunks.length; i++) {
+        if (rawCompletedChunks[i].index === i) {
+          continuousList.push(rawCompletedChunks[i]);
+        } else {
+          break;
+        }
+      }
+      if (continuousList.length > 0) {
+        rawCompletedChunks = continuousList;
+      }
+    }
+
     const completedChunks = cleanAndDeduplicateChunks(rawCompletedChunks);
     if (completedChunks.length === 0) {
       res.status(400).send("No translated chapters ready to download yet.");
+      return;
+    }
+
+    // Automatic Chapter Integrity Validation before TXT export
+    const validation = validateChapterIntegrity(completedChunks as any, targetJob.originalSourceText);
+    if (!validation.canExport) {
+      const errorDetails = validation.issues
+        .filter((i) => i.severity === "error")
+        .map((i) => i.message)
+        .join("\n- ");
+      res.status(400).send("Export blocked by Chapter Integrity Validator:\n- " + errorDetails);
       return;
     }
 
@@ -3143,7 +3348,6 @@ app.get("/api/cloud-job/chunk/:index", (req, res) => {
 app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
   try {
     const {
-      rawText = "",
       fileName = "novel.txt",
       fileSizeBytes = 0,
       style = "xianxia",
@@ -3154,6 +3358,16 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
       splitByChapters = true,
       autoStart = false,
     } = req.body;
+
+    let rawText = (req.body.rawText || "") as string;
+    if (!rawText && req.body.rawTextGzipBase64) {
+      try {
+        const compressedBuf = Buffer.from(req.body.rawTextGzipBase64, "base64");
+        rawText = zlib.gunzipSync(compressedBuf).toString("utf-8");
+      } catch (err: any) {
+        console.warn("Failed to gunzip rawTextGzipBase64 payload on server:", err);
+      }
+    }
 
     const sessionId = getSessionId(req);
     const charCount = typeof rawText === "string" ? countChineseCharacters(rawText) || rawText.length : 0;
@@ -3254,6 +3468,7 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
       fileName,
       fileSizeBytes: effectiveFileSizeBytes,
       totalChineseChars: charCount,
+      originalSourceText: rawText,
       chunks: chunks.map((c) => ({
         id: c.id,
         index: c.index,
@@ -3263,6 +3478,7 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
         charCount: c.charCount || countChineseCharacters(c.chineseText) || c.chineseText.length,
         status: (c.status as any) || "pending",
         attempts: 0,
+        subChunks: c.subChunks,
       })),
       style,
       customInstructions,
@@ -3369,6 +3585,20 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
 
     if (!targetJob) {
       targetJob = getJobForSession(req);
+    }
+
+    if (!targetJob && fileName) {
+      for (const j of cloudJobs.values()) {
+        if (isSameNovel(j.fileName, fileName) && !(j as any).isDeleted) {
+          targetJob = j;
+          break;
+        }
+      }
+    }
+
+    // Ensure full chunks are loaded into memory if needed
+    if (targetJob && (!targetJob.chunks || targetJob.chunks.length === 0)) {
+      targetJob = await loadFullChunksForJob(targetJob);
     }
 
     // 3. If targetJob found from prepare step or memory/disk:
@@ -3975,6 +4205,70 @@ Translation Guidelines:
 6. Translate Chinese four-character idioms (成语) and cultural expressions into their natural English conceptual equivalents rather than awkward word-for-word transliterations, unless specific to martial arts names.
 7. Return ONLY the translated English text. Do NOT wrap in conversational intro/outro remarks like "Here is the translation:" or "Certainly!".
 8. Creative Fiction Context: You are translating a published web novel / literary work of fantasy fiction. Faithfully translate all romance, affection, intimate dialogue, battle scenes, and cultivation narratives as standard published literature without summarizing or refusing.`;
+
+    // Long chapter handling: decompose internally and merge seamlessly into one chapter
+    if (text.length > 3500) {
+      const subChunks = splitTextIntoSubChunks(text, 2500);
+      if (subChunks.length > 1) {
+        const subTranslations: string[] = [];
+        let allSuccess = true;
+
+        for (let sIdx = 0; sIdx < subChunks.length; sIdx++) {
+          const sub = subChunks[sIdx];
+          const subPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
+            customInstructions ? `Special Instructions: ${customInstructions}\n\n` : ""
+          }CHINESE SOURCE TEXT TO TRANSLATE (Part ${sIdx + 1} of ${subChunks.length}):
+"""
+${sub.chineseText}
+"""
+
+Translate the above Chinese text directly into English:`;
+
+          try {
+            const subRes = await generateWithQuotaScheduler(
+              subPrompt,
+              systemInstruction,
+              0,
+              6,
+              3000,
+              sub.chineseText
+            );
+            const subClean = (subRes.text || "").trim().replace(/<<<CHAPTER_START[^>]*>>>/gi, "").replace(/<<<CHAPTER_END[^>]*>>>/gi, "").trim();
+            if (subClean) {
+              subTranslations.push(subClean);
+            } else {
+              throw new Error("Empty sub-chunk response");
+            }
+          } catch (subErr) {
+            try {
+              const gTrans = await translateChapterWithGoogle(sub.chineseText);
+              if (gTrans && gTrans.trim()) {
+                subTranslations.push(gTrans.trim());
+              } else {
+                allSuccess = false;
+                break;
+              }
+            } catch {
+              allSuccess = false;
+              break;
+            }
+          }
+        }
+
+        if (allSuccess && subTranslations.length === subChunks.length) {
+          const mergedTranslation = subTranslations.join("\n\n");
+          res.json({
+            success: true,
+            translatedText: mergedTranslation,
+            modelUsed: "gemini-merged-subchunks",
+            projectUsed: "auto",
+            sourceLength: text.length,
+            translatedLength: mergedTranslation.length,
+          });
+          return;
+        }
+      }
+    }
 
     const userPrompt = `${contextBlock ? contextBlock + "\n" : ""}${
       customInstructions ? `Special Instructions: ${customInstructions}\n\n` : ""
