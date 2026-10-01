@@ -48,5 +48,9 @@ service cloud.firestore {
         allow delete: if isValidId(jobId) && isValidId(chunkId);
       }
     }
+    // Deleted jobs tombstones to permanently prevent re-importing or resurrecting deleted novels
+    match /deleted_jobs/{tombstoneId} {
+      allow read, write: if true;
+    }
   }
 }

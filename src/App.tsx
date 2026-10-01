@@ -509,6 +509,29 @@ export default function App() {
     getSessionFromIdb()
       .then((saved) => {
         if (saved) {
+          // Check if novel was marked deleted in localStorage tombstones
+          let isDeleted = false;
+          try {
+            const rawDeleted = localStorage.getItem("megatext_deleted_novels");
+            if (rawDeleted) {
+              const deletedArr = JSON.parse(rawDeleted);
+              if (Array.isArray(deletedArr)) {
+                const sName = (saved.fileName || "").trim().toLowerCase();
+                const sId = (saved.id || "").trim().toLowerCase();
+                isDeleted = deletedArr.some((del: string) => {
+                  const d = String(del).trim().toLowerCase();
+                  return d === sName || d === sId || isSameNovel(d, sName);
+                });
+              }
+            }
+          } catch {}
+
+          if (isDeleted) {
+            console.log(`[Startup] Discarding deleted novel "${saved.fileName}" from IndexedDB cache.`);
+            clearSessionFromIdb().catch(() => {});
+            return;
+          }
+
           setSession((current) => {
             if (!current) return saved;
             const savedTime = saved.lastUpdated || saved.createdAt || 0;
@@ -1193,6 +1216,7 @@ export default function App() {
     setServerCloudJob(null);
     chunksRef.current = [];
     localStorage.removeItem(STORAGE_KEY);
+    clearSessionFromIdb().catch(() => {});
     setActiveNavTab("home");
 
     setToastData({
@@ -1242,7 +1266,7 @@ export default function App() {
     }
 
     const targetNovel = cleanNovelToDelete || session?.fileName || serverCloudJob?.fileName;
-    const targetJobId = serverCloudJob?.id;
+    const targetJobId = (serverCloudJob && (!cleanNovelToDelete || isSameNovel(serverCloudJob.fileName, cleanNovelToDelete))) ? serverCloudJob.id : undefined;
 
     const isResettingCurrentSession =
       !cleanNovelToDelete ||
@@ -1258,6 +1282,13 @@ export default function App() {
       localStorage.removeItem(STORAGE_KEY);
       clearSessionFromIdb().catch(() => {});
     }
+
+    // Always ensure matching novel in IndexedDB is purged
+    getSessionFromIdb().then((saved) => {
+      if (saved && (!cleanNovelToDelete || isSameNovel(saved.fileName, cleanNovelToDelete) || saved.id === cleanNovelToDelete)) {
+        clearSessionFromIdb().catch(() => {});
+      }
+    }).catch(() => {});
 
     if (!cleanNovelToDelete || (serverCloudJob && isSameNovel(serverCloudJob.fileName, cleanNovelToDelete))) {
       setServerCloudJob(null);
@@ -1757,15 +1788,21 @@ export default function App() {
         console.warn("Pause cloud job error:", err);
       }
 
-      // 2. Persist paused state into IndexedDB storage so no chapters are lost
-      const pausedSession: TranslationSession = {
-        ...session,
-        status: session.status === "completed" ? "completed" : "paused",
-        lastUpdated: Date.now(),
-      };
-      await saveSessionToIdb(pausedSession).catch(() => {});
+      // 2. Add or update book in Library so its progress is preserved
+      try {
+        addOrUpdateBookInLibrary({
+          id: session.fileName,
+          title: session.fileName.replace(/\.txt$/i, "").replace(/_/g, " "),
+          totalChapters: session.chunks.length,
+          completedChapters: session.chunks.filter((c) => c.status === "completed").length,
+          coverUrl: (session as any).coverUrl,
+          lastReadAt: Date.now(),
+        });
+      } catch (e) {
+        console.warn("Notice saving to library:", e);
+      }
 
-      // 3. Clear workspace without deleting from history
+      // 3. Clear workspace from memory, localStorage, and IndexedDB active session
       pauseRequestedRef.current = true;
       setIsRunning(false);
       setIsPaused(true);
@@ -1773,6 +1810,8 @@ export default function App() {
       setServerCloudJob(null);
       chunksRef.current = [];
       userHasResetRef.current = true;
+      localStorage.removeItem(STORAGE_KEY);
+      await clearSessionFromIdb().catch(() => {});
 
       // 4. Navigate to home / upload screen
       setActiveNavTab("home");

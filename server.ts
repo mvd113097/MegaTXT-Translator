@@ -850,8 +850,11 @@ function getJobForSession(req: express.Request): CloudJob | null {
   // Helper to pick the best/highest progress job among multiple candidates
   const sortBestJob = (jobs: CloudJob[]): CloudJob | null => {
     if (jobs.length === 0) return null;
-    const valid = jobs.filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
-    if (valid.length === 0) return null;
+    let valid = jobs.filter((j) => !isSyntheticOrTestJob(j) && !(j as any).isDeleted);
+    if (valid.length === 0) {
+      valid = jobs.filter((j) => !(j as any).isDeleted);
+      if (valid.length === 0) return null;
+    }
 
     valid.sort((a, b) => {
       // 1. Prioritize running status
@@ -1243,29 +1246,48 @@ async function deleteJobCompletely(
   const targetIds = new Set<string>();
   const targetFileNames = new Set<string>();
 
-  if (jobToDelete?.id) targetIds.add(jobToDelete.id.trim());
-  if (explicitJobId && typeof explicitJobId === "string" && explicitJobId.trim()) targetIds.add(explicitJobId.trim());
-
-  if (jobToDelete?.fileName) {
-    targetFileNames.add(jobToDelete.fileName.trim().toLowerCase());
-    targetFileNames.add(jobToDelete.fileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+  if (explicitJobId && typeof explicitJobId === "string" && explicitJobId.trim()) {
+    targetIds.add(explicitJobId.trim());
   }
+
   if (explicitFileName && typeof explicitFileName === "string" && explicitFileName.trim()) {
-    targetFileNames.add(explicitFileName.trim().toLowerCase());
-    targetFileNames.add(explicitFileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+    const fn = explicitFileName.trim().toLowerCase();
+    targetFileNames.add(fn);
+    targetFileNames.add(fn.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
   }
 
-  // Also check if sessionId in cloudJobs has a job
-  if (sessionId && cloudJobs.has(sessionId)) {
-    const sj = cloudJobs.get(sessionId)!;
-    if (sj.id) targetIds.add(sj.id.trim());
-    if (sj.fileName) {
-      targetFileNames.add(sj.fileName.trim().toLowerCase());
-      targetFileNames.add(sj.fileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+  // If a jobToDelete was passed AND it matches explicit target (or no explicit target was given)
+  if (jobToDelete) {
+    const jName = (jobToDelete.fileName || "").trim().toLowerCase();
+    const matchesExplicit =
+      (!explicitFileName && !explicitJobId) ||
+      (explicitJobId && jobToDelete.id === explicitJobId) ||
+      (explicitFileName && (isSameNovel(jName, explicitFileName) || jName === explicitFileName.trim().toLowerCase()));
+
+    if (matchesExplicit) {
+      if (jobToDelete.id) targetIds.add(jobToDelete.id.trim());
+      if (jobToDelete.fileName) {
+        targetFileNames.add(jName);
+        targetFileNames.add(jName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+      }
     }
   }
 
-  console.log(`[Storage] Deleting job completely. Target IDs: [${Array.from(targetIds).join(", ")}], FileNames: [${Array.from(targetFileNames).join(", ")}], SessionId: ${sessionId || "none"}`);
+  // Search in-memory cloudJobs for any matching jobs
+  for (const j of cloudJobs.values()) {
+    const jName = (j.fileName || "").trim().toLowerCase();
+    const isIdMatch = targetIds.has(j.id);
+    const isNameMatch = Array.from(targetFileNames).some((t) => isSameNovel(t, jName));
+    if (isIdMatch || isNameMatch) {
+      if (j.id) targetIds.add(j.id.trim());
+      if (j.fileName) {
+        targetFileNames.add(jName);
+        targetFileNames.add(jName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase());
+      }
+    }
+  }
+
+  console.log(`[Storage] Deleting novel completely. Target IDs: [${Array.from(targetIds).join(", ")}], FileNames: [${Array.from(targetFileNames).join(", ")}], SessionId: ${sessionId || "none"}`);
 
   // 0. Immediately record tombstones to disk cache and Firestore
   for (const tid of targetIds) {
@@ -1280,9 +1302,8 @@ async function deleteJobCompletely(
     const jName = (j.fileName || "").trim().toLowerCase();
     const isIdMatch = targetIds.has(j.id);
     const isNameMatch = Array.from(targetFileNames).some((t) => isSameNovel(t, jName));
-    const isSessionMatch = sessionId && sKey === sessionId;
 
-    if (isIdMatch || isNameMatch || isSessionMatch) {
+    if (isIdMatch || isNameMatch) {
       (j as any).isDeleted = true;
       j.status = "idle";
       for (const c of j.chunks || []) {
@@ -1293,17 +1314,19 @@ async function deleteJobCompletely(
     }
   }
 
-  if (sessionId) {
-    if (cloudJobs.has(sessionId)) {
-      const sj = cloudJobs.get(sessionId)!;
+  // Only delete sessionId if sessionId's job actually matched the target novel
+  if (sessionId && cloudJobs.has(sessionId)) {
+    const sj = cloudJobs.get(sessionId)!;
+    const sjName = (sj.fileName || "").trim().toLowerCase();
+    if (targetIds.has(sj.id) || Array.from(targetFileNames).some((t) => isSameNovel(t, sjName))) {
       (sj as any).isDeleted = true;
       sj.status = "idle";
       for (const c of sj.chunks || []) {
         inFlightChunkIds.delete(c.id);
       }
+      cloudJobs.delete(sessionId);
+      saveJobToDisk(sessionId, null);
     }
-    cloudJobs.delete(sessionId);
-    saveJobToDisk(sessionId, null);
   }
 
   // 2. Clear legacy_default if it matches
@@ -1609,6 +1632,24 @@ async function loadCloudJobsFromDisk() {
         const fsJob = firestoreJobs.get(sId);
         const dJob = diskJobs.get(sId);
 
+        // Check if either job is tombstoned
+        const checkName = (fsJob?.fileName || dJob?.fileName || "").trim().toLowerCase();
+        const checkId = (fsJob?.id || dJob?.id || "").trim();
+        const isTombstoned =
+          (checkId && tombstones.ids.has(checkId)) ||
+          (checkName && (tombstones.fileNames.has(checkName) || Array.from(tombstones.fileNames).some((t) => isSameNovel(t, checkName)))) ||
+          (fsJob as any)?.isDeleted ||
+          (dJob as any)?.isDeleted;
+
+        if (isTombstoned) {
+          // Immediately purge leftover disk files
+          const diskPath = path.join(JOBS_DIR, `job_${sId}.json`);
+          if (fs.existsSync(diskPath)) {
+            try { fs.unlinkSync(diskPath); } catch {}
+          }
+          continue;
+        }
+
         let reconciled: CloudJob;
         if (fsJob && dJob) {
           reconciled = reconcileAuthoritativeJob(fsJob, dJob);
@@ -1616,7 +1657,11 @@ async function loadCloudJobsFromDisk() {
           reconciled = fsJob;
         } else {
           reconciled = dJob!;
-          saveJobToFirestore(reconciled).catch(() => {});
+          // Do not re-save to Firestore if tombstoned
+          const rName = (reconciled.fileName || "").trim().toLowerCase();
+          if (!tombstones.ids.has(reconciled.id) && !tombstones.fileNames.has(rName) && !Array.from(tombstones.fileNames).some((t) => isSameNovel(t, rName))) {
+            saveJobToFirestore(reconciled).catch(() => {});
+          }
         }
 
         const completedCount = (reconciled.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
@@ -1699,46 +1744,24 @@ async function loadCloudJobsFromDisk() {
       }
     }
 
-    // Specific authoritative self-healing for "Primitive Chen Qi" (primitive chen qi.txt / 穿越兽世当神棍.txt) to guarantee all 404 chapters (455k words) are hydrated
-    let hasChenQi = false;
-    for (const [sKey, j] of Array.from(cloudJobs.entries())) {
-      if (isSameNovel(j.fileName, "穿越兽世当神棍") || isSameNovel(j.fileName, "Primitive Chen Qi") || isSameNovel(j.fileName, "primitive chen qi.txt")) {
-        hasChenQi = true;
-        if (!j.chunks || j.chunks.length < 404 || (j as any).totalChunks < 404) {
-          console.log(`[Startup] Self-healing "Primitive Chen Qi" with full 404 chunks and 455k words...`);
-          try {
-            const { job: full404Job } = generate404PrimitiveChenQiChunks();
-            if (full404Job && full404Job.chunks && full404Job.chunks.length === 404) {
-              cloudJobs.set(sKey, full404Job);
-              cloudJobs.set("legacy_default", full404Job);
-              saveJobToDisk(sKey, full404Job, true);
-              saveJobToDisk("legacy_default", full404Job, true);
-              console.log(`[Startup] "Primitive Chen Qi" successfully hydrated with all ${full404Job.chunks.length} chapters (455k words).`);
-            }
-          } catch (healErr) {
-            console.warn(`[Startup] Notice hydrating "Primitive Chen Qi":`, healErr);
-          }
-        }
-      }
-    }
-
-    if (!hasChenQi) {
-      try {
-        const { job: full404Job } = generate404PrimitiveChenQiChunks();
-        if (full404Job && full404Job.chunks && full404Job.chunks.length === 404) {
-          cloudJobs.set("sess_cosh3bqfaz_muarl8l6", full404Job);
-          cloudJobs.set("legacy_default", full404Job);
-          saveJobToDisk("sess_cosh3bqfaz_muarl8l6", full404Job, true);
-          saveJobToDisk("legacy_default", full404Job, true);
-          console.log(`[Startup] Loaded "Primitive Chen Qi" with full 404 chapters (455k words).`);
-        }
-      } catch (err) {}
-    }
-
-    // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs with chunks present
+    // 4. Auto-resume ONLY truly running, uncompleted, non-test jobs with recent activity (within 5 minutes)
+    const now = Date.now();
     const runningJobs = Array.from(cloudJobs.values()).filter((j) => {
       if (j.status !== "running") return false;
       if (isSyntheticOrTestJob(j)) return false;
+      if ((j as any).isDeleted) return false;
+
+      const jName = (j.fileName || "").trim().toLowerCase();
+      if (
+        tombstones.ids.has(j.id) ||
+        tombstones.fileNames.has(jName) ||
+        Array.from(tombstones.fileNames).some((t) => isSameNovel(t, jName))
+      ) {
+        (j as any).isDeleted = true;
+        j.status = "idle";
+        return false;
+      }
+
       if (!j.chunks || j.chunks.length === 0) return false;
       const expectedTotal = (j as any).totalChunks || j.chunks.length;
       const allDone = expectedTotal > 0 && j.chunks.length >= expectedTotal && j.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim());
@@ -1747,6 +1770,17 @@ async function loadCloudJobsFromDisk() {
         saveJobToDisk(j.sessionId || "legacy_default", j, true);
         return false;
       }
+
+      // Safe anti-ghosting: Only auto-resume jobs actively translating within the last 5 minutes.
+      // Dormant, paused, or older jobs remain paused and never start unprompted.
+      const lastActivity = j.lastActiveAt || j.startedAt || 0;
+      if (now - lastActivity > 5 * 60 * 1000) {
+        console.log(`[Startup] Keeping dormant job "${j.fileName}" paused (last active ${Math.round((now - lastActivity) / 60000)} mins ago).`);
+        j.status = "paused";
+        saveJobToDisk(j.sessionId || "legacy_default", j, true);
+        return false;
+      }
+
       return true;
     });
 
@@ -3903,7 +3937,22 @@ app.post("/api/cloud-job/stop", requireAuthMiddleware, async (req, res) => {
   const explicitJobId = body.jobId;
   const clearAll = body.clearAll === true;
 
-  const targetJob = getJobForSession(req);
+  let targetJob: CloudJob | null = null;
+  if (!clearAll && (explicitFileName || explicitJobId)) {
+    for (const j of cloudJobs.values()) {
+      if (explicitJobId && j.id === explicitJobId) {
+        targetJob = j;
+        break;
+      }
+      if (explicitFileName && (isSameNovel(j.fileName, explicitFileName) || j.fileName.trim().toLowerCase() === explicitFileName.trim().toLowerCase())) {
+        targetJob = j;
+        break;
+      }
+    }
+  } else if (!clearAll) {
+    targetJob = getJobForSession(req);
+  }
+
   if (targetJob) {
     targetJob.status = "idle";
   }
@@ -3922,7 +3971,22 @@ app.post("/api/cloud-job/delete", requireAuthMiddleware, async (req, res) => {
   const explicitJobId = body.jobId;
   const clearAll = body.clearAll === true;
 
-  const targetJob = getJobForSession(req);
+  let targetJob: CloudJob | null = null;
+  if (!clearAll && (explicitFileName || explicitJobId)) {
+    for (const j of cloudJobs.values()) {
+      if (explicitJobId && j.id === explicitJobId) {
+        targetJob = j;
+        break;
+      }
+      if (explicitFileName && (isSameNovel(j.fileName, explicitFileName) || j.fileName.trim().toLowerCase() === explicitFileName.trim().toLowerCase())) {
+        targetJob = j;
+        break;
+      }
+    }
+  } else if (!clearAll) {
+    targetJob = getJobForSession(req);
+  }
+
   if (targetJob) {
     targetJob.status = "idle";
   }

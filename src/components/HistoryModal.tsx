@@ -22,6 +22,8 @@ import {
   clearReadingHistory,
   removeBookFromLibrary,
   ReadingHistoryItem,
+  getSessionFromIdb,
+  clearSessionFromIdb,
 } from "../utils/indexedDbStorage";
 import { isSameNovel } from "../utils/chunkCleaner";
 import { ConfirmModal } from "./ConfirmModal";
@@ -259,6 +261,14 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     removeReadingHistoryItem(novel.fileName);
     removeBookFromLibrary(novel.id);
     removeBookFromLibrary(novel.fileName);
+
+    // Ensure active session in IndexedDB is removed if it matches this novel
+    try {
+      const saved = await getSessionFromIdb();
+      if (saved && (isSameNovel(saved.fileName, novel.fileName) || saved.id === novel.id || saved.fileName === novel.fileName)) {
+        await clearSessionFromIdb();
+      }
+    } catch {}
 
     try {
       const headers = getAuthHeaders ? getAuthHeaders() : {};
