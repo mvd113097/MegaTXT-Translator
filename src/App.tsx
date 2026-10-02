@@ -774,28 +774,45 @@ export default function App() {
           // Full structure or novel change
           const sortedChunks = sJob.chunks ? [...sJob.chunks].sort((a: any, b: any) => a.index - b.index) : [];
 
+          // If reconnecting with empty local cache from a summary response, build lightweight chapter skeleton
+          const chunksToUse = (sortedChunks.length === 0 && sJob.totalChunks > 0)
+            ? Array.from({ length: sJob.totalChunks }, (_, idx) => ({
+                id: `chunk-${idx}`,
+                index: idx,
+                chapterTitle: `Chapter ${idx + 1}`,
+                chineseText: "",
+                englishText: "",
+                charCount: Math.round((sJob.totalChineseChars || 0) / (sJob.totalChunks || 1)),
+                wordCount: 0,
+                status: (idx < (sJob.completedChunks || 0) ? ("completed" as const) : ("pending" as const)),
+                hasEnglish: idx < (sJob.completedChunks || 0),
+                hasChinese: true,
+                attempts: 0,
+              }))
+            : sortedChunks.map((c: any) => ({
+                id: c.id,
+                index: c.index,
+                chapterTitle: c.chapterTitle,
+                chineseText: c.chineseText || "",
+                englishText: c.englishText || "",
+                charCount: c.charCount || 0,
+                wordCount: c.wordCount || 0,
+                status: c.status,
+                hasEnglish: c.hasEnglish,
+                hasChinese: c.hasChinese,
+                attempts: c.attempts,
+                errorMessage: c.errorMessage,
+              }));
+
           setSession((prev) => {
             if (!prev || !isSameNovel(prev.fileName, sJob.fileName)) {
-              const totalExpected = Math.max(sortedChunks.length, sJob.totalChunks || 0);
+              const totalExpected = Math.max(chunksToUse.length, sJob.totalChunks || 0);
               const isAllDone = (sJob.completedChunks === totalExpected && totalExpected > 0) || sJob.status === "completed";
               return {
                 fileName: sJob.fileName,
                 fileSizeBytes: sJob.fileSizeBytes || 0,
                 totalChineseChars: sJob.totalChineseChars || 0,
-                chunks: sortedChunks.map((c: any) => ({
-                  id: c.id,
-                  index: c.index,
-                  chapterTitle: c.chapterTitle,
-                  chineseText: c.chineseText || "",
-                  englishText: c.englishText || "",
-                  charCount: c.charCount || 0,
-                  wordCount: c.wordCount || 0,
-                  status: c.status,
-                  hasEnglish: c.hasEnglish,
-                  hasChinese: c.hasChinese,
-                  attempts: c.attempts,
-                  errorMessage: c.errorMessage,
-                })),
+                chunks: isAllDone ? chunksToUse.map((c) => ({ ...c, status: "completed" as const })) : chunksToUse,
                 style: (sJob.style as TranslationStyle) || "xianxia",
                 customInstructions: sJob.customInstructions || "",
                 glossary: sJob.glossary || [],
