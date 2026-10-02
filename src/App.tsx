@@ -2591,21 +2591,18 @@ Export Timestamp: ${new Date().toLocaleString()}
           </div>
 
           {toastData.downloadUrl && (
-            <div className="mt-2 flex flex-col gap-1.5 border-t border-white/20 pt-2.5">
+            <div className="mt-1 flex items-center gap-2 border-t border-white/15 pt-2">
               <a
                 href={toastData.downloadUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 download={toastData.filename}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-white py-2.5 px-3 font-extrabold text-emerald-950 shadow-md transition hover:bg-emerald-50 active:scale-98 text-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-white/20 px-3 py-1.5 font-bold text-white hover:bg-white/30 transition"
               >
-                <Download className="h-4 w-4 text-emerald-700" />
-                <span>Save EPUB eBook ({toastData.filename || "eBook"})</span>
-                <ExternalLink className="h-3.5 w-3.5 text-emerald-700" />
+                <Download className="h-3.5 w-3.5" />
+                <span>Direct Download Link (New Tab)</span>
+                <ExternalLink className="h-3 w-3" />
               </a>
-              <span className="text-[10px] text-emerald-200/90 text-center font-medium">
-                Tap button above to open Soul Browser / Android Download Editor
-              </span>
             </div>
           )}
         </div>

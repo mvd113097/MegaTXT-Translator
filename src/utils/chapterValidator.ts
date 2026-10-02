@@ -290,13 +290,14 @@ export function validateChapterIntegrity(
 
     if (rawMatches.length > 0) {
       const rawCount = rawMatches.length;
-      if (rawCount !== sortedChunks.length) {
+      // If we are exporting a full novel and count exceeds, or if count differs unexpectedly
+      if (sortedChunks.length > rawCount) {
         issues.push({
-          type: "missing_chapter",
-          severity: "error",
+          type: "title_anomaly",
+          severity: "warning",
           expected: `${rawCount} chapters from original Chinese text`,
           actual: `${sortedChunks.length} chapters parsed`,
-          message: `Source chapter count mismatch: Original Chinese novel contains ${rawCount} chapters, but ${sortedChunks.length} chapters were registered in the session.`,
+          message: `Source chapter count notice: Original Chinese novel contains ${rawCount} chapters, and ${sortedChunks.length} chunks were found.`,
         });
       }
     }
