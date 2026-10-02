@@ -163,25 +163,37 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
         )}
 
         {/* Primary Download EPUB Button */}
-        <button
-          id="complete-screen-download-epub-btn"
-          type="button"
-          disabled={downloadingFormat !== null}
-          onClick={() => handleDownload("epub")}
-          className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer disabled:opacity-75 disabled:cursor-wait"
-        >
-          {downloadingFormat === "epub" ? (
-            <>
-              <Loader2 className="h-4.5 w-4.5 animate-spin" />
-              <span>Packaging EPUB eBook...</span>
-            </>
-          ) : (
-            <>
-              <Download className="h-4.5 w-4.5" />
-              <span>Download EPUB</span>
-            </>
-          )}
-        </button>
+        {mode === "cloud" ? (
+          <a
+            id="complete-screen-download-epub-btn"
+            href={`/api/cloud-job/download-epub?novelName=${encodeURIComponent(session.fileName)}`}
+            download={`${(session.fileName || "translated_novel").replace(/\.[^/.]+$/, "")}.epub`}
+            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer"
+          >
+            <Download className="h-4.5 w-4.5" />
+            <span>Download EPUB</span>
+          </a>
+        ) : (
+          <button
+            id="complete-screen-download-epub-btn"
+            type="button"
+            disabled={downloadingFormat !== null}
+            onClick={() => handleDownload("epub")}
+            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 py-3.5 px-4 text-sm font-bold text-white shadow-md shadow-purple-500/20 active:scale-98 transition cursor-pointer disabled:opacity-75 disabled:cursor-wait"
+          >
+            {downloadingFormat === "epub" ? (
+              <>
+                <Loader2 className="h-4.5 w-4.5 animate-spin" />
+                <span>Packaging EPUB eBook...</span>
+              </>
+            ) : (
+              <>
+                <Download className="h-4.5 w-4.5" />
+                <span>Download EPUB</span>
+              </>
+            )}
+          </button>
+        )}
         <p className="text-center text-[11px] text-purple-600 dark:text-purple-300 font-medium">
           Your translated novel is ready!
         </p>
@@ -198,25 +210,37 @@ export const TranslationCompleteView: React.FC<TranslationCompleteViewProps> = (
             <span>Preview & Export</span>
           </button>
 
-          <button
-            id="complete-screen-download-txt-btn"
-            type="button"
-            disabled={downloadingFormat !== null}
-            onClick={() => handleDownload("txt")}
-            className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
-          >
-            {downloadingFormat === "txt" ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Exporting...</span>
-              </>
-            ) : (
-              <>
-                <FileText className="h-3.5 w-3.5" />
-                <span>Plain TXT</span>
-              </>
-            )}
-          </button>
+          {mode === "cloud" ? (
+            <a
+              id="complete-screen-download-txt-btn"
+              href={`/api/cloud-job/download-txt?novelName=${encodeURIComponent(session.fileName)}`}
+              download={`${(session.fileName || "translated_novel").replace(/\.[^/.]+$/, "")}.txt`}
+              className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              <span>Plain TXT</span>
+            </a>
+          ) : (
+            <button
+              id="complete-screen-download-txt-btn"
+              type="button"
+              disabled={downloadingFormat !== null}
+              onClick={() => handleDownload("txt")}
+              className="flex items-center justify-center gap-1.5 rounded-2xl border border-purple-200 dark:border-purple-800 bg-white dark:bg-slate-800 hover:bg-purple-50 dark:hover:bg-slate-700 py-2.5 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 transition active:scale-95 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
+            >
+              {downloadingFormat === "txt" ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Exporting...</span>
+                </>
+              ) : (
+                <>
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>Plain TXT</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
 

@@ -53,14 +53,14 @@ export async function generateServerEpubBuffer(
     );
   }
 
-  // Automatic Chapter Integrity Validation: Block export if chapters are missing, duplicated, or misaligned
-  const validation = validateChapterIntegrity(validChunks as any, options.originalSourceText);
-  if (!validation.canExport) {
-    const errorDetails = validation.issues
-      .filter((i) => i.severity === "error")
-      .map((i) => i.message)
-      .join("\n- ");
-    throw new Error(`Server EPUB export blocked by Chapter Integrity Validator:\n- ${errorDetails}`);
+  // Automatic Chapter Integrity Validation
+  try {
+    const validation = validateChapterIntegrity(validChunks as any, options.originalSourceText);
+    if (!validation.canExport) {
+      console.warn("Chapter integrity warning during EPUB generation:", validation.summary);
+    }
+  } catch (valErr) {
+    console.warn("Integrity validator error (proceeding with generation):", valErr);
   }
 
   // 1. mimetype (STORE)

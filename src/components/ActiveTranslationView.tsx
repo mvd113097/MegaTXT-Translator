@@ -495,14 +495,26 @@ export const ActiveTranslationView: React.FC<ActiveTranslationViewProps> = ({
       {/* 6. Two Secondary Action Buttons Side-by-Side (Reference Screen 2) */}
       <div className="grid grid-cols-2 gap-2.5">
         {/* Download EPUB Button */}
-        <button
-          id="active-download-epub-btn"
-          onClick={() => onDownloadProgress("epub")}
-          className="flex items-center justify-center gap-2 rounded-2xl border border-sky-300 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-900/50 py-3 px-3 text-xs font-extrabold text-sky-800 dark:text-sky-200 transition active:scale-98 cursor-pointer shadow-2xs"
-        >
-          <BookCheck className="h-4 w-4 text-sky-600 dark:text-sky-400" />
-          <span className="truncate">Download Current EPUB</span>
-        </button>
+        {mode === "cloud" ? (
+          <a
+            id="active-download-epub-btn"
+            href={`/api/cloud-job/download-epub?novelName=${encodeURIComponent(session.fileName)}&continuous=true`}
+            download={`${(session.fileName || "translated_novel").replace(/\.[^/.]+$/, "")}.epub`}
+            className="flex items-center justify-center gap-2 rounded-2xl border border-sky-300 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-900/50 py-3 px-3 text-xs font-extrabold text-sky-800 dark:text-sky-200 transition active:scale-98 cursor-pointer shadow-2xs"
+          >
+            <BookCheck className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+            <span className="truncate">Download Current EPUB</span>
+          </a>
+        ) : (
+          <button
+            id="active-download-epub-btn"
+            onClick={() => onDownloadProgress("epub")}
+            className="flex items-center justify-center gap-2 rounded-2xl border border-sky-300 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-900/50 py-3 px-3 text-xs font-extrabold text-sky-800 dark:text-sky-200 transition active:scale-98 cursor-pointer shadow-2xs"
+          >
+            <BookCheck className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+            <span className="truncate">Download Current EPUB</span>
+          </button>
+        )}
 
         {/* Translate New Novel Button */}
         <button
