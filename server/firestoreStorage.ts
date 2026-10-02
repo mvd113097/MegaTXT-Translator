@@ -795,6 +795,75 @@ export async function recordDeletedJobInFirestore(jobId?: string, fileName?: str
 }
 
 /**
+ * Remove a tombstone entry so a novel can be cleanly re-uploaded and translated
+ */
+export async function removeDeletedJobTombstone(jobId?: string, fileName?: string): Promise<boolean> {
+  const cleanId = (jobId || "").trim();
+  const cleanFileName = (fileName || "").trim().toLowerCase();
+  const baseFileName = cleanFileName.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase();
+  if (!cleanId && !cleanFileName) return false;
+
+  // 1. Update local disk tombstones
+  const local = getLocalDiskTombstones();
+  let changed = false;
+  if (cleanId && local.ids.has(cleanId)) {
+    local.ids.delete(cleanId);
+    changed = true;
+  }
+  if (cleanFileName) {
+    for (const fn of Array.from(local.fileNames)) {
+      if (
+        fn === cleanFileName ||
+        fn === baseFileName ||
+        isSameNovel(fn, cleanFileName) ||
+        isSameNovel(fn, baseFileName)
+      ) {
+        local.fileNames.delete(fn);
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    saveLocalDiskTombstones(local.ids, local.fileNames);
+    console.log(`[FirestoreStorage] Removed local disk tombstone for novel "${fileName || jobId}"`);
+  }
+
+  // 2. Remove matching tombstone docs from Firestore in background (non-blocking)
+  if (isCloudStorageAvailable()) {
+    const db = initFirestore();
+    if (db) {
+      (async () => {
+        try {
+          const tombstonesRef = collection(db, "deleted_jobs");
+          const snapshot = await getDocs(tombstonesRef);
+          for (const docSnap of snapshot.docs) {
+            const data = docSnap.data();
+            const docId = String(data.id || "").trim();
+            const docFile = String(data.fileName || "").trim().toLowerCase();
+            const matchesId = cleanId && (docId === cleanId || docSnap.id === `tombstone_${cleanId}`);
+            const matchesFile = cleanFileName && (
+              docFile === cleanFileName ||
+              docFile === baseFileName ||
+              isSameNovel(docFile, cleanFileName) ||
+              isSameNovel(docFile, baseFileName) ||
+              docSnap.id === `tombstone_file_${cleanFileName.replace(/[^a-z0-9_]/gi, "_")}`
+            );
+            if (matchesId || matchesFile) {
+              await deleteDoc(docSnap.ref).catch(() => {});
+              console.log(`[FirestoreStorage] Purged Firestore tombstone document ${docSnap.id} for novel "${fileName || jobId}"`);
+            }
+          }
+        } catch (err: any) {
+          handleFirestoreError("removeDeletedJobTombstone(background)", err);
+        }
+      })().catch(() => {});
+    }
+  }
+
+  return true;
+}
+
+/**
  * Get all tombstone entries for deleted jobs from local disk cache and Firestore
  */
 export async function getDeletedJobTombstonesFromFirestore(): Promise<{ ids: Set<string>; fileNames: Set<string> }> {

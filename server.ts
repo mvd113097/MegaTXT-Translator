@@ -28,6 +28,7 @@ import {
   deleteJobFromFirestore,
   deleteJobByFileNameFromFirestore,
   deleteAllJobsFromFirestore,
+  removeDeletedJobTombstone,
   mergeMonotonicJob,
   getFirestoreQuotaStatus,
 } from "./server/firestoreStorage";
@@ -1417,22 +1418,19 @@ async function deleteJobCompletely(
     console.warn("Error deleting job files from disk:", err);
   }
 
-  // 5. Delete matching jobs from Firestore
-  try {
-    for (const tid of targetIds) {
-      await deleteJobFromFirestore(tid).catch((err: any) => {
-        console.warn(`[Storage] Firestore delete error for job ID ${tid}:`, err?.message);
-      });
-    }
-
-    for (const tName of targetFileNames) {
-      await deleteJobByFileNameFromFirestore(tName).catch((err: any) => {
-        console.warn(`[Storage] Firestore delete error for fileName ${tName}:`, err?.message);
-      });
-    }
-  } catch (err: any) {
-    console.warn("[Storage] Firestore cleanup error:", err?.message);
-  }
+  // 5. Delete matching jobs from Firestore asynchronously in background (non-blocking)
+  Promise.all([
+    ...Array.from(targetIds).map((tid) =>
+      deleteJobFromFirestore(tid).catch((err: any) => {
+        console.warn(`[Storage] Background Firestore delete error for job ID ${tid}:`, err?.message);
+      })
+    ),
+    ...Array.from(targetFileNames).map((tName) =>
+      deleteJobByFileNameFromFirestore(tName).catch((err: any) => {
+        console.warn(`[Storage] Background Firestore delete error for fileName ${tName}:`, err?.message);
+      })
+    ),
+  ]).catch(() => {});
 }
 
 function setJobForSession(sessionId: string, job: CloudJob | null) {
@@ -2931,7 +2929,24 @@ app.get("/api/cloud-job/status", async (req, res) => {
   // Check if job is tombstoned/deleted
   const tombstones = await getDeletedJobTombstonesFromFirestore();
   const jName = (targetJob.fileName || "").trim().toLowerCase();
-  if (
+
+  const isActivelyRunningOrDone =
+    targetJob.status === "running" ||
+    targetJob.status === "completed" ||
+    (targetJob.chunks && targetJob.chunks.some((c) => c.status === "completed" || c.status === "processing"));
+
+  if (isActivelyRunningOrDone) {
+    (targetJob as any).isDeleted = false;
+    // If a stale tombstone from a prior deletion exists for this re-uploaded novel, clear it
+    if (
+      tombstones.ids.has(targetJob.id) ||
+      tombstones.fileNames.has(jName) ||
+      Array.from(tombstones.fileNames).some((t) => isSameNovel(t, jName))
+    ) {
+      console.log(`[Status] Novel "${targetJob.fileName}" is actively running/completed. Removing stale deletion tombstone.`);
+      removeDeletedJobTombstone(targetJob.id, targetJob.fileName).catch(() => {});
+    }
+  } else if (
     tombstones.ids.has(targetJob.id) ||
     tombstones.fileNames.has(jName) ||
     Array.from(tombstones.fileNames).some((t) => isSameNovel(t, jName)) ||
@@ -3406,6 +3421,9 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
     const sessionId = getSessionId(req);
     const charCount = typeof rawText === "string" ? countChineseCharacters(rawText) || rawText.length : 0;
 
+    // 0. Automatically un-tombstone if this novel was previously deleted and is now being re-uploaded
+    await removeDeletedJobTombstone(undefined, fileName);
+
     // 1. Direct Instant Live Firestore Lookup
     console.log(`[Prepare Job] Checking live Cloud Firestore directly for novel "${fileName}" (~${charCount} chars)...`);
     const fsJob = await findJobInFirestoreByNovel(fileName, charCount);
@@ -3563,6 +3581,9 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
 
     const sessionId = getSessionId(req);
 
+    // 0. Automatically un-tombstone if this novel was previously deleted and is now being started
+    await removeDeletedJobTombstone(requestedJobId, fileName);
+
     // 1. First: Instant live Firestore query to guarantee mathematically absolute protection
     const targetName = fileName || "";
     console.log(`[Start Job] Querying live Cloud Firestore directly for novel "${targetName}" before starting...`);
@@ -3570,6 +3591,7 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
 
     if (fsJob) {
       console.log(`[Start Job] Matched authoritative Firestore job: "${fsJob.fileName}" (${fsJob.id}, status: ${fsJob.status})`);
+      (fsJob as any).isDeleted = false;
       setJobForSession(sessionId, fsJob);
 
       const existingDone = (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
@@ -3607,24 +3629,28 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
     let targetJob: CloudJob | null = null;
     if (requestedJobId && typeof requestedJobId === "string") {
       for (const j of cloudJobs.values()) {
-        if (j.id === requestedJobId.trim() && !(j as any).isDeleted) {
+        if (j.id === requestedJobId.trim()) {
           targetJob = j;
+          (targetJob as any).isDeleted = false;
           break;
         }
       }
       if (!targetJob) {
         targetJob = await loadJobFromFirestore(requestedJobId.trim());
+        if (targetJob) (targetJob as any).isDeleted = false;
       }
     }
 
     if (!targetJob) {
       targetJob = getJobForSession(req);
+      if (targetJob) (targetJob as any).isDeleted = false;
     }
 
     if (!targetJob && fileName) {
       for (const j of cloudJobs.values()) {
-        if (isSameNovel(j.fileName, fileName) && !(j as any).isDeleted) {
+        if (isSameNovel(j.fileName, fileName)) {
           targetJob = j;
+          (targetJob as any).isDeleted = false;
           break;
         }
       }

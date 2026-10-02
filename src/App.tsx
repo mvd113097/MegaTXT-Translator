@@ -94,6 +94,23 @@ import {
 
 const STORAGE_KEY = "megatext_translator_session_v1";
 
+export function removeDeletedNovelFromLocalStorage(fileName?: string) {
+  if (!fileName) return;
+  try {
+    const raw = localStorage.getItem("megatext_deleted_novels");
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return;
+    const clean = fileName.trim().toLowerCase();
+    const base = clean.replace(/\.(txt|epub|pdf|json)$/i, "").trim().toLowerCase();
+    const filtered = arr.filter((item: string) => {
+      const it = String(item).trim().toLowerCase();
+      return it !== clean && it !== base && !isSameNovel(it, clean) && !isSameNovel(it, base);
+    });
+    localStorage.setItem("megatext_deleted_novels", JSON.stringify(filtered));
+  } catch {}
+}
+
 export default function App() {
   // Theme state
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -704,6 +721,7 @@ export default function App() {
       }
 
       if (data.hasJob && data.job) {
+        removeDeletedNovelFromLocalStorage(data.job.fileName);
         if (userHasResetRef.current && !explicitNovelFileName) {
           // User intentionally reset or deleted their translation; do not auto-resurrect unwanted novels
           return;
@@ -1112,6 +1130,7 @@ export default function App() {
     };
 
     userHasResetRef.current = false;
+    removeDeletedNovelFromLocalStorage(fileName);
     setServerCloudJob(null);
     setSession(newSession);
     chunksRef.current = rawChunks;
@@ -1345,6 +1364,8 @@ export default function App() {
   const startCloudTranslation = async (customSession?: TranslationSession) => {
     const targetSession = customSession || session;
     if (!targetSession) return;
+    userHasResetRef.current = false;
+    removeDeletedNovelFromLocalStorage(targetSession.fileName);
     setIsStarting(true);
 
     try {
@@ -1594,6 +1615,10 @@ export default function App() {
 
   // Main start handler dispatching based on mode
   const handleStart = () => {
+    userHasResetRef.current = false;
+    if (session?.fileName) {
+      removeDeletedNovelFromLocalStorage(session.fileName);
+    }
     if (mode === "cloud") {
       startCloudTranslation();
     } else {
