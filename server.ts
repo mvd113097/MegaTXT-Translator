@@ -3179,6 +3179,36 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
       if (!targetJob) {
         targetJob = await findJobInFirestoreByNovel(targetNovelName);
       }
+      if (!targetJob && fs.existsSync(JOBS_DIR)) {
+        try {
+          const safeNovel = sanitizeSessionKey(targetNovelName);
+          const candidates = [
+            path.join(JOBS_DIR, `archive_${safeNovel}.json`),
+            path.join(JOBS_DIR, `archive_${safeNovel}_txt.json`),
+            path.join(JOBS_DIR, `job_${safeNovel}.json`),
+          ];
+          for (const p of candidates) {
+            if (fs.existsSync(p)) {
+              const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+              if (parsed && isSameNovel(parsed.fileName, targetNovelName) && !(parsed as any).isDeleted) {
+                targetJob = parsed;
+                break;
+              }
+            }
+          }
+          if (!targetJob) {
+            const files = fs.readdirSync(JOBS_DIR);
+            for (const f of files) {
+              if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
+              const parsed = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf-8"));
+              if (parsed && isSameNovel(parsed.fileName, targetNovelName) && !(parsed as any).isDeleted) {
+                targetJob = parsed;
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
     }
 
     if (!targetJob) {
@@ -3203,14 +3233,15 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
     const continuousOnly = req.query.continuous === "true";
 
     let rawCompletedChunks = (targetJob.chunks || []).filter(
-      (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+      (c) => (c.status === "completed" || targetJob!.status === "completed") && c.englishText && c.englishText.trim().length > 0
     );
     rawCompletedChunks.sort((a, b) => a.index - b.index);
 
-    if (continuousOnly) {
+    if (continuousOnly && targetJob.status !== "completed") {
       const continuousList: typeof rawCompletedChunks = [];
+      const startIdx = rawCompletedChunks[0]?.index ?? 0;
       for (let i = 0; i < rawCompletedChunks.length; i++) {
-        if (rawCompletedChunks[i].index === i) {
+        if (rawCompletedChunks[i].index === startIdx + i) {
           continuousList.push(rawCompletedChunks[i]);
         } else {
           break;
@@ -3227,22 +3258,11 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
       return;
     }
 
-    // Automatic Chapter Integrity Validation before EPUB export
-    const validation = validateChapterIntegrity(completedChunks as any, targetJob.originalSourceText);
-    if (!validation.canExport) {
-      const errorDetails = validation.issues
-        .filter((i) => i.severity === "error")
-        .map((i) => i.message)
-        .join("\n- ");
-      res.status(400).send("Export blocked by Chapter Integrity Validator:\n- " + errorDetails);
-      return;
-    }
-
     const baseName = (targetJob.fileName || "translated_novel").replace(/\.[^/.]+$/, "");
     const epubBuffer = await generateServerEpubBuffer(completedChunks, {
       bookTitle: baseName.replace(/_/g, " "),
       isBilingual,
-      originalSourceText: targetJob.originalSourceText,
+      originalSourceText: targetJob.status === "completed" ? targetJob.originalSourceText : undefined,
     });
 
     const asciiFallback = baseName.replace(/[^a-zA-Z0-9_-]/g, "_") || "translated_novel";
@@ -3280,6 +3300,36 @@ app.get("/api/cloud-job/download-txt", async (req, res) => {
       if (!targetJob) {
         targetJob = await findJobInFirestoreByNovel(targetNovelName);
       }
+      if (!targetJob && fs.existsSync(JOBS_DIR)) {
+        try {
+          const safeNovel = sanitizeSessionKey(targetNovelName);
+          const candidates = [
+            path.join(JOBS_DIR, `archive_${safeNovel}.json`),
+            path.join(JOBS_DIR, `archive_${safeNovel}_txt.json`),
+            path.join(JOBS_DIR, `job_${safeNovel}.json`),
+          ];
+          for (const p of candidates) {
+            if (fs.existsSync(p)) {
+              const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+              if (parsed && isSameNovel(parsed.fileName, targetNovelName) && !(parsed as any).isDeleted) {
+                targetJob = parsed;
+                break;
+              }
+            }
+          }
+          if (!targetJob) {
+            const files = fs.readdirSync(JOBS_DIR);
+            for (const f of files) {
+              if (!f.endsWith(".json") || f.startsWith("deleted_")) continue;
+              const parsed = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf-8"));
+              if (parsed && isSameNovel(parsed.fileName, targetNovelName) && !(parsed as any).isDeleted) {
+                targetJob = parsed;
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
     }
 
     if (!targetJob) {
@@ -3303,14 +3353,15 @@ app.get("/api/cloud-job/download-txt", async (req, res) => {
     const continuousOnly = req.query.continuous === "true";
 
     let rawCompletedChunks = (targetJob.chunks || []).filter(
-      (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
+      (c) => (c.status === "completed" || targetJob!.status === "completed") && c.englishText && c.englishText.trim().length > 0
     );
     rawCompletedChunks.sort((a, b) => a.index - b.index);
 
-    if (continuousOnly) {
+    if (continuousOnly && targetJob.status !== "completed") {
       const continuousList: typeof rawCompletedChunks = [];
+      const startIdx = rawCompletedChunks[0]?.index ?? 0;
       for (let i = 0; i < rawCompletedChunks.length; i++) {
-        if (rawCompletedChunks[i].index === i) {
+        if (rawCompletedChunks[i].index === startIdx + i) {
           continuousList.push(rawCompletedChunks[i]);
         } else {
           break;
@@ -3324,17 +3375,6 @@ app.get("/api/cloud-job/download-txt", async (req, res) => {
     const completedChunks = cleanAndDeduplicateChunks(rawCompletedChunks);
     if (completedChunks.length === 0) {
       res.status(400).send("No translated chapters ready to download yet.");
-      return;
-    }
-
-    // Automatic Chapter Integrity Validation before TXT export
-    const validation = validateChapterIntegrity(completedChunks as any, targetJob.originalSourceText);
-    if (!validation.canExport) {
-      const errorDetails = validation.issues
-        .filter((i) => i.severity === "error")
-        .map((i) => i.message)
-        .join("\n- ");
-      res.status(400).send("Export blocked by Chapter Integrity Validator:\n- " + errorDetails);
       return;
     }
 

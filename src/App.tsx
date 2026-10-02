@@ -1909,9 +1909,10 @@ export default function App() {
     }
   };
 
-  // Open Export Modal instantly without pulling uncompressed multi-megabyte JSON payloads
+  // Open Export Modal instantly and sync text in background
   const handleOpenExport = () => {
     setIsExportOpen(true);
+    syncCompletedTexts(true);
   };
 
   // Dedicated progress downloader: downloads strictly the unbroken continuous chapters from Chapter 1 without stopping background translation
@@ -1923,8 +1924,11 @@ export default function App() {
     // This avoids fetching 4-5MB of uncompressed JSON chunks to the browser, saving ~80% mobile data!
     if (mode === "cloud") {
       const hasAnyCompleted =
-        session.chunks.some((c) => c.status === "completed") ||
-        (serverCloudJob && serverCloudJob.completedChunks > 0);
+        (session.chunks && session.chunks.some((c) => c.status === "completed")) ||
+        session.status === "completed" ||
+        ((session as any).completedChunks && (session as any).completedChunks > 0) ||
+        ((session as any).completedEnglishWords && (session as any).completedEnglishWords > 0) ||
+        (serverCloudJob && (serverCloudJob.completedChunks > 0 || serverCloudJob.status === "completed"));
 
       if (!hasAnyCompleted) {
         setToastData({
@@ -1938,36 +1942,21 @@ export default function App() {
 
       const baseName = session.fileName.replace(/\.[^/.]+$/, "") || "translated_novel";
       const downloadEndpoint = format === "epub" ? "/api/cloud-job/download-epub" : "/api/cloud-job/download-txt";
-      const downloadUrl = `${downloadEndpoint}?novelName=${encodeURIComponent(session.fileName)}&continuous=true`;
+      const isCompletedNovel = session.status === "completed" || (serverCloudJob && serverCloudJob.status === "completed");
+      const downloadUrl = `${downloadEndpoint}?novelName=${encodeURIComponent(session.fileName)}${isCompletedNovel ? "" : "&continuous=true"}`;
 
       try {
-        // 1. Standard Anchor Trigger with safe DOM retention (ensures Soul Browser / WebViews process user click before node removal)
+        const fullDownloadUrl = downloadUrl.startsWith("http") ? downloadUrl : `${window.location.origin}${downloadUrl}`;
+
+        // 1. Direct Anchor Download Trigger (compatible with all desktop and mobile browsers including Soul Browser)
         const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = `${baseName}.${format}`;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        a.style.display = "none";
+        a.href = fullDownloadUrl;
+        a.setAttribute("download", `${baseName}.${format}`);
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
           if (document.body.contains(a)) document.body.removeChild(a);
-        }, 5000);
-
-        // 2. Hidden iframe trigger for mobile Android WebViews (Soul Browser, Samsung Internet, Mi Browser)
-        // Hooking Android's DownloadListener via navigation iframe guarantees Soul Browser opens its native Download Editor dialog!
-        const isMobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
-        if (isMobile) {
-          const downloadFrame = document.createElement("iframe");
-          downloadFrame.style.display = "none";
-          downloadFrame.src = downloadUrl;
-          document.body.appendChild(downloadFrame);
-          setTimeout(() => {
-            if (document.body.contains(downloadFrame)) {
-              document.body.removeChild(downloadFrame);
-            }
-          }, 45000);
-        }
+        }, 1000);
 
         setSession((prev) =>
           prev
@@ -1979,12 +1968,12 @@ export default function App() {
         );
 
         setToastData({
-          message: `EPUB eBook download prepared! If your browser did not automatically open the download editor, tap the download button below.`,
-          downloadUrl,
+          message: `Direct server-optimized ${format.toUpperCase()} download initiated! Compressed on server, saving ~80% mobile data transfer.`,
+          downloadUrl: fullDownloadUrl,
           filename: `${baseName}.${format}`,
           type: "success",
         });
-        setTimeout(() => setToastData(null), 15000);
+        setTimeout(() => setToastData(null), 7000);
         return;
       } catch (err) {
         console.warn("Direct server download failed, falling back to client generation:", err);

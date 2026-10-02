@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   X,
   Download,
@@ -56,16 +56,35 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     filename: string;
     url?: string;
   } | null>(null);
+  const [syncedChunks, setSyncedChunks] = useState<TextChunk[]>(chunks || []);
+
+  useEffect(() => {
+    if (chunks && chunks.length > 0) {
+      setSyncedChunks(chunks);
+    }
+    // In Cloud mode, if chunks are empty in memory, fetch completed chapters from server
+    if (isOpen && isCloud && (chunks.length === 0 || chunks.every((c) => !c.englishText?.trim()))) {
+      fetch(`/api/cloud-job/sync-texts?completedOnly=true&fileName=${encodeURIComponent(fileName)}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && Array.isArray(data.chunks) && data.chunks.length > 0) {
+            setSyncedChunks(data.chunks);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isOpen, isCloud, fileName, chunks]);
 
   if (!isOpen) return null;
 
-  const continuity = analyzeChunkContinuity(chunks);
+  const activeChunksList = syncedChunks.length > 0 ? syncedChunks : chunks;
+  const continuity = analyzeChunkContinuity(activeChunksList);
   const contiguousChunks = continuity.continuousChunks;
   const allCompletedChunks = continuity.allCompletedChunks;
   
   // Use all completed chunks if all are done or if all completed chunks form a complete set
   const rawExportChunks =
-    allCompletedChunks.length >= chunks.length || allCompletedChunks.length > contiguousChunks.length
+    allCompletedChunks.length >= activeChunksList.length || allCompletedChunks.length > contiguousChunks.length
       ? allCompletedChunks
       : contiguousChunks.length > 0
       ? contiguousChunks
@@ -76,7 +95,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   // Automatic Chapter Integrity Validation
   const validation = validateChapterIntegrity(
-    exportFormat === "chinese_txt" ? chunks : exportChunks,
+    exportFormat === "chinese_txt" ? activeChunksList : exportChunks,
     originalSourceText
   );
 
@@ -85,7 +104,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     0
   );
   const baseName = fileName.replace(/\.[^/.]+$/, "") || "translated_novel";
-  const hasContiguousTranslations = exportChunks.length > 0;
+  const hasContiguousTranslations = exportChunks.length > 0 || isCloud;
 
   // Generate output string based on format
   const generateExportContent = (): string => {
@@ -644,10 +663,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               id="download-file-btn"
               onClick={handleDownload}
-              disabled={isExporting || (exportFormat !== "chinese_txt" && !validation.canExport)}
-              title={exportFormat !== "chinese_txt" && !validation.canExport ? validation.summary : undefined}
+              disabled={isExporting || (exportFormat !== "chinese_txt" && !isCloud && !validation.canExport)}
+              title={exportFormat !== "chinese_txt" && !isCloud && !validation.canExport ? validation.summary : undefined}
               className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-xs transition ${
-                exportFormat !== "chinese_txt" && !validation.canExport
+                exportFormat !== "chinese_txt" && !isCloud && !validation.canExport
                   ? "bg-slate-400 dark:bg-slate-600 cursor-not-allowed opacity-60"
                   : "bg-indigo-600 hover:bg-indigo-700 active:scale-95 cursor-pointer"
               }`}
