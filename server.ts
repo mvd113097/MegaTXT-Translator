@@ -3245,9 +3245,10 @@ app.get("/api/cloud-job/download-epub", async (req, res) => {
       originalSourceText: targetJob.originalSourceText,
     });
 
-    const safeFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : ""}.epub`);
+    const asciiFallback = baseName.replace(/[^a-zA-Z0-9_-]/g, "_") || "translated_novel";
+    const utf8EncodedFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : ""}.epub`);
     res.setHeader("Content-Type", "application/epub+zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"; filename*=UTF-8''${safeFilename}`);
+    res.setHeader("Content-Disposition", `attachment; filename="${asciiFallback}.epub"; filename*=UTF-8''${utf8EncodedFilename}`);
     res.setHeader("Content-Length", epubBuffer.length);
     res.send(epubBuffer);
   } catch (err: any) {
@@ -3351,9 +3352,10 @@ app.get("/api/cloud-job/download-txt", async (req, res) => {
       }).join("\n\n\n");
     }
 
-    const safeFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : "_en"}.txt`);
+    const asciiFallback = baseName.replace(/[^a-zA-Z0-9_-]/g, "_") || "translated_novel";
+    const utf8EncodedFilename = encodeURIComponent(`${baseName}${isBilingual ? "_bilingual" : "_en"}.txt`);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"; filename*=UTF-8''${safeFilename}`);
+    res.setHeader("Content-Disposition", `attachment; filename="${asciiFallback}.txt"; filename*=UTF-8''${utf8EncodedFilename}`);
     res.send(textContent);
   } catch (err: any) {
     console.error("Server TXT generation failed:", err);

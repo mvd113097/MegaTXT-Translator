@@ -78,22 +78,24 @@ export async function downloadFile(
     console.warn("Could not register server download endpoint, falling back to pure client-side:", err);
   }
 
-  // 2. Client-side Blob download trigger (with SAFE 2-minute delayed revocation!)
+  // 2. Client-side Blob download trigger (with SAFE delayed DOM retention and 2-minute revocation)
   try {
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = objectUrl;
     link.download = filename;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
     link.setAttribute("style", "display: none;");
     document.body.appendChild(link);
     link.click();
 
-    // Remove element from DOM
+    // Remove element from DOM after safe 5s delay for mobile WebViews
     setTimeout(() => {
       if (document.body.contains(link)) {
         document.body.removeChild(link);
       }
-    }, 100);
+    }, 5000);
 
     // CRITICAL: Delay URL revocation by 2 minutes so browser has ample time to complete download
     setTimeout(() => {
@@ -107,23 +109,20 @@ export async function downloadFile(
     console.error("Client-side download trigger failed:", err);
   }
 
-  // 3. If in iframe or server URL available, attempt navigation via anchor
-  if (isIframe && serverDownloadUrl) {
-    // If the sandboxed iframe blocked the client blob download, clicking a server attachment link
-    // with target="_blank" opens a top-level context where the download starts automatically
+  // 3. If in iframe or mobile browser with server URL available, trigger HTTP download
+  // Android browsers like Soul Browser hook into HTTP/HTTPS downloads to open their native Download Editor
+  const isMobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  if (serverDownloadUrl && (isIframe || isMobile)) {
     try {
-      const backupLink = document.createElement("a");
-      backupLink.href = serverDownloadUrl;
-      backupLink.target = "_blank";
-      backupLink.rel = "noopener noreferrer";
-      backupLink.setAttribute("style", "display: none;");
-      document.body.appendChild(backupLink);
-      backupLink.click();
+      const backupFrame = document.createElement("iframe");
+      backupFrame.style.display = "none";
+      backupFrame.src = serverDownloadUrl;
+      document.body.appendChild(backupFrame);
       setTimeout(() => {
-        if (document.body.contains(backupLink)) {
-          document.body.removeChild(backupLink);
+        if (document.body.contains(backupFrame)) {
+          document.body.removeChild(backupFrame);
         }
-      }, 500);
+      }, 30000);
     } catch {
       // ignore
     }
