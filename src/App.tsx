@@ -2120,16 +2120,21 @@ Export Timestamp: ${new Date().toLocaleString()}
 
   // Calculate real-time metrics
   const hasMatchingServerJob = serverCloudJob && session && isSameNovel(serverCloudJob.fileName, session.fileName);
-  const totalChunks = session?.chunks.length || (hasMatchingServerJob ? serverCloudJob.totalChunks : 0) || 0;
-  const isJobFinished =
-    session?.status === "completed" ||
-    (hasMatchingServerJob && (serverCloudJob.status === "completed" || (serverCloudJob.completedChunks >= totalChunks && totalChunks > 0)));
-  const completedChunks = isJobFinished && totalChunks > 0
-    ? totalChunks
-    : Math.max(
-        (hasMatchingServerJob ? serverCloudJob.completedChunks : 0) || 0,
-        session?.chunks.filter((c) => c.status === "completed").length || 0
-      );
+  const totalChunks = Math.max(
+    session?.chunks.length || 0,
+    (hasMatchingServerJob ? serverCloudJob.totalChunks : 0) || 0,
+    (session as any)?.totalChunks || 0
+  );
+
+  const rawCompletedChunks = Math.max(
+    (hasMatchingServerJob ? serverCloudJob.completedChunks : 0) || 0,
+    (session as any)?.completedChunks || 0,
+    session?.chunks.filter((c) => c.status === "completed" && (c.englishText?.trim() || !mode.includes("cloud"))).length || 0
+  );
+
+  // A novel is TRULY completed ONLY if totalChunks > 0 and ALL chunks are completed!
+  const isTrulyCompleted = totalChunks > 0 && rawCompletedChunks >= totalChunks;
+  const completedChunks = isTrulyCompleted ? totalChunks : rawCompletedChunks;
   const inProgressChunks =
     session?.chunks.filter((c) => c.status === "processing").length || 0;
   const errorChunks =
@@ -2177,12 +2182,7 @@ Export Timestamp: ${new Date().toLocaleString()}
     charsPerSec > 0 ? remainingChars / charsPerSec : 0;
 
   // Explicit completion flag: verified ONLY if all chunks are finished and totalChunks matches
-  const isCompleted =
-    totalChunks > 0 &&
-    completedChunks >= totalChunks &&
-    (session?.status === "completed" ||
-      Boolean(hasMatchingServerJob && serverCloudJob.status === "completed") ||
-      completedChunks === totalChunks);
+  const isCompleted = isTrulyCompleted;
 
   // Dynamic document title reflecting progress or 100% completion
   useEffect(() => {

@@ -559,25 +559,17 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       }
     }
 
-    // 2. Query the unbundled 'chunks' subcollection if segments were missing, incomplete, or if chunks subcollection has more completed chunks
-    const expectedFromData = typeof data.totalChunks === "number" ? data.totalChunks : 0;
-    const isSegmentIncomplete =
-      chunkMap.size === 0 ||
-      (expectedFromData > 0 && chunkMap.size < expectedFromData) ||
-      (jobId === "cloud_job_1790341343060" && chunkMap.size < 404) ||
-      Array.from(chunkMap.values()).some((c) => c.status === "completed" && (!c.englishText || !c.englishText.trim()));
+    // 2. Query the unbundled 'chunks' subcollection to load all translated chapters
+    try {
+      const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
+      const chunksSnap = await getDocs(chunksRef);
 
-    if (isSegmentIncomplete) {
-      try {
-        const chunksRef = collection(db, "translation_jobs", jobId, "chunks");
-        const chunksSnap = await getDocs(chunksRef);
-
-        chunksSnap.forEach((docSnap) => {
-          const c = docSnap.data();
-          const idx = typeof c.index === "number" ? c.index : 0;
-          const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
-          const isCompleted = (c.status === "completed" && hasEnglish) || hasEnglish;
-          const existing = chunkMap.get(idx);
+      chunksSnap.forEach((docSnap) => {
+        const c = docSnap.data();
+        const idx = typeof c.index === "number" ? c.index : 0;
+        const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+        const isCompleted = (c.status === "completed" && hasEnglish) || hasEnglish;
+        const existing = chunkMap.get(idx);
 
           if (
             !existing ||
@@ -603,31 +595,41 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
       } catch (subErr: any) {
         handleFirestoreError(`loadJobFromFirestore(${jobId})/chunks`, subErr);
       }
-    }
 
     const chunks = Array.from(chunkMap.values());
     chunks.sort((a, b) => a.index - b.index);
 
     const completedCount = chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
     const totalCount = Math.max(data.totalChunks || 0, chunks.length);
-    const isCompleted =
-      (totalCount > 0 && chunks.length >= totalCount && completedCount >= totalCount) ||
-      data.status === "completed";
+    const isCompleted = totalCount > 0 && chunks.length >= totalCount && completedCount >= totalCount;
+
+    let completedEnglishWords = 0;
+    let completedChars = 0;
+    for (const c of chunks) {
+      if (c.status === "completed" && c.englishText) {
+        completedEnglishWords += c.englishText.split(/\s+/).filter(Boolean).length;
+      }
+      if (c.status === "completed" && c.charCount) {
+        completedChars += c.charCount;
+      }
+    }
 
     return {
       id: data.id || jobId,
       sessionId: data.sessionId || "legacy_default",
       fileName: data.fileName || "novel.txt",
       fileSizeBytes: data.fileSizeBytes || 0,
-      totalChineseChars: data.totalChineseChars || 0,
+      totalChineseChars: data.totalChineseChars || completedChars || 0,
       chunks,
       totalChunks: totalCount,
-      completedChunks: isCompleted ? (totalCount || completedCount) : completedCount,
+      completedChunks: completedCount,
+      completedEnglishWords: completedEnglishWords || (data.completedEnglishWords || 0),
+      completedChars: completedChars || (data.completedChars || 0),
       style: data.style || "xianxia",
       customInstructions: data.customInstructions || "",
       glossary: data.glossary || [],
       concurrency: data.concurrency || 1,
-      status: isCompleted ? "completed" : (data.status === "completed" && !isCompleted ? "paused" : (data.status || "idle")),
+      status: isCompleted ? "completed" : (data.status === "running" ? "running" : (data.status || "paused")),
       startedAt: data.startedAt || Date.now(),
       lastActiveAt: data.lastActiveAt || Date.now(),
     } as any;
@@ -1083,7 +1085,7 @@ export async function findJobInFirestoreByNovel(targetNovelName: string, totalCh
       // Score matches (completed > in-progress, character match > general match)
       const completedCount = typeof data.completedChunks === "number" ? data.completedChunks : 0;
       const totalCount = typeof data.totalChunks === "number" ? data.totalChunks : 0;
-      const isCompleted = (totalCount > 0 && completedCount >= totalCount) || data.status === "completed";
+      const isCompleted = totalCount > 0 && completedCount >= totalCount;
 
       let score = completedCount;
       if (isCompleted) score += 100000;

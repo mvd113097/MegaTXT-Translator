@@ -1888,20 +1888,35 @@ async function startCloudWorkerLoop() {
             firstChunk = retryCandidate;
             break;
           } else {
-            // Check if this job has completed all its chunks
-            const expectedTotal = (job as any).totalChunks || job.chunks.length;
-            const allCompleted = expectedTotal > 0 &&
-              job.chunks.length >= expectedTotal &&
+            // Check if this job has truly completed ALL its chunks
+            const expectedTotal = Math.max((job as any).totalChunks || 0, job.chunks?.length || 0);
+            const minExpectedFromChars = (job as any).totalChineseChars && (job as any).totalChineseChars > 10000
+              ? Math.floor((job as any).totalChineseChars / 4000)
+              : 1;
+            const trueRequiredTotal = Math.max(expectedTotal, minExpectedFromChars);
+
+            const completedCount = (job.chunks || []).filter(
+              (c) => c.status === "completed" && !!c.englishText?.trim()
+            ).length;
+
+            const allCompleted =
+              trueRequiredTotal > 0 &&
+              job.chunks.length >= trueRequiredTotal &&
+              completedCount >= trueRequiredTotal &&
               job.chunks.every(
                 (c) => c.status === "completed" && c.englishText && c.englishText.trim().length > 0
               );
+
             if (allCompleted && job.status === "running") {
-              console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) completed!`);
+              console.log(`[Cloud Background Worker] Job "${job.fileName}" (${job.sessionId || job.id}) truly completed (${completedCount}/${trueRequiredTotal})!`);
               job.status = "completed";
               job.lastActiveAt = Date.now();
               saveJobToDisk(job.sessionId || "legacy_default", job);
               if (!isSyntheticOrTestJob(job)) {
-                sendTelegramNotification(formatCompletionTelegramMessage(job));
+                const msg = formatCompletionTelegramMessage(job);
+                if (msg) {
+                  sendTelegramNotification(msg);
+                }
               }
             }
           }
@@ -2549,10 +2564,16 @@ loadTelegramSettings();
 
 // Helper to format rich completion Telegram notifications with chunks and English wordcount
 function formatCompletionTelegramMessage(job: CloudJob): string {
-  const totalChunks = job.chunks ? job.chunks.length : 0;
+  const totalChunks = Math.max((job as any).totalChunks || 0, job.chunks ? job.chunks.length : 0);
   const completedChunks = job.chunks
     ? job.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length
     : 0;
+
+  // Strict check: Never send completion telegram if not 100% completed
+  if (totalChunks > 0 && completedChunks < totalChunks) {
+    return "";
+  }
+
   let wordCount = 0;
   let totalChars = job.totalChineseChars || 0;
   if (job.chunks) {
@@ -3474,8 +3495,9 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
       console.log(`[Prepare Job] Found existing novel in Cloud Firestore: "${fsJob.fileName}" (${fsJob.id}, status: ${fsJob.status})`);
       setJobForSession(sessionId, fsJob);
 
-      const isCompleted = fsJob.status === "completed" ||
-        ((fsJob as any).totalChunks > 0 && (fsJob as any).completedChunks >= (fsJob as any).totalChunks);
+      const expectedTotal = Math.max((fsJob as any).totalChunks || 0, fsJob.chunks?.length || 0);
+      const actualCompleted = (fsJob.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const isCompleted = expectedTotal > 0 && actualCompleted >= expectedTotal;
 
       if (isCompleted) {
         fsJob.status = "completed";
@@ -3490,12 +3512,12 @@ app.post("/api/cloud-job/prepare", requireAuthMiddleware, async (req, res) => {
         success: true,
         jobId: fsJob.id,
         fileName: fsJob.fileName,
-        totalChunks: (fsJob as any).totalChunks || fsJob.chunks.length,
-        completedChunks: (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length,
+        totalChunks: expectedTotal,
+        completedChunks: actualCompleted,
         totalChineseChars: fsJob.totalChineseChars || charCount,
         alreadyCompleted: isCompleted,
         isExisting: true,
-        status: fsJob.status,
+        status: isCompleted ? "completed" : fsJob.status,
       });
       return;
     }
@@ -3636,10 +3658,11 @@ app.post("/api/cloud-job/start", requireAuthMiddleware, async (req, res) => {
       (fsJob as any).isDeleted = false;
       setJobForSession(sessionId, fsJob);
 
-      const existingDone = (fsJob as any).completedChunks || fsJob.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-      const existingTotal = (fsJob as any).totalChunks || fsJob.chunks.length;
+      const existingTotal = Math.max((fsJob as any).totalChunks || 0, fsJob.chunks?.length || 0);
+      const existingDone = (fsJob.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const isCompleted = existingTotal > 0 && existingDone >= existingTotal;
 
-      if (fsJob.status === "completed" || (existingTotal > 0 && existingDone >= existingTotal)) {
+      if (isCompleted) {
         console.log(`[Start Job] Novel "${targetName}" already 100% completed (${existingDone}/${existingTotal}). Preserving translation without restart.`);
         fsJob.status = "completed";
         saveJobToDisk(sessionId, fsJob, true);
