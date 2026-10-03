@@ -529,34 +529,38 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
     }
 
     // 1. Try loading chunk structures from compact segments first
-    const segmentsRef = collection(db, "translation_jobs", jobId, "segments");
-    const segmentsSnap = await getDocs(segmentsRef);
-
     const chunkMap = new Map<number, ServerTextChunk>();
-    if (!segmentsSnap.empty) {
-      const segmentDocs: any[] = [];
-      segmentsSnap.forEach((d) => segmentDocs.push(d.data()));
-      segmentDocs.sort((a, b) => (a.segmentIndex || 0) - (b.segmentIndex || 0));
+    try {
+      const segmentsRef = collection(db, "translation_jobs", jobId, "segments");
+      const segmentsSnap = await getDocs(segmentsRef);
 
-      for (const seg of segmentDocs) {
-        if (Array.isArray(seg.chunks)) {
-          for (const c of seg.chunks) {
-            const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
-            const idx = typeof c.index === "number" ? c.index : 0;
-            chunkMap.set(idx, {
-              id: c.id || `chunk_${idx}`,
-              index: idx,
-              chapterTitle: c.chapterTitle || "",
-              chineseText: c.chineseText || "",
-              englishText: c.englishText || "",
-              charCount: typeof c.charCount === "number" ? c.charCount : 0,
-              status: hasEnglish ? "completed" : (c.status === "completed" ? "completed" : (c.status || "pending")),
-              attempts: typeof c.attempts === "number" ? c.attempts : 0,
-              edited: !!c.edited,
-            });
+      if (!segmentsSnap.empty) {
+        const segmentDocs: any[] = [];
+        segmentsSnap.forEach((d) => segmentDocs.push(d.data()));
+        segmentDocs.sort((a, b) => (a.segmentIndex || 0) - (b.segmentIndex || 0));
+
+        for (const seg of segmentDocs) {
+          if (Array.isArray(seg.chunks)) {
+            for (const c of seg.chunks) {
+              const hasEnglish = typeof c.englishText === "string" && c.englishText.trim().length > 0;
+              const idx = typeof c.index === "number" ? c.index : 0;
+              chunkMap.set(idx, {
+                id: c.id || `chunk_${idx}`,
+                index: idx,
+                chapterTitle: c.chapterTitle || "",
+                chineseText: c.chineseText || "",
+                englishText: c.englishText || "",
+                charCount: typeof c.charCount === "number" ? c.charCount : 0,
+                status: hasEnglish ? "completed" : (c.status === "completed" ? "completed" : (c.status || "pending")),
+                attempts: typeof c.attempts === "number" ? c.attempts : 0,
+                edited: !!c.edited,
+              });
+            }
           }
         }
       }
+    } catch (segErr) {
+      // Segments optional fallback
     }
 
     // 2. Query the unbundled 'chunks' subcollection to load all translated chapters
@@ -644,16 +648,17 @@ export async function loadJobFromFirestore(jobId: string): Promise<CloudJob | nu
  */
 export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
   if (!job) return job;
-  const expectedTotal = (job as any).totalChunks || job.chunks?.length || 0;
-  const hasIncompleteText = (job.chunks || []).some(
-    (c) => c.status === "completed" && (!c.englishText || !c.englishText.trim())
-  );
+  const expectedTotal = Math.max((job as any).totalChunks || 0, job.chunks?.length || 0);
+  const completedWithText = (job.chunks || []).filter(
+    (c) => c.status === "completed" && !!c.englishText?.trim()
+  ).length;
+
   if (
     job.chunks &&
     job.chunks.length > 0 &&
     expectedTotal > 0 &&
     job.chunks.length >= expectedTotal &&
-    !hasIncompleteText
+    completedWithText >= expectedTotal
   ) {
     return job;
   }
@@ -662,12 +667,18 @@ export async function loadFullChunksForJob(job: CloudJob): Promise<CloudJob> {
   if (job.id && isCloudStorageAvailable()) {
     const fullFromFs = await loadJobFromFirestore(job.id);
     if (fullFromFs && fullFromFs.chunks && fullFromFs.chunks.length > 0) {
+      const fsCompleted = fullFromFs.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+      const fsTotal = fullFromFs.chunks.length;
+      const isActuallyDone = fsTotal > 0 && fsCompleted >= fsTotal;
+
       return {
         ...job,
         chunks: fullFromFs.chunks,
-        totalChunks: fullFromFs.chunks.length,
-        completedChunks: fullFromFs.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length,
-        status: fullFromFs.status === "completed" ? "completed" : job.status,
+        totalChunks: fsTotal,
+        completedChunks: fsCompleted,
+        completedEnglishWords: (fullFromFs as any).completedEnglishWords || 0,
+        completedChars: (fullFromFs as any).completedChars || fullFromFs.totalChineseChars || job.totalChineseChars,
+        status: isActuallyDone ? "completed" : (fullFromFs.status === "running" ? "running" : "paused"),
         lastActiveAt: Math.max(job.lastActiveAt || 0, fullFromFs.lastActiveAt || 0),
       } as any;
     }
@@ -1087,7 +1098,7 @@ export async function findJobInFirestoreByNovel(targetNovelName: string, totalCh
       const totalCount = typeof data.totalChunks === "number" ? data.totalChunks : 0;
       const isCompleted = totalCount > 0 && completedCount >= totalCount;
 
-      let score = completedCount;
+      let score = completedCount + (data.status === "completed" ? 1000 : 1);
       if (isCompleted) score += 100000;
 
       if (totalChars && data.totalChineseChars && Math.abs(data.totalChineseChars - totalChars) < 50) {

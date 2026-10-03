@@ -15,6 +15,7 @@ import { translateExploreItemsInPlace, translateWithGoogle, translateChapterWith
 import { autoGenerateNovelGlossary } from "./server/glossaryExtractor";
 import {
   initFirestore,
+  isCloudStorageAvailable,
   saveJobToFirestore,
   saveChunkToFirestore,
   saveChunksBatchToFirestore,
@@ -1104,7 +1105,7 @@ function saveJobToDisk(sessionId: string, job?: CloudJob | null, immediate: bool
   }
 }
 
-function mergeMonotonicCloudJobs(jobA: CloudJob, jobB: CloudJob): CloudJob {
+export function mergeMonotonicCloudJobs(jobA: CloudJob, jobB: CloudJob): CloudJob {
   if (!jobA) return jobB;
   if (!jobB) return jobA;
   if (!isSameNovel(jobA.fileName, jobB.fileName)) {
@@ -1504,7 +1505,7 @@ function setJobForSession(sessionId: string, job: CloudJob | null) {
   }
 }
 
-function reconcileAuthoritativeJob(fsJob: CloudJob, dJob?: CloudJob): CloudJob {
+export function reconcileAuthoritativeJob(fsJob: CloudJob, dJob?: CloudJob): CloudJob {
   if (!dJob) return fsJob;
   return mergeMonotonicCloudJobs(fsJob, dJob);
 }
@@ -1627,7 +1628,7 @@ async function loadCloudJobsFromDisk() {
 
       const allSessionKeys = new Set([...firestoreJobs.keys(), ...diskJobs.keys()]);
       for (const sId of allSessionKeys) {
-        const fsJob = firestoreJobs.get(sId);
+        let fsJob = firestoreJobs.get(sId);
         const dJob = diskJobs.get(sId);
 
         // Check if either job is tombstoned
@@ -1648,6 +1649,33 @@ async function loadCloudJobsFromDisk() {
           continue;
         }
 
+        // HYDRATION RULE: If Firestore has a job (summary or partial) whose totalChunks > dJob.chunks.length
+        // or whose completedChunks > dJob completed count or if dJob has 0 chunks,
+        // we MUST hydrate the full Firestore job before reconciling!
+        if (fsJob && fsJob.id && isCloudStorageAvailable()) {
+          const fsExpectedTotal = (fsJob as any).totalChunks || 0;
+          const fsCompleted = (fsJob as any).completedChunks || 0;
+          const dChunksLen = dJob?.chunks?.length || 0;
+          const dCompletedLen = (dJob?.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+
+          if (
+            fsExpectedTotal > dChunksLen ||
+            fsCompleted > dCompletedLen ||
+            fsJob.status === "completed" ||
+            dChunksLen === 0
+          ) {
+            console.log(`[Startup] Hydrating full Firestore chunks for "${fsJob.fileName}" (${fsJob.id}) to resolve potential summary discrepancy (FS total: ${fsExpectedTotal}, Disk chunks: ${dChunksLen})...`);
+            try {
+              const fullHydrated = await loadJobFromFirestore(fsJob.id);
+              if (fullHydrated && fullHydrated.chunks && fullHydrated.chunks.length > 0) {
+                fsJob = fullHydrated;
+              }
+            } catch (err: any) {
+              console.warn(`[Startup] Notice: Could not hydrate full Firestore job ${fsJob.id}:`, err?.message);
+            }
+          }
+        }
+
         let reconciled: CloudJob;
         if (fsJob && dJob) {
           reconciled = reconcileAuthoritativeJob(fsJob, dJob);
@@ -1662,56 +1690,37 @@ async function loadCloudJobsFromDisk() {
           }
         }
 
-        const completedCount = (reconciled.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+        const actualLoadedChunks = reconciled.chunks || [];
+        const actualCompletedCount = actualLoadedChunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
         const expectedTotal = Math.max(
           (reconciled as any).totalChunks || 0,
           (fsJob as any)?.totalChunks || 0,
           (dJob as any)?.totalChunks || 0,
-          reconciled.chunks?.length || 0
-        );
-        const effectiveCompletedCount = Math.max(
-          completedCount,
-          (reconciled as any).completedChunks || 0,
-          (fsJob as any)?.completedChunks || 0,
-          (dJob as any)?.completedChunks || 0
+          actualLoadedChunks.length
         );
 
-        (reconciled as any).totalChunks = expectedTotal;
-        (reconciled as any).completedChunks = effectiveCompletedCount;
+        // Strict authoritative check: A job is ONLY fully completed if actual loaded chunks cover expectedTotal and all are completed
+        const isActuallyDone =
+          expectedTotal > 0 &&
+          actualLoadedChunks.length >= expectedTotal &&
+          actualCompletedCount >= expectedTotal;
 
-        const isFullyDone =
-          (expectedTotal > 0 && effectiveCompletedCount >= expectedTotal) ||
-          fsJob?.status === "completed" ||
-          dJob?.status === "completed" ||
-          reconciled.status === "completed";
-
-        if (isFullyDone) {
+        if (isActuallyDone) {
           reconciled.status = "completed";
-          (reconciled as any).completedChunks = expectedTotal || effectiveCompletedCount;
-        } else if ((reconciled.chunks?.length || 0) === 0) {
-          if (reconciled.id && (reconciled.status === "running" || fsJob?.status === "running" || dJob?.status === "running")) {
-            console.log(`[Startup] Active job "${reconciled.fileName}" had 0 chunks in memory. Loading full chunks from Firestore...`);
-            try {
-              const hydrated = await loadJobFromFirestore(reconciled.id);
-              if (hydrated && hydrated.chunks && hydrated.chunks.length > 0) {
-                reconciled.chunks = hydrated.chunks;
-                (reconciled as any).totalChunks = hydrated.chunks.length;
-                (reconciled as any).completedChunks = hydrated.chunks.filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
-                reconciled.status = "running";
-              } else {
-                reconciled.status = "paused";
-              }
-            } catch {
-              reconciled.status = "paused";
-            }
-          } else {
+          (reconciled as any).totalChunks = expectedTotal;
+          (reconciled as any).completedChunks = expectedTotal;
+        } else {
+          // If not actually done, DO NOT allow stale summary/metadata to mark it completed!
+          if (reconciled.status === "completed") {
             reconciled.status = "paused";
           }
+          (reconciled as any).totalChunks = expectedTotal;
+          (reconciled as any).completedChunks = actualCompletedCount;
         }
 
         cloudJobs.set(sId, reconciled);
         saveJobToDisk(sId, reconciled);
-        console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${(reconciled as any).completedChunks}/${expectedTotal || (reconciled.chunks?.length || 0)} completed, status: ${reconciled.status})`);
+        console.log(`[Startup] Authoritative job registered [${sId}]: "${reconciled.fileName}" (${(reconciled as any).completedChunks}/${expectedTotal} completed, status: ${reconciled.status})`);
       }
     }
 
@@ -1732,9 +1741,14 @@ async function loadCloudJobsFromDisk() {
       if (novelMap.has(key)) {
         const canonical = novelMap.get(key)!;
         const total = (canonical as any).totalChunks || canonical.chunks?.length || 0;
-        const allDone = (total > 0 && canonical.chunks?.length >= total && canonical.chunks.every((c) => c.status === "completed" && !!c.englishText?.trim())) || canonical.status === "completed";
+        const comp = (canonical.chunks || []).filter((c) => c.status === "completed" && !!c.englishText?.trim()).length;
+        const allDone = total > 0 && canonical.chunks?.length >= total && comp >= total;
         if (allDone) {
           canonical.status = "completed";
+          (canonical as any).completedChunks = total;
+        } else if (canonical.status === "completed") {
+          canonical.status = "paused";
+          (canonical as any).completedChunks = comp;
         }
         const finalJob = { ...canonical, sessionId: sId };
         cloudJobs.set(sId, finalJob);
@@ -2207,8 +2221,10 @@ Translate all chapters above into English, returning each inside its exact <<<CH
               inFlightChunkIds.delete(single.id);
               validCount = 1;
 
-              // Opportunistic cloud backup
-              saveChunkToFirestore(targetJob.id, single).catch(() => {});
+              // Durable cloud persistence
+              await saveChunkToFirestore(targetJob.id, single).catch((e) => {
+                console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+              });
             } else {
               const decomp = await translateWithDecomposition(
                 single.chineseText,
@@ -2225,8 +2241,10 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 inFlightChunkIds.delete(single.id);
                 validCount = 1;
 
-                // Opportunistic cloud backup
-                saveChunkToFirestore(targetJob.id, single).catch(() => {});
+                // Durable cloud persistence
+                await saveChunkToFirestore(targetJob.id, single).catch((e) => {
+                  console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+                });
               } else {
                 // Secondary Fallback: Google Translation Engine
                 try {
@@ -2239,7 +2257,9 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                     single.status = "completed";
                     inFlightChunkIds.delete(single.id);
                     validCount = 1;
-                    saveChunkToFirestore(targetJob.id, single).catch(() => {});
+                    await saveChunkToFirestore(targetJob.id, single).catch((e) => {
+                      console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+                    });
                   } else {
                     single.status = "error";
                     single.errorMessage = "Empty translation response received.";
@@ -2276,8 +2296,10 @@ Translate all chapters above into English, returning each inside its exact <<<CH
                 inFlightChunkIds.delete(chunk.id);
                 validCount++;
 
-                // Opportunistic cloud backup
-                saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                // Durable cloud persistence
+                await saveChunkToFirestore(targetJob.id, chunk).catch((e) => {
+                  console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+                });
               } else {
                 console.log(`[Cloud Worker #${workerId}] Batch parsing fallback: translating chunk #${chunk.index + 1} individually...`);
                 let recovered = false;
@@ -2317,8 +2339,10 @@ Translation Guidelines:
                     validCount++;
                     recovered = true;
 
-                    // Opportunistic cloud backup
-                    saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                    // Durable cloud persistence
+                    await saveChunkToFirestore(targetJob.id, chunk).catch((e) => {
+                      console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+                    });
                     continue;
                   }
                 } catch (singleErr: any) {
@@ -2337,7 +2361,9 @@ Translation Guidelines:
                       inFlightChunkIds.delete(chunk.id);
                       validCount++;
                       recovered = true;
-                      saveChunkToFirestore(targetJob.id, chunk).catch(() => {});
+                      await saveChunkToFirestore(targetJob.id, chunk).catch((e) => {
+                        console.warn("[Cloud Worker] Firestore chunk persistence note:", e?.message);
+                      });
                       continue;
                     }
                   } catch {}
@@ -2985,9 +3011,18 @@ app.get("/api/cloud-job/status", async (req, res) => {
   const includeFullText = req.query.full === "true";
   const isSummaryOnly = req.query.summary === "true";
 
-  // CRITICAL FIX: If memory chunks are empty, ALWAYS load chunks from Firestore so that
-  // completedChunks, totalChunks, completedEnglishWords, and frontier are 100% accurate!
-  if (targetJob.chunks.length === 0) {
+  // If memory chunks are incomplete (length < expectedTotal or status is completed but loaded chunks are incomplete),
+  // hydrate full chunks from Firestore so that metrics are 100% authoritative!
+  const rawExpectedTotal = Math.max((targetJob as any).totalChunks || 0, targetJob.chunks?.length || 0);
+  const rawCompletedWithText = (targetJob.chunks || []).filter(
+    (c) => c.status === "completed" && !!c.englishText?.trim()
+  ).length;
+
+  if (
+    targetJob.chunks.length === 0 ||
+    (rawExpectedTotal > 0 && targetJob.chunks.length < rawExpectedTotal) ||
+    (targetJob.status === "completed" && rawCompletedWithText < rawExpectedTotal)
+  ) {
     targetJob = await loadFullChunksForJob(targetJob);
     cloudJobs.set(targetJob.sessionId || getSessionId(req), targetJob);
   }
@@ -2997,31 +3032,30 @@ app.get("/api/cloud-job/status", async (req, res) => {
     startCloudWorkerLoop();
   }
 
-  const expectedTotal = (targetJob as any).totalChunks || targetJob.chunks.length;
-  const isJobComplete =
-    targetJob.status === "completed" ||
-    (expectedTotal > 0 && (targetJob as any).completedChunks >= expectedTotal);
+  const expectedTotal = Math.max((targetJob as any).totalChunks || 0, targetJob.chunks.length);
+  const actualCompletedChunks = (targetJob.chunks || []).filter(
+    (c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))
+  ).length;
 
-  if (isJobComplete && targetJob.status !== "completed") {
+  const isJobTrulyComplete =
+    expectedTotal > 0 &&
+    targetJob.chunks.length >= expectedTotal &&
+    actualCompletedChunks >= expectedTotal;
+
+  if (isJobTrulyComplete && targetJob.status !== "completed") {
     targetJob.status = "completed";
+    (targetJob as any).completedChunks = expectedTotal;
+    saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
+  } else if (!isJobTrulyComplete && targetJob.status === "completed") {
+    // Stale completed status without actual complete chunks must NOT stand
+    targetJob.status = "paused";
+    (targetJob as any).completedChunks = actualCompletedChunks;
     saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
   }
 
-  const completedChunks = isJobComplete
-    ? expectedTotal
-    : (targetJob.chunks.length > 0
-        ? targetJob.chunks.filter((c) => c.status === "completed" && (!!c.englishText?.trim() || (c.wordCount && c.wordCount > 0))).length
-        : ((targetJob as any).completedChunks || 0));
-  const inProgressChunks = isJobComplete ? 0 : targetJob.chunks.filter((c) => c.status === "processing").length;
+  const completedChunks = isJobTrulyComplete ? expectedTotal : actualCompletedChunks;
+  const inProgressChunks = isJobTrulyComplete ? 0 : targetJob.chunks.filter((c) => c.status === "processing").length;
   const errorChunks = targetJob.chunks.filter((c) => c.status === "error").length;
-
-  if (expectedTotal > 0 && completedChunks >= expectedTotal && targetJob.status !== "completed") {
-    targetJob.status = "completed";
-    saveJobToDisk(targetJob.sessionId || getSessionId(req), targetJob);
-    if (!isSyntheticOrTestJob(targetJob)) {
-      sendTelegramNotification(formatCompletionTelegramMessage(targetJob));
-    }
-  }
 
   // Calculate contiguous completion frontier from index 0
   let contiguousFrontierIndex = -1;
@@ -3045,9 +3079,10 @@ app.get("/api/cloud-job/status", async (req, res) => {
         .filter((c) => c.status === "completed")
         .reduce((acc, c) => acc + (c.englishText ? countEnglishWords(c.englishText) : (c.wordCount || 0)), 0)
     : 0;
+
   const completedEnglishWords = (isSameNovel(targetJob.fileName, "primitive chen qi") || isSameNovel(targetJob.fileName, "穿越兽世当神棍"))
     ? Math.max(455147, (targetJob as any).completedEnglishWords || 0, countedEnglishWords)
-    : Math.max((targetJob as any).completedEnglishWords || 0, countedEnglishWords);
+    : (isJobTrulyComplete ? Math.max((targetJob as any).completedEnglishWords || 0, countedEnglishWords) : countedEnglishWords);
 
   const countedChars = targetJob.chunks.length > 0
     ? targetJob.chunks

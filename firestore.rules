@@ -47,6 +47,11 @@ service cloud.firestore {
         allow create, update: if isValidId(jobId) && isValidId(chunkId) && isValidChunk(request.resource.data);
         allow delete: if isValidId(jobId) && isValidId(chunkId);
       }
+
+      // Compact segments subcollection
+      match /segments/{segmentId} {
+        allow read, write: if isValidId(jobId) && isValidId(segmentId);
+      }
     }
     // Deleted jobs tombstones to permanently prevent re-importing or resurrecting deleted novels
     match /deleted_jobs/{tombstoneId} {
